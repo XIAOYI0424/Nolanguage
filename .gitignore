@@ -1,0 +1,18 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+
+# Stage 6 · baseline system: local telemetry database + cold-tier archive
+.nolanguage/
+.codebudy/app.json
+.codebudy/appearance.json
+.codebudy/core-plugins.json
+.codebudy/workspace.json
+.workbuddy-ai/memory/2026-10-14.md
+.workbuddy-ai/memory/MEMORY.md
+build-to-exe.bat
+方案.md
+.test-out.txt
+tests/phase1.test.ts
