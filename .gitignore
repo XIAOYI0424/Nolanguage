@@ -4,6 +4,14 @@ build/
 *.log
 .DS_Store
 
+# Tauri shell: build artefacts and the engine sidecar placed next to the app
+# (`externalBin` names it `binaries/Nolanguage-<triple>`; `tauri build` copies
+# it in, and a bare `cargo build` needs the same copy to run).
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/
+frontend/dist/
+
 # Stage 6 · baseline system: local telemetry database + cold-tier archive
 .nolanguage/
 .codebudy/app.json
@@ -15,4 +23,21 @@ build/
 build-to-exe.bat
 方案.md
 .test-out.txt
+# Scratch space for the verification suites (packaged-exe sandbox, explorer
+# workspace, ad-hoc probes). Never committed.
+.tmp/
 tests/phase1.test.ts
+.workbuddy-ai/memory/2026-10-15.md
+.workbuddy-ai/memory/2026-10-17.md
+.gitignore
+.github/workflows/ci.yml
+.cargo/config.toml
+.obsidian/app.json
+.obsidian/appearance.json
+.obsidian/core-plugins.json
+.obsidian/workspace.json
+逻辑文档/20261016_PyCharm功能差距.md
+逻辑文档/20261016_Tauri化UI架构设计.md
+docs/添加新语言指南.md
+项目现状报告.md
+语言插件化设计.md

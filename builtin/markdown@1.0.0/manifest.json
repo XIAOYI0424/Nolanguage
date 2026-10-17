@@ -1,0 +1,83 @@
+{
+  "id": "markdown",
+  "displayName": "Markdown",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "nolanguage",
+  "description": "Markdown documents render instead of running — the plugin declares no `run` block at all.",
+  "order": 40,
+  "trust": {
+    "sandbox": "none"
+  },
+  "file": {
+    "extensions": [
+      "md",
+      "markdown",
+      "mdx"
+    ],
+    "defaultExt": "md",
+    "fileName": "notes.md"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "```[\\s\\S]*?```",
+        "cls": "s"
+      },
+      {
+        "re": "`[^`\\n]*`",
+        "cls": "s"
+      },
+      {
+        "re": "^#{1,6}[^\\n]*",
+        "cls": "k",
+        "flags": "m"
+      },
+      {
+        "re": "\\*\\*[^\\n]+\\*\\*",
+        "cls": "b"
+      },
+      {
+        "re": "\\*[^\\n*]+\\*",
+        "cls": "d"
+      },
+      {
+        "re": "\\[[^\\]]*\\]\\([^)]*\\)",
+        "cls": "f"
+      },
+      {
+        "re": "^[ ]*[-*+][ ]",
+        "cls": "k",
+        "flags": "m"
+      },
+      {
+        "re": "^>[^\\n]*",
+        "cls": "c",
+        "flags": "m"
+      }
+    ]
+  },
+  "lsp": {
+    "discovery": {
+      "commands": [
+        "marksman"
+      ],
+      "envVars": [
+        "MARKSMAN"
+      ],
+      "knownPaths": [
+        "~/.local/bin/marksman"
+      ]
+    },
+    "command": [
+      "{resolved}"
+    ],
+    "languageId": "markdown",
+    "serverName": "marksman",
+    "memoryHint": "20MB",
+    "degradedNote": "marksman not installed — rendering, outline and breadcrumbs still work",
+    "args": [
+      "server"
+    ]
+  }
+}

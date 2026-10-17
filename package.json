@@ -6,6 +6,7 @@
   "description": "Unified multi-language dev & execution platform — stages 1–6: minimal kernel (three buses + performance & log spines), live dev panel (WebSocket + UI), a Python + LSP closed loop (RPC instrumentation + LSP log collection), an interactive multi-language workspace (write, run, check, complete), Go support (toolchain discovery + GoRunner + gopls), and a baseline system (git commit 打点 + SQLite warm tier + long-term metric baselines).",
   "scripts": {
     "demo": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/demo.ts",
+    "demo:extensions": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/demo-extensions.ts",
     "ide": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/panel/server.ts",
     "panel": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/panel/server.ts",
     "panel:python": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/panel/server.ts",
@@ -15,21 +16,33 @@
     "verify:stage2": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-panel.ts",
     "verify:stage3": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-stage3.ts",
     "verify:ide": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-ide.ts",
-    "verify:ide-ui": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/check-ide-html.ts",
+    "verify:ui": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-pycharm.ts",
     "verify:ui-dom": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-ui-dom.ts",
     "verify:go": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-go.ts",
     "verify:smoke": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/smoke-exe.ts",
     "verify:baseline": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-baseline.ts",
+    "verify:extensions": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-extensions.ts",
     "build:exe": "node scripts/build-exe.mjs",
+    "build:frontend": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/build-frontend.mjs",
+    "serve:dist": "node scripts/serve-dist.mjs",
+    "build:tauri-icons": "node scripts/make-tauri-icons.mjs",
+    "verify:transport": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-transport.ts",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
     "verify:logcollector": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/test-logcollector.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run"
   },
   "devDependencies": {
-    "@types/node": "^20.12.0",
+    "@tauri-apps/cli": "^2.12.3",
+    "@types/node": "^22.13.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vitest": "^1.4.0"
+  },
+  "dependencies": {
+    "@tauri-apps/plugin-dialog": "^2.8.3"
   }
 }

@@ -26,23 +26,42 @@ export class RawWsClient {
   private hsDone = false;
   private expected = '';
   private closed = false;
+  /**
+   * The last socket error seen. Retained because a failed write/read must not
+   * tear down the process; callers diagnose from `ready` or from a missing
+   * reply instead.
+   */
+  lastError: Error | undefined;
 
   constructor(
     private port: number,
     private path = '/',
     host = '127.0.0.1',
+    /** Extra handshake headers, e.g. `origin` for the upgrade-origin checks. */
+    private extraHeaders: Record<string, string> = {},
   ) {
     this.socket = connect(port, host);
+    // The socket can fail at any moment — during the handshake, while a command
+    // is in flight, or after the server has already gone. `EventEmitter` throws
+    // on an `'error'` with no listener, which would abort the whole suite with
+    // an unhandled rejection, so install a permanent handler first. The
+    // handshake promise surfaces the failure through its own channel.
+    this.lastError = undefined;
+    this.socket.on('error', (err: Error) => {
+      this.lastError = err;
+    });
     this.ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('handshake timeout')), 10_000);
-      this.socket.on('error', reject);
       this.socket.on('connect', () => {
         const key = randomBytes(16).toString('base64');
         this.expected = createHash('sha1').update(key + GUID).digest('base64');
+        const extra = Object.entries(this.extraHeaders)
+          .map(([k, v]) => `${k}: ${v}\r\n`)
+          .join('');
         this.socket.write(
           `GET ${this.path} HTTP/1.1\r\nHost: ${host}:${this.port}\r\n` +
             `Upgrade: websocket\r\nConnection: Upgrade\r\n` +
-            `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+            `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`,
         );
       });
       this.socket.on('data', (c: Buffer) => {
@@ -63,6 +82,15 @@ export class RawWsClient {
           if (rest.length) this.push(rest);
         } else {
           this.push(c);
+        }
+      });
+      // Surfaces a pre-handshake failure (ECONNRESET / ECONNREFUSED) as a
+      // rejection instead of leaving `ready` pending forever.
+      this.socket.on('close', () => {
+        this.closed = true;
+        if (!this.hsDone) {
+          clearTimeout(timer);
+          reject(this.lastError ?? new Error('socket closed before handshake'));
         }
       });
     });
@@ -114,6 +142,10 @@ export class RawWsClient {
   }
 
   private sendFrame(opcode: number, payload: Buffer): void {
+    // A half-dead socket fails *asynchronously*: `write()` returns fine and the
+    // error surfaces later. Check both flags first, and swallow the synchronous
+    // throw — the permanent `'error'` listener already recorded it.
+    if (this.socket.destroyed || this.closed || !this.socket.writable) return;
     const mask = randomBytes(4);
     let header: Buffer;
     if (payload.length < 126) {
@@ -126,7 +158,11 @@ export class RawWsClient {
     }
     const masked = Buffer.from(payload);
     for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i & 3];
-    this.socket.write(Buffer.concat([header, mask, masked]));
+    try {
+      this.socket.write(Buffer.concat([header, mask, masked]));
+    } catch (err) {
+      this.lastError = err instanceof Error ? err : new Error(String(err));
+    }
   }
 
   send(obj: unknown): void {

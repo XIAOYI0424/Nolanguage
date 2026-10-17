@@ -1,0 +1,62 @@
+/**
+ * Python profiling bootstrap (stdlib only: cProfile + pstats).
+ *
+ * Usage: `python profile.py <snippet.py> <out.json>`
+ * It execs the snippet under cProfile, then writes a JSON report with the raw
+ * pstats rows (function, calls, tottime, cumtime) so the Node side can
+ * normalise them into hotspots. Inlined as a string constant so it bundles
+ * into the packaged exe with no asset embedding.
+ */
+export const PYTHON_PROFILE_SRC = [
+  'import cProfile, pstats, json, sys, io, time, traceback, contextlib',
+  '',
+  'snippet_path, out_path = sys.argv[1], sys.argv[2]',
+  'with open(snippet_path, "r", encoding="utf-8") as f:',
+  '    code = f.read()',
+  '',
+  'g = {}',
+  'out = io.StringIO()',
+  'err = io.StringIO()',
+  'pr = cProfile.Profile()',
+  'ok = True',
+  'error = None',
+  't0 = time.perf_counter()',
+  'try:',
+  '    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):',
+  '        pr.enable()',
+  '        try:',
+  '            exec(compile(code, "<profile>", "exec"), g)',
+  '        finally:',
+  '            pr.disable()',
+  'except BaseException:',
+  '    ok = False',
+  '    error = traceback.format_exc()',
+  'wall = (time.perf_counter() - t0) * 1000.0',
+  '',
+  'rows = []',
+  'try:',
+  '    stats = pstats.Stats(pr)',
+  '    for func, (cc, nc, tt, ct, callers) in stats.stats.items():',
+  '        filename, lineno, name = func',
+  '        rows.append({',
+  '            "file": filename,',
+  '            "line": lineno,',
+  '            "name": name,',
+  '            "calls": nc,',
+  '            "primitiveCalls": cc,',
+  '            "tottimeMs": tt * 1000.0,',
+  '            "cumtimeMs": ct * 1000.0,',
+  '        })',
+  'except Exception as e:',
+  '    error = ((error + "\\n") if error else "") + "stats failed: " + str(e)',
+  '',
+  'with open(out_path, "w", encoding="utf-8") as f:',
+  '    json.dump({',
+  '        "wallMs": wall,',
+  '        "ok": ok,',
+  '        "error": error,',
+  '        "stdout": out.getvalue(),',
+  '        "stderr": err.getvalue(),',
+  '        "rows": rows,',
+  '    }, f)',
+].join('\n');

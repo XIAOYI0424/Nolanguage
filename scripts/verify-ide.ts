@@ -13,13 +13,24 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { RawWsClient } from './lib/RawWsClient.js';
 import { sampleById } from '../src/panel/samples.js';
+import { resolveGoBin, discoverGoServer } from '../src/go/discover.js';
 
 const PORT = Number(process.env.VERIFY_PORT ?? 7510);
 
-const results: { name: string; ok: boolean; detail: string }[] = [];
+const results: { name: string; ok: boolean; detail: string; skipped?: boolean }[] = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+}
+
+/**
+ * An optional external tool is absent, so the check could not run. Kept apart
+ * from PASS/FAIL so the report neither overstates what was verified nor blames
+ * this project for a machine without `gopls`.
+ */
+function skip(name: string, detail = ''): void {
+  results.push({ name, ok: true, detail, skipped: true });
+  console.log(`SKIP  ${name}${detail ? '  — ' + detail : ''}`);
 }
 
 async function waitForHttp(port: number, ms: number): Promise<unknown> {
@@ -226,6 +237,10 @@ async function main(): Promise<void> {
     }
 
     // ---------- Go over the same protocol ----------
+    // `gopls` is optional: a machine can run Go without a language server, and
+    // the platform is required to keep working in that state. Probe it here so
+    // the LSP-dependent assertions below can skip instead of fail.
+    const hasGopls = !!discoverGoServer(resolveGoBin()).launch;
     const goLang = ((wsMsg?.status as { languages?: Array<{ id: string; available: boolean; version?: string }> })
       ?.languages ?? []).find((l) => l.id === 'go');
     if (!goLang?.available) {
@@ -280,6 +295,10 @@ async function main(): Promise<void> {
       check('go test reports the failing test', /--- FAIL/.test(String(g4?.stdout ?? '')), '');
 
       // ---- diagnostics ----
+      // The Go *toolchain* can be present while `gopls` is not. Diagnostics and
+      // completion then have no server to ask, which is a supported state (the
+      // UI says "diagnosis unavailable") — so those assertions skip rather than
+      // fail. The protocol round-trip below still runs either way.
       client.clearReceived();
       client.send({
         kind: 'check',
@@ -288,13 +307,19 @@ async function main(): Promise<void> {
       });
       const gdiag = await client.waitFor('diagnostics', 40_000);
       const gItems = (gdiag?.items ?? []) as Array<{ message: string; line: number }>;
-      check('go check returns diagnostics', !!gdiag && gItems.length > 0, `${gItems.length} item(s)`);
-      check('go diagnostics come from gopls', gdiag?.fromLsp === true, String(gdiag?.language ?? ''));
-      check(
-        'go undefined identifier reported',
-        gItems.some((i) => /undefined/i.test(i.message)),
-        gItems.map((i) => i.message).slice(0, 2).join(' | '),
-      );
+      if (hasGopls) {
+        check('go check returns diagnostics', !!gdiag && gItems.length > 0, `${gItems.length} item(s)`);
+        check('go diagnostics come from gopls', gdiag?.fromLsp === true, String(gdiag?.language ?? ''));
+        check(
+          'go undefined identifier reported',
+          gItems.some((i) => /undefined/i.test(i.message)),
+          gItems.map((i) => i.message).slice(0, 2).join(' | '),
+        );
+      } else {
+        check('go check still answers without gopls', !!gdiag, `${gItems.length} item(s), fromLsp=${String(gdiag?.fromLsp)}`);
+        skip('go diagnostics come from gopls', 'gopls not installed');
+        skip('go undefined identifier reported', 'gopls not installed');
+      }
 
       // ---- completion ----
       client.clearReceived();
@@ -308,12 +333,17 @@ async function main(): Promise<void> {
       });
       const gcomp = await client.waitFor('completion', 40_000);
       const gCompItems = (gcomp?.items ?? []) as Array<{ label: string }>;
-      check('go completion returns items', gCompItems.length > 0, `${gCompItems.length} items`);
-      check(
-        'go completion includes Println',
-        gCompItems.some((i) => i.label === 'Println'),
-        gCompItems.slice(0, 5).map((i) => i.label).join(','),
-      );
+      if (hasGopls) {
+        check('go completion returns items', gCompItems.length > 0, `${gCompItems.length} items`);
+        check(
+          'go completion includes Println',
+          gCompItems.some((i) => i.label === 'Println'),
+          gCompItems.slice(0, 5).map((i) => i.label).join(','),
+        );
+      } else {
+        skip('go completion returns items', 'gopls not installed');
+        skip('go completion includes Println', 'gopls not installed');
+      }
       check('go completion echoes its language', gcomp?.language === 'go', String(gcomp?.language ?? ''));
 
       // ---- an unknown language must not break the socket ----
@@ -402,7 +432,8 @@ async function main(): Promise<void> {
   }
 
   const failed = results.filter((r) => !r.ok);
-  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+  const skipped = results.filter((r) => r.skipped).length;
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed${skipped ? ` (${skipped} skipped: optional tool missing)` : ''}`);
   if (failed.length) {
     console.log('failed: ' + failed.map((f) => f.name).join('; '));
     console.log('--- server output (tail) ---\n' + serverOut.slice(-2000));

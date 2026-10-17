@@ -1,14 +1,12 @@
 /**
- * UI DOM test — mounts the *real* pages in jsdom and drives them.
+ * UI DOM test — mounts the Dev Panel pages (monitor + perf) in jsdom and drives
+ * them against a fake WebSocket, proving the Vue apps really populate from the
+ * server's frames.
  *
- * The static checks (`check-ide-html.ts`) prove the markup is self-contained
- * and that the scripts parse; this one proves the page actually works: Vue
- * compiles the in-DOM template, the app mounts, the editor renders the sample,
- * language switching swaps the buffer, and every websocket message the server
- * can send produces the right DOM.
- *
- * The page talks to a fake WebSocket, so no server is needed and the run is
- * deterministic.
+ * The old Vue IDE workspace page was removed in favour of the PyCharm-style
+ * shell (`/pycharm`, served at `/`); its DOM coverage now lives in
+ * `verify-pycharm.ts`, which mounts that shell the same way. The self-contained
+ * static checks live in `check-panel-html.ts` / `check-perf-html.ts`.
  *
  * jsdom lives in the isolated node workspace (like esbuild/postject), never in
  * the project's dependency list. When it is missing the suite reports SKIP and
@@ -16,13 +14,14 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ui-dom.ts
  */
-import { join } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
-import { renderIdeHtml } from '../src/panel/ide.js';
+import { fileURLToPath } from 'node:url';
 import { renderPanelHtml } from '../src/panel/ui.js';
-import { SAMPLES, LANGUAGES } from '../src/panel/samples.js';
+import { renderPerfHtml } from '../src/panel/perf-ui.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const results: Array<[string, boolean, string]> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -33,10 +32,15 @@ function check(name: string, ok: boolean, detail = ''): void {
 let JSDOM: any;
 let VirtualConsole: any;
 try {
-  const require = createRequire(join(TOOLS, 'package.json'));
-  ({ JSDOM, VirtualConsole } = require('jsdom'));
+  try {
+    const require = createRequire(join(TOOLS, 'package.json'));
+    ({ JSDOM, VirtualConsole } = require('jsdom'));
+  } catch {
+    const require = createRequire(join(ROOT, 'package.json'));
+    ({ JSDOM, VirtualConsole } = require('jsdom'));
+  }
 } catch {
-  console.log('SKIP  jsdom not available in the isolated workspace — UI DOM test skipped');
+  console.log('SKIP  jsdom not available (isolated workspace or project node_modules) — UI DOM test skipped');
   console.log('0/0 checks passed');
   process.exit(0);
 }
@@ -106,223 +110,6 @@ function fire(w: any, el: any, type: string, init: Record<string, unknown> = {})
   const Ctor =
     type === 'click' ? w.MouseEvent : type === 'keydown' || type === 'keyup' ? w.KeyboardEvent : w.Event;
   el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, ...init }));
-}
-
-// =============================================================== IDE
-
-async function testIde(): Promise<void> {
-  FakeSocket.instances = [];
-  const html = renderIdeHtml(7310, SAMPLES, LANGUAGES);
-  const { window: w, socket } = mountPage(html);
-  await settle(w);
-
-  // ---- mount & editor ----
-  const ta = q(w, '#code');
-  check('IDE: Vue mounts the workspace shell', !!q(w, '#app header') && !!ta);
-  const firstPy = SAMPLES.find((s) => s.languageId === 'python');
-  check('IDE: the first Python sample is loaded into the buffer', ta.value === (firstPy ? firstPy.code : null));
-  check(
-    'IDE: gutter renders one row per line',
-    qa(w, '.gutter .ln').length === ta.value.split('\n').length,
-    `${qa(w, '.gutter .ln').length} rows`,
-  );
-  const hl = q(w, '#highlight');
-  check(
-    'IDE: the highlight overlay tokenises Python',
-    hl.innerHTML.indexOf('t-kw') !== -1 && hl.innerHTML.indexOf('t-com') !== -1,
-    `${hl.innerHTML.length} chars of markup`,
-  );
-  check('IDE: the app opens a websocket', socket.url.endsWith('/'));
-  check('IDE: the connection indicator reports connected', qa(w, '.conn span')[1].textContent === 'connected');
-
-  // ---- typing: model, overlay and gutter all follow ----
-  ta.value = 'x = 1  # hello';
-  fire(w, ta, 'input');
-  await settle(w);
-  const hl2 = q(w, '#highlight').innerHTML;
-  check('IDE: typing updates the overlay', hl2.indexOf('hello') !== -1 && hl2.indexOf('t-num') !== -1);
-  check('IDE: typing updates the gutter', qa(w, '.gutter .ln').length === 1, 'one line');
-  check('IDE: the status bar follows the caret', /Ln 1, Col 15/.test(q(w, '#fCursor').textContent), q(w, '#fCursor').textContent);
-
-  // ---- language switch ----
-  const langSel = q(w, 'header select');
-  langSel.value = 'go';
-  fire(w, langSel, 'change');
-  await settle(w);
-  const goDesc = LANGUAGES.find((l) => l.id === 'go');
-  const firstGo = SAMPLES.find((s) => s.languageId === 'go');
-  check('IDE: switching to Go swaps the file tab', q(w, '#editorCol .tab').textContent === (goDesc ? goDesc.fileName : ''));
-  check('IDE: switching to Go loads a Go sample', ta.value === (firstGo ? firstGo.code : null));
-  check('IDE: the Go highlighter is active', q(w, '#highlight').innerHTML.indexOf('t-kw') !== -1);
-  check('IDE: Go shows the Test action', qa(w, 'header button').some((b) => b.textContent.indexOf('Test') !== -1));
-
-  // ---- smart indent: Enter after a colon indents ----
-  ta.value = 'def f():';
-  fire(w, ta, 'input');
-  await settle(w);
-  ta.selectionStart = ta.value.length;
-  ta.selectionEnd = ta.value.length;
-  fire(w, ta, 'keydown', { key: 'Enter' });
-  await settle(w);
-  check('IDE: smart indent after a colon', ta.value === 'def f():\n    ', JSON.stringify(ta.value));
-
-  // ---- back to Python for the message-driven checks ----
-  langSel.value = 'python';
-  fire(w, langSel, 'change');
-  await settle(w);
-  ta.value = 'def greet(name):\n    return "hi " + name\n\nprint(greet("world"))\n';
-  fire(w, ta, 'input');
-  await settle(w);
-
-  // ---- diagnostics ----
-  socket.deliver({
-    kind: 'diagnostics',
-    language: 'python',
-    uri: 'file:///main.py',
-    items: [
-      {
-        line: 3,
-        character: 6,
-        severity: 1,
-        severityName: 'error',
-        message: 'greet is not defined',
-        code: 'reportUndefinedVariable',
-      },
-    ],
-    errors: 1,
-    warnings: 0,
-    fromLsp: true,
-    note: '',
-  });
-  await settle(w);
-  check('IDE: diagnostics switch to the Problems tab', q(w, '#panel-prob') !== null);
-  check('IDE: the problem is listed', q(w, '.prob .msg').textContent.indexOf('greet is not defined') !== -1);
-  check('IDE: the problems pill counts it', q(w, '#sideCol .pill').textContent === '1');
-  check('IDE: the diagnostic line is marked in the gutter', qa(w, '.gutter .ln.err').length === 1);
-
-  // clicking a problem moves the caret to that line
-  q(w, '.prob').click();
-  await settle(w);
-  check('IDE: clicking a problem moves the caret', q(w, '#fCursor').textContent === 'Ln 4, Col 7', q(w, '#fCursor').textContent);
-
-  // ---- run ----
-  const runBtn = qa(w, 'header button').find((b) => b.textContent.indexOf('Run') !== -1) as any;
-  runBtn.click();
-  await settle(w);
-  const runMsg = socket.lastSentOf('run');
-  check(
-    'IDE: Run sends the buffer',
-    !!runMsg && runMsg.language === 'python' && String(runMsg.code).indexOf('greet') !== -1,
-  );
-  check('IDE: Run goes busy', runBtn.textContent === 'Running…');
-  socket.deliver({
-    kind: 'runResult',
-    language: 'python',
-    mode: 'run',
-    runId: 'r1',
-    sessionId: 'ide',
-    exitCode: 0,
-    signal: null,
-    stdout: 'hi world\n',
-    stderr: '',
-    durationMs: 42,
-    timedOut: false,
-    logLines: 1,
-  });
-  await settle(w);
-  check('IDE: the run output is rendered', q(w, '#out').textContent.indexOf('hi world') !== -1);
-  check('IDE: the meta line reports exit 0', q(w, '#out .meta').textContent.indexOf('exit 0') !== -1);
-  check('IDE: the status bar counts the run', q(w, '#fRuns').textContent === 'runs 1');
-  check('IDE: Run leaves the busy state', runBtn.textContent === 'Run');
-
-  // ---- completion: typing a dot asks the language server ----
-  ta.value = 'x.';
-  fire(w, ta, 'input');
-  await settle(w);
-  const complete = socket.lastSentOf('complete');
-  check('IDE: typing a dot requests completions', !!complete && complete.language === 'python', `requestId ${complete ? complete.requestId : '-'}`);
-  socket.deliver({
-    kind: 'completion',
-    language: 'python',
-    requestId: complete ? complete.requestId : -1,
-    items: [
-      { label: 'print(value)', kind: 3, detail: 'builtin' },
-      { label: 'property(value)', kind: 10, detail: '' },
-    ],
-  });
-  await settle(w);
-  check('IDE: the completion popup opens', q(w, '#completion').classList.contains('open'));
-  check('IDE: suggestions are listed', qa(w, '#completion .item').length === 2);
-  check('IDE: the first suggestion is selected', q(w, '#completion .item.sel').textContent.indexOf('print') !== -1);
-
-  // a stale response (old requestId) must be ignored
-  const before = qa(w, '#completion .item').length;
-  socket.deliver({ kind: 'completion', language: 'python', requestId: -999, items: [{ label: 'zzz', kind: 1 }] });
-  await settle(w);
-  check('IDE: a stale completion response is dropped', qa(w, '#completion .item').length === before);
-
-  // picking the first suggestion inserts its name
-  qa(w, '#completion .item')[0].dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-  await settle(w);
-  // The typed prefix ("x.") is replaced wholesale — same rule as the pre-Vue page.
-  check('IDE: accepting a suggestion replaces the typed prefix', ta.value === 'print', JSON.stringify(ta.value));
-
-  // ---- logs ----
-  const logsTab = qa(w, '#sideCol .tab').find((t) => t.textContent.indexOf('Logs') !== -1) as any;
-  logsTab.click();
-  await settle(w);
-  check('IDE: the Logs tab opens', q(w, '#panel-logs') !== null);
-  socket.deliver({
-    kind: 'log',
-    records: [
-      {
-        id: 'l1',
-        ts: Date.now(),
-        level: 3,
-        levelName: 'WARN',
-        component: 'kernel.commands',
-        message: 'slow command',
-        fields: { ms: 12 },
-        traceId: 'abcdef1234567890',
-      },
-      { id: 'l2', ts: Date.now(), level: 2, levelName: 'INFO', component: 'lsp.pyright', message: 'indexed' },
-    ],
-  });
-  await settle(w);
-  const rows = qa(w, '.logrow');
-  check('IDE: log records render newest first', rows.length === 2 && rows[0].textContent.indexOf('indexed') !== -1);
-  check('IDE: structured fields are shown', rows[1].textContent.indexOf('"ms":12') !== -1);
-  const levelSel = q(w, '#sideCol .tabBar select');
-  levelSel.value = '4';
-  fire(w, levelSel, 'change');
-  await settle(w);
-  check('IDE: the level filter hides WARN/INFO', qa(w, '.logrow').length === 0, `${qa(w, '.logrow').length} rows at ERROR`);
-  levelSel.value = '2';
-  fire(w, levelSel, 'change');
-  await settle(w);
-  check('IDE: relaxing the filter shows them again', qa(w, '.logrow').length === 2);
-
-  // ---- metrics ----
-  const perfTab = qa(w, '#sideCol .tab').find((t) => t.textContent.indexOf('Performance') !== -1) as any;
-  perfTab.click();
-  await settle(w);
-  socket.deliver({
-    kind: 'metrics',
-    tick: 7,
-    metrics: {
-      'execution.run': { count: 3, p50: 12, p95: 260, p99: 300, min: 5, max: 300, mean: 40 },
-      'command.run': { count: 5, p50: 1, p95: 2, p99: 3, min: 0, max: 3, mean: 1 },
-    },
-    series: { 'execution.run': [1, 2, 3, 4] },
-  });
-  await settle(w);
-  const metricRows = qa(w, '#panel-perf .metric');
-  check('IDE: metrics are grouped', metricRows.length === 2, `${metricRows.length} rows`);
-  check('IDE: a slow metric is flagged', q(w, '#panel-perf .metric.err') !== null);
-  check('IDE: sparklines render bars', qa(w, '#panel-perf svg rect').length === 4, '4 rects for 4 samples');
-  check('IDE: the metric text shows percentiles', q(w, '#panel-perf .metric .stat').textContent.indexOf('P95') !== -1);
-
-  w.close();
 }
 
 // ============================================================ monitor
@@ -411,9 +198,199 @@ async function testMonitor(): Promise<void> {
   w.close();
 }
 
-await testIde();
-console.log('');
+// =============================================================== perf
+
+/**
+ * Kernel performance analysis page. Drives the real app with a digest shaped
+ * like the server's (short + full metric summaries, a record mix, and a slow
+ * span with a trace id) and asserts the analytical surfaces really populate:
+ * KPI strip, subsystem attribution, sortable metric table, selectable trend
+ * detail, slow-path histogram/table and the record-mix bars.
+ */
+async function testPerf(): Promise<void> {
+  FakeSocket.instances = [];
+  const { window: w, socket } = mountPage(renderPerfHtml(7310));
+  await settle(w);
+
+  check('perf: Vue mounts the analysis shell', !!q(w, '#app header') && !!q(w, '#kpis'));
+
+  socket.deliver({
+    kind: 'hello',
+    appVersion: '0.6.0-workspace',
+    arch: 'x64',
+    os: 'Windows 11',
+    pushIntervalMs: 1000,
+    commands: [{ id: 'baseline.checkpoint', title: 'Capture a metric baseline' }],
+  });
+  socket.deliver({
+    kind: 'metrics',
+    tick: 12,
+    clients: 1,
+    perfSummary: { total: 480, byType: { metric: 300, sample: 120, event: 60 } },
+    metrics: {
+      'command.run': { count: 40, min: 0.2, max: 12, avg: 2.5, p50: 2.1, p95: 8.4, p99: 11.2 },
+      'rpc.roundtrip.initialize': { count: 3, min: 120, max: 480, avg: 300, p50: 290, p95: 460, p99: 478 },
+      'execution.run': { count: 12, min: 8, max: 260, avg: 70, p50: 40, p95: 250, p99: 259 },
+      // A byte gauge with a huge magnitude: it must never be treated as a
+      // latency or ranked as the worst p95 (see the unit checks below).
+      'memory.rss': { count: 11, min: 73895936, max: 78503936, avg: 75798341, p50: 73908224, p95: 78503936, p99: 78503936 },
+    },
+    series: {
+      'command.run': [1, 2, 3, 4, 5],
+      'rpc.roundtrip.initialize': [100, 200, 300],
+      'execution.run': [10, 30, 60, 90],
+      'memory.rss': [75000000, 76000000, 77000000],
+    },
+  });
+  await settle(w);
+
+  // ---- KPI strip ----
+  const kpis = qa(w, '#kpis .kpi .v').map((e: any) => e.textContent);
+  check('perf: the KPI strip counts the metrics', kpis[0] === '4', kpis.join(' | '));
+  check('perf: the worst p95 is reported', kpis[1].indexOf('460') !== -1 && kpis[1].indexOf('ms') !== -1, kpis[1]);
+  check('perf: the hot-metric count finds p95 >= 200ms', kpis[2] === '2', kpis[2]);
+  check('perf: the record total is shown', kpis[3] === '480', kpis[3]);
+
+  /// Row lookup by metric name — position is unreliable because the table
+  /// is re-sorted by several checks below.
+  const rowFor = (name: string): any =>
+    qa(w, '.mrow').find((el: any) => el.textContent.indexOf(name) !== -1);
+
+  // ---- metric table ----
+  const rows = qa(w, '.mrow');
+  check('perf: every metric gets a row', rows.length === 4, `${rows.length} rows`);
+  check('perf: rows are sorted worst p95 first', rows[0].textContent.indexOf('rpc.roundtrip.initialize') !== -1, rows[0].querySelector('.name b')?.textContent);
+  check('perf: a large gauge does not outrank durations', rows[3].textContent.indexOf('memory.rss') !== -1, rows.map((r: any) => r.querySelector('.name b')?.textContent).join(' | '));
+  check('perf: the slowest row is banded bad', q(w, '.mrow .n.lead.bad') !== null);
+  check('perf: rows show the full percentile set', qa(w, '.mrow .n').length === 4 * 6, `${qa(w, '.mrow .n').length} cells`);
+  check('perf: rows carry a subsystem chip', qa(w, '.mrow .chip').length === 4);
+
+  // ---- subsystem attribution ----
+  // "all" + Commands + RPC round-trip + Execution + Other (memory.rss).
+  const scopes = qa(w, '#scopeCol .scope');
+  check('perf: the "all" row plus one per subsystem', scopes.length === 5, `${scopes.length} entries`);
+  const scopeText = scopes.map((e: any) => e.textContent).join(' | ');
+  check('perf: subsystems are named, not metric prefixes', scopeText.indexOf('RPC round-trip') !== -1 && scopeText.indexOf('Execution') !== -1);
+  check('perf: subsystems aggregate their metrics', /1 metrics/.test(scopeText));
+
+  // filtering by subsystem narrows the table
+  scopes[1].click();
+  await settle(w);
+  check('perf: clicking a subsystem filters the table', qa(w, '.mrow').length === 1, `${qa(w, '.mrow').length} rows`);
+  scopes[0].click();
+  await settle(w);
+  check('perf: "all subsystems" restores the table', qa(w, '.mrow').length === 4);
+
+  // ---- sorting ----
+  const countHead = qa(w, '#metricHead span').find((s: any) => s.textContent.indexOf('count') !== -1) as any;
+  countHead.click();
+  await settle(w);
+  check('perf: clicking a column header re-sorts', qa(w, '.mrow')[0].textContent.indexOf('command.run') !== -1, qa(w, '.mrow')[0].querySelector('.name b')?.textContent);
+
+  // ---- trend detail ----
+  check('perf: no trend is plotted before a selection', q(w, 'svg.trend') === null);
+  rowFor('command.run').click();
+  await settle(w);
+  check('perf: selecting a metric opens the trend chart', q(w, 'svg.trend') !== null);
+  const bars = qa(w, 'svg.trend rect');
+  check('perf: the trend charts the accumulated history', bars.length === 5, `${bars.length} bars`);
+  check('perf: the trend draws a moving line', q(w, 'svg.trend .trendLine') !== null);
+  check('perf: the detail head names the metric', q(w, '#detail .head .t').textContent.indexOf('command.run') !== -1, q(w, '#detail .head .t').textContent);
+  check('perf: the detail head shows the summary', q(w, '#detail .head .hint').textContent.indexOf('p99') !== -1);
+
+  // a second digest extends the client-side history rather than resetting it
+  socket.deliver({
+    kind: 'metrics',
+    tick: 13,
+    clients: 1,
+    perfSummary: { total: 500, byType: { metric: 320, sample: 120, event: 60 } },
+    metrics: {
+      'command.run': { count: 44, min: 0.2, max: 12, avg: 2.7, p50: 2.2, p95: 8.9, p99: 11.5 },
+      'rpc.roundtrip.initialize': { count: 3, min: 120, max: 480, avg: 300, p50: 290, p95: 460, p99: 478 },
+      'execution.run': { count: 12, min: 8, max: 260, avg: 70, p50: 40, p95: 250, p99: 259 },
+      'memory.rss': { count: 12, min: 73895936, max: 78503936, avg: 76000000, p50: 74000000, p95: 78503936, p99: 78503936 },
+    },
+    series: {
+      'command.run': [1, 2, 3, 4, 5, 6],
+      'rpc.roundtrip.initialize': [100, 200, 300],
+      'execution.run': [10, 30, 60, 90],
+      'memory.rss': [75000000, 76000000, 77000000, 78000000],
+    },
+  });
+  await settle(w);
+  check('perf: the trend accumulates across digests', qa(w, 'svg.trend rect').length === 6, `${qa(w, 'svg.trend rect').length} bars`);
+
+  // deselecting closes the detail
+  rowFor('command.run').click();
+  await settle(w);
+  check('perf: clicking again closes the trend', q(w, 'svg.trend') === null);
+
+  // ---- record mix ----
+  const mix = qa(w, '.mix .r');
+  check('perf: the record mix lists each type', mix.length === 3, `${mix.length} types`);
+  check('perf: the record mix is ordered by volume', mix[0].textContent.indexOf('metric') !== -1, mix[0].textContent);
+  check('perf: the record mix scales its bars', !!q(w, '.mix .r .b i'));
+
+  // ---- slow paths ----
+  check('perf: the histogram is present before any span', qa(w, '.hist .r').length === 5, `${qa(w, '.hist .r').length} buckets`);
+  socket.deliver({
+    kind: 'slow',
+    spans: [
+      { spanId: 's1', commandId: 'command.run', name: 'command.run', traceId: 'aaaabbbbccccdddd', durationMs: 88.5, at: Date.now() },
+      { spanId: 's2', commandId: 'rpc.initialize', name: 'rpc.initialize', traceId: 'eeeeffff00001111', durationMs: 720.2, at: Date.now() },
+    ],
+  });
+  await settle(w);
+  const slow = qa(w, '.slow');
+  check('perf: slow spans are listed', slow.length === 2, `${slow.length} rows`);
+  check('perf: the slow list is newest-first', slow[0].textContent.indexOf('rpc.initialize') !== -1);
+  check('perf: a slow span shows its trace id', slow[0].textContent.indexOf('#eeeeffff') !== -1, slow[0].textContent);
+  check('perf: a slow span is timestamped', /\d{2}:\d{2}:\d{2}/.test(slow[0].textContent));
+  check('perf: the >1s band is empty', qa(w, '.hist .r')[4].textContent.indexOf('0') !== -1);
+  check('perf: the 500ms-1s band counted the span', qa(w, '.hist .r')[3].textContent.trim().endsWith('1'), qa(w, '.hist .r')[3].textContent);
+  check('perf: a very slow span is banded bad', q(w, '.slow .dur.bad') !== null);
+
+  // filtering slow paths
+  const filterInput = q(w, 'input[type=text]');
+  filterInput.value = 'initialize';
+  fire(w, filterInput, 'input');
+  await settle(w);
+  check('perf: the slow filter narrows the list', qa(w, '.slow').length === 1, `${qa(w, '.slow').length} rows`);
+  filterInput.value = '';
+  fire(w, filterInput, 'input');
+  await settle(w);
+
+  // clearing
+  qa(w, '.miniHead button')[0].click();
+  await settle(w);
+  check('perf: clear empties the slow list', qa(w, '.slow').length === 0);
+
+  // ---- units: a gauge must not be rendered or banded as a duration ----
+  const rssNow = rowFor('memory.rss');
+  check('perf: a byte gauge is not banded hot', rssNow.querySelector('.n.lead').className.indexOf('bad') === -1, rssNow.querySelector('.n.lead').className);
+  check('perf: a byte gauge renders in bytes, not ms', rssNow.textContent.indexOf('MB') !== -1 && rssNow.textContent.indexOf('ms') === -1);
+  check('perf: a byte gauge is not claimed as the worst latency', q(w, '#kpis .kpi:nth-child(2) .s').textContent.indexOf('memory.rss') === -1, q(w, '#kpis .kpi:nth-child(2) .s').textContent);
+  check('perf: the KPI strip labels the latency scope', q(w, '#kpis .kpi:nth-child(2) .k').textContent.indexOf('latency') !== -1);
+  check('perf: hot metrics are counted against timed metrics only', q(w, '#kpis .kpi:nth-child(3) .s').textContent.trim() === 'of 3 timed', q(w, '#kpis .kpi:nth-child(3) .s').textContent);
+
+  // ---- pause ----
+  qa(w, '#mainCol .panelHead button')[0].click();
+  await settle(w);
+  socket.deliver({
+    kind: 'metrics', tick: 999, clients: 9, perfSummary: { total: 1, byType: {} },
+    metrics: { 'command.run': { count: 1, min: 1, max: 1, avg: 1, p50: 1, p95: 1, p99: 1 } }, series: {},
+  });
+  await settle(w);
+  check('perf: pause freezes the digest tick', q(w, 'footer span:nth-child(2)').textContent === 'tick 13', q(w, 'footer span:nth-child(2)').textContent);
+
+  w.close();
+}
+
+// =============================================================== run
+
 await testMonitor();
+console.log('');
+await testPerf();
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

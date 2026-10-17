@@ -58,6 +58,19 @@ export { LogSpine } from './log/LogSpine.js';
 export type { LogSpineOptions } from './log/LogSpine.js';
 export { ConsoleTransport } from './log/transports/ConsoleTransport.js';
 
+// ---------------- Extension host (Stage 2 · 面板接入) ----------------
+export { ExtensionManager } from './extensions/ExtensionManager.js';
+export type { ExtensionManagerOptions, ExtensionPanelInfo } from './extensions/ExtensionManager.js';
+export { ExtensionRegistry, parseManifest, satisfies, ManifestError } from './extensions/ExtensionRegistry.js';
+export { ExtensionHost } from './extensions/ExtensionHost.js';
+export type {
+  ExtensionManifest,
+  CommandContribution,
+  LanguageContribution,
+  ViewContribution,
+} from './extensions/Manifest.js';
+export type { ExtensionModule, ExtensionContext } from './extensions/api.js';
+
 // ---------------- Stage 1 · correlation + utils ----------------
 export { CorrelationBus } from './correlation/CorrelationBus.js';
 export { ulid } from './util/ulid.js';
@@ -103,8 +116,7 @@ export type {
   WorkspaceRunResult,
   LanguageStatus,
 } from './panel/WorkspaceService.js';
-export { renderIdeHtml, PY_PATTERN, GO_PATTERN, HIGHLIGHT_CLASSES, TOKEN_PATTERNS } from './panel/ide.js';
-export { SAMPLES, LANGUAGES, defaultSample, samplesFor, sampleById, language } from './panel/samples.js';
+export { SAMPLES, defaultSample, samplesFor, sampleById, starterFor } from './panel/samples.js';
 export type { Sample, LanguageDescriptor, LanguageId, RunMode } from './panel/samples.js';
 
 // ---------------- Stage 5 · Go ----------------

@@ -18,6 +18,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { join, relative, resolve } from 'node:path';
 import { ulid } from '../util/ulid.js';
 import type { Kernel } from '../kernel/Kernel.js';
 import { connectChildProcess } from '../lsp/jsonrpc.js';
@@ -55,6 +56,23 @@ export interface ExtensionHostStatus {
 
 const READY_DEFAULT = 15_000;
 
+/**
+ * Resolve a source-tree path (relative to this module) into the forward-slash,
+ * cwd-relative form the host child process needs. Falls back to the cwd when
+ * the module has no `file://` URL (bundled build) — the packaged path never
+ * calls this, so the fallback only matters for unusual dev setups.
+ */
+function sourceRelative(specifier: string): string {
+  let absolute: string;
+  try {
+    absolute = fileURLToPath(new URL(specifier, import.meta.url));
+  } catch {
+    absolute = resolve(process.cwd(), specifier);
+  }
+  const rel = relative(process.cwd(), absolute).replace(/\\/g, '/');
+  return rel.startsWith('.') ? rel : `./${rel}`;
+}
+
 export class ExtensionHost {
   readonly hostId = `host-${Math.random().toString(36).slice(2, 8)}`;
   private child?: ChildProcessWithoutNullStreams;
@@ -81,7 +99,9 @@ export class ExtensionHost {
     opts: Partial<ExtensionHostOptions> = {},
   ) {
     this.opts = {
-      manifestPath: opts.manifestPath ?? entry.manifestPath,
+      // The manifest lives at `<extension dir>/extension.json`; the registry
+      // carries the directory, not the file path, so derive it here.
+      manifestPath: opts.manifestPath ?? join(entry.dir, 'extension.json'),
       entryPath: opts.entryPath ?? entry.entryPath,
       extensionId: entry.manifest.id,
       maxCrashes: opts.maxCrashes ?? 3,
@@ -118,8 +138,18 @@ export class ExtensionHost {
       ? // The exe branches into host mode before starting the server.
         ['--extension-host', '--manifest', this.opts.manifestPath, '--extension', this.opts.entryPath]
       : [
+          // Resolve `.js` import specifiers back to their `.ts` sources so the
+          // host child can run directly from `src/` without a build step.
+          '--experimental-loader',
+          // Loader path must be a forward-slash path too: a raw `d:\…` absolute
+          // makes Node load the loader module as a raw scheme (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+          sourceRelative('../../resolve-loader.mjs'),
           '--experimental-transform-types',
-          fileURLToPath(new URL('./host-main.ts', import.meta.url)),
+          // Use a path relative to cwd as the entry. It MUST use forward slashes:
+          // a raw `d:\…` absolute (or `file://` URL) entry makes the child's
+          // `import.meta.url` a raw scheme and breaks relative imports
+          // (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+          sourceRelative('./host-main.ts'),
           '--manifest',
           this.opts.manifestPath,
           '--extension',

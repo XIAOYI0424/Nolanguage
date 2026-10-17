@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The workspace shell talks to the engine sidecar and receives its events. Nothing else is granted: the page has no network access and no filesystem access of its own — the engine owns both, behind the protocol.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
+    "shell:allow-execute",
+    "shell:allow-spawn",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}

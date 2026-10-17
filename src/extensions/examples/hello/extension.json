@@ -1,0 +1,15 @@
+{
+  "id": "demo.hello",
+  "name": "Hello Extension",
+  "version": "1.0.0",
+  "engines": { "kernel": "^0.6.0" },
+  "host": "child-process",
+  "activationEvents": ["onStartup", "onCommand:demo.hello.greet", "onCommand:demo.hello.fib"],
+  "entry": "extension.ts",
+  "contributes": {
+    "commands": [
+      { "id": "demo.hello.greet", "title": "Greet", "category": "demo" },
+      { "id": "demo.hello.fib", "title": "Fibonacci", "category": "demo" }
+    ]
+  }
+}

@@ -2,27 +2,114 @@
  * Desktop entry (packaged build).
  *
  * This is the module bundled into `Nolanguage.exe` (Node Single Executable
- * Application). It boots the workspace server and opens the system browser, so
- * double-clicking the exe gives the same experience as `npm run ide`.
+ * Application). It boots the workspace server and renders the UI in a local
+ * **WebView** window — the system WebView2 runtime when present, Edge, or the
+ * default browser as a last resort. See `WebViewHost.ts` for the engine
+ * selection; double-clicking the exe therefore gives the same experience as
+ * `npm run ide`, minus the browser chrome.
  *
  * Unlike `src/panel/server.ts` it never auto-runs on import: the build script
  * points the SEA blob at this file, so importing it *is* the launch.
+ *
+ * **Import order matters.** `server.ts` decides at *evaluation* time whether it
+ * was launched directly, and in the SEA bundle both modules end up in one file
+ * — so the check must already be answered by the time `server.js` is pulled in.
+ * That is why the environment below is set first, and the import is dynamic.
  */
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { main as startServer } from '../panel/server.js';
 
-/** Set by the build script so runtime defaults follow the executable. */
+/**
+ * Set by the build script so runtime defaults follow the executable.
+ *
+ * This is what stops `server.ts` from self-booting: in the SEA bundle the
+ * "was this the entry script?" comparison resolves to the exe path on both
+ * sides, so without this flag the server would start twice and the desktop
+ * entry would lose the port race with `EADDRINUSE`.
+ */
 process.env.NOLANGUAGE_PACKAGED ??= '1';
-
 // The desktop entry prints its own banner, so the server's is suppressed.
 process.env.NOLANGUAGE_QUIET ??= '1';
-
 // Desktop-friendly defaults: bind to loopback only, and skip the synthetic
 // demo traffic so the panel shows what the user actually does.
 process.env.PANEL_HOST ??= '127.0.0.1';
 process.env.PANEL_NO_DEMO ??= '1';
+
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { main as startServer } from '../panel/server.js';
+import { openSystemBrowser, openWebView, type WebViewHandle } from './WebViewHost.js';
+
+/**
+ * Two modes share this executable:
+ *
+ *   Nolanguage.exe                              boot the workspace + open a window
+ *   Nolanguage.exe --extension-host --manifest <m> --extension <e>
+ *                                              run one extension in isolation
+ *   Nolanguage.exe --panel-stdio                speak the panel protocol on
+ *                                              stdin/stdout (the Tauri sidecar)
+ *
+ * The extension host re-uses the same binary so a packaged build needs no
+ * second executable and no external `node` on PATH. The dispatch is inside an
+ * async IIFE (not top-level await) because the SEA build is CommonJS.
+ *
+ * This block is the **only** entry point. Calling `main()` again at the bottom
+ * of the file (as an earlier revision did, for a nicer error message) boots a
+ * second server in the same process: the first owns the port and the second
+ * dies with `EADDRINUSE`. Error handling therefore belongs here.
+ */
+if (process.argv.includes('--extension-host')) {
+  runExtensionHost().catch((err: unknown) => {
+    process.stderr.write(`extension host failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+} else if (process.argv.includes('--panel-stdio')) {
+  // The Tauri shell's engine: no window, no port, no HTTP server — the panel
+  // protocol goes over stdin/stdout instead. See `src/panel/Transport.ts`.
+  runEngineStdio().catch((err: unknown) => {
+    process.stderr.write(`engine (stdio) failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+} else {
+  main().catch((err: unknown) => {
+    console.error('Nolanguage desktop failed to start:', err);
+    process.exit(1);
+  });
+}
+
+/**
+ * Sidecar mode. `main()` picks the stdio transport from the argv flag, and the
+ * process lives as long as the relay keeps stdin open — so this handler is only
+ * here to report a startup failure and to keep the process alive deliberately
+ * (an empty stdin handler would otherwise let it exit when nothing else does).
+ */
+async function runEngineStdio(): Promise<void> {
+  await startServer({ transport: 'stdio' });
+  // Nothing to open and nothing to print: stdout is the protocol channel.
+  process.stdin.resume();
+  process.stdin.on('end', () => process.exit(0));
+}
+
+async function runExtensionHost(): Promise<void> {
+  const argValue = (name: string): string | undefined => {
+    const i = process.argv.indexOf(`--${name}`);
+    return i >= 0 ? process.argv[i + 1] : undefined;
+  };
+  const manifestPath = argValue('manifest');
+  const entryPath = argValue('extension');
+  if (!manifestPath || !entryPath) {
+    process.stderr.write('usage: --extension-host --manifest <path> --extension <path>\n');
+    process.exit(2);
+  }
+  const { HostRunner } = await import('../extensions/HostRunner.js');
+  const { parseManifest } = await import('../extensions/Manifest.js');
+  const manifest = parseManifest(JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown);
+  const runner = new HostRunner({
+    extensionId: manifest.id,
+    entryPath,
+    kernelVersion: '0.0.0', // replaced by the parent's activate request
+    sessionId: 'host',
+  });
+  await runner.run();
+}
 
 /**
  * `--no-browser` (or NOLANGUAGE_NO_BROWSER=1) runs the server only: nothing
@@ -33,7 +120,15 @@ const noBrowser =
 
 async function main(): Promise<void> {
   const { base } = await startServer();
-  if (!noBrowser) openAppWindow(`${base}/`);
+
+  // The window is a *managed* child: it is opened after the server is
+  // listening, and torn down when this process exits, so closing the console
+  // window never leaves an orphaned UI pointing at a dead port.
+  let view: WebViewHandle | undefined;
+  if (!noBrowser) {
+    view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
+    if (view.engine === 'none') openSystemBrowser(`${base}/`);
+  }
 
   const store = process.env.NOLANGUAGE_DB
     ?? join(dirname(process.execPath), '.nolanguage', 'telemetry.db');
@@ -46,49 +141,36 @@ async function main(): Promise<void> {
       `\n` +
       `  Workspace   ->  ${base}/\n` +
       `  Monitor     ->  ${base}/monitor\n` +
+      `  Perf        ->  ${base}/perf\n` +
       `  Telemetry   ->  ${store}\n` +
       `\n` +
-      `  ${noBrowser ? 'Browser launch disabled — open the Workspace address above.' : 'A lightweight app window should have opened.'}\n` +
-      `  ${noBrowser ? '' : `If it did not, visit ${base}/ manually.`}\n` +
+      `  ${describeWindow(view)}\n` +
       `\n` +
       `  Close this window (or press Ctrl+C) to stop the server.\n\n`,
   );
+
+  // Keep the profile owning a live process: killing the engine with the server
+  // avoids a window that renders a dead address until it is manually closed.
+  const shutdown = (): void => {
+    view?.close();
+    process.exit(0);
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  process.once('exit', () => view?.close());
 }
 
-/**
- * Open the workspace in the lightest possible window.
- *
- * Order of preference:
- *  1. Edge in **app mode** (`--app=`): a chromeless single-purpose window —
- *     no tabs, no address bar, no extensions — using the WebView2 runtime that
- *     ships with Windows. This is the "runs like a local program" experience
- *     without a browser (Chrome/WebView2 SDK) dependency.
- *  2. The OS default browser via `start` — the universal fallback.
- *
- * Errors are never fatal: the console always prints the address.
- */
-function openAppWindow(url: string): void {
-  const edge = [
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  ].find((p) => existsSync(p));
-
-  const cmd = edge
-    ? { file: edge, args: [`--app=${url}`, '--no-first-run', '--no-default-browser-check'] }
-    : { file: 'cmd', args: ['/d', '/s', '/c', `start "" ${url.replace(/&/g, '^&')}`] };
-
-  try {
-    const child = spawn(cmd.file, cmd.args, { stdio: 'ignore', detached: true, windowsHide: !edge });
-    child.on('error', () => {
-      process.stdout.write(`\n  (could not open a window — open ${url} manually)\n`);
-    });
-    child.unref();
-  } catch {
-    process.stdout.write(`\n  (could not open a window — open ${url} manually)\n`);
+/** Human-readable line describing how (or whether) the window was opened. */
+function describeWindow(view: WebViewHandle | undefined): string {
+  if (noBrowser) return 'Window launch disabled — open the Workspace address above.';
+  switch (view?.engine) {
+    case 'webview2':
+      return `Opened as a local app window — system WebView2 ${view.webview2Version}, no browser chrome.`;
+    case 'edge':
+      return 'Opened in an Edge app window (WebView2 runtime not found — using the Edge engine).';
+    case 'system-browser':
+      return 'No WebView engine found — opened in the default browser.';
+    default:
+      return 'Could not open a window — open the Workspace address above.';
   }
 }
-
-main().catch((err) => {
-  console.error('Nolanguage desktop failed to start:', err);
-  process.exit(1);
-});

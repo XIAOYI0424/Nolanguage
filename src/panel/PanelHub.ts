@@ -18,6 +18,8 @@ import type { LogRecord } from '../log/types.js';
 import type { MetricSummary } from '../perf/LiveMetrics.js';
 import type { PerfRecord } from '../perf/types.js';
 import type { Kernel } from '../kernel/Kernel.js';
+import type { ExtensionPanelInfo } from '../extensions/ExtensionManager.js';
+import type { FsEntry, FsFile } from './FsService.js';
 
 export type PanelLevelName =
   | 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL' | 'AUDIT' | 'METRIC';
@@ -91,7 +93,40 @@ export type PanelServerMessage =
   | { kind: 'completion'; requestId: number; items: Array<{ label: string; kind?: number; detail?: string }> }
   | { kind: 'hover'; requestId: number; hover: unknown }
   | { kind: 'session'; sessionId: string; reset: boolean }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string }
+  // ---- Project explorer (file system) ----
+  | { kind: 'fsRoot'; reqId: number; root: string; name: string }
+  | { kind: 'fsListing'; reqId: number; path: string; entries: FsEntry[]; truncated?: boolean }
+  | { kind: 'fsFile'; reqId: number; file: FsFile }
+  | { kind: 'fsSaved'; reqId: number; path: string; mtime: number; size: number }
+  | {
+      kind: 'fsChanged';
+      reqId: number;
+      op: 'create' | 'rename' | 'delete';
+      path: string;
+      /** Rename only: the previous path, so open tabs can be remapped. */
+      from?: string;
+      /** Absent for a delete. */
+      entry?: FsEntry;
+    }
+  | { kind: 'fsError'; reqId: number; path?: string; message: string; code: string }
+  // ---- Extension host (Stage 2 · 面板接入) ----
+  | { kind: 'extensions'; at: number; extensions: ExtensionPanelInfo[] }
+  | {
+      kind: 'extension';
+      at: number;
+      event: 'activated' | 'crashed' | 'deactivated';
+      extensionId: string;
+      hostId?: string;
+    }
+  | { kind: 'extensionResult'; reqId: number; ok: boolean; result?: unknown; error?: string }
+  // ---- Terminal (PyCharm shell) ----
+  | { kind: 'termResult'; cmd: string; stdout: string; stderr: string; code: number | null; ms: number }
+  // ---- interactive execution (Run / Terminal) ----
+  | { kind: 'runOut'; stream: 'stdout' | 'stderr'; text: string }
+  | { kind: 'runInput'; text: string }
+  | { kind: 'termOut'; text: string; stream: 'stdout' | 'stderr' }
+  | { kind: 'termInput'; text: string };
 
 /** A diagnostic shaped for the IDE's Problems list. */
 export interface IdeProblem {
@@ -215,6 +250,14 @@ export class PanelHub {
 
   removeClient(id: number): void {
     this.clients.delete(id);
+  }
+
+  /**
+   * Broadcast an arbitrary server message (used to surface extension host
+   * lifecycle events to every connected panel client).
+   */
+  push(payload: PanelServerMessage): void {
+    this.broadcast(payload);
   }
 
   clientCount(): number {

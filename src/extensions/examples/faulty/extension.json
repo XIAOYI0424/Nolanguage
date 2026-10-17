@@ -1,0 +1,15 @@
+{
+  "id": "demo.faulty",
+  "name": "Faulty Extension",
+  "version": "1.0.0",
+  "engines": { "kernel": "^0.6.0" },
+  "host": "child-process",
+  "activationEvents": ["onCommand:demo.faulty.throw", "onCommand:demo.faulty.crash"],
+  "entry": "extension.ts",
+  "contributes": {
+    "commands": [
+      { "id": "demo.faulty.throw", "title": "Throw", "category": "demo" },
+      { "id": "demo.faulty.crash", "title": "Crash the host", "category": "demo" }
+    ]
+  }
+}

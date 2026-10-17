@@ -1,0 +1,92 @@
+{
+  "id": "javascript",
+  "displayName": "JavaScript",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "nolanguage",
+  "description": "JavaScript evaluated in an embedded VM, with a fresh context per run.",
+  "order": 30,
+  "trust": {
+    "sandbox": "none"
+  },
+  "file": {
+    "extensions": [
+      "js",
+      "mjs",
+      "cjs",
+      "jsx"
+    ],
+    "defaultExt": "js",
+    "fileName": "main.js"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "//[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "/\\*[\\s\\S]*?\\*/",
+        "cls": "c"
+      },
+      {
+        "re": "`[^`]*`",
+        "cls": "s"
+      },
+      {
+        "re": "\"[^\"]*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'[^']*'",
+        "cls": "s"
+      },
+      {
+        "re": "\\b(?:const|let|var|function|return|if|else|for|while|do|class|extends|new|import|export|from|default|async|await|try|catch|finally|throw|typeof|instanceof|of|in|void|delete|switch|case|break|continue|null|undefined|true|false|this|super|yield|interface|type|enum|public|private|protected|readonly|as)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:console|process|globalThis|Math|JSON|Object|Array|Number|String|Boolean|Symbol|BigInt|Promise|Map|Set|WeakMap|Date|RegExp|Error|TypeError|RangeError|SyntaxError|parseInt|parseFloat|isNaN|structuredClone)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "[0-9][0-9_]*(?:\\.[0-9]+)?",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_$][A-Za-z0-9_$]*(?=\\()",
+        "cls": "f"
+      }
+    ]
+  },
+  "lsp": {
+    "discovery": {
+      "commands": [
+        "typescript-language-server"
+      ],
+      "envVars": [
+        "JS_LSP"
+      ],
+      "knownPaths": []
+    },
+    "command": [
+      "{resolved}"
+    ],
+    "languageId": "javascript",
+    "serverName": "tsserver",
+    "memoryHint": "150MB",
+    "degradedNote": "typescript-language-server not installed — Run works, Check and completion do not",
+    "args": [
+      "--stdio"
+    ]
+  },
+  "run": {
+    "mode": "inline-vm",
+    "requires": [
+      "inline-vm@^1.0.0"
+    ],
+    "sourceExt": ".js",
+    "timeoutMs": 5000,
+    "vmTimeoutMs": 5000
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "id": "python",
+  "displayName": "Python",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "nolanguage",
+  "description": "Python with a persistent interpreter session. Ships the official plugin; the substrate has no Python knowledge.",
+  "order": 10,
+  "trust": {
+    "sandbox": "subprocess"
+  },
+  "file": {
+    "extensions": [
+      "py",
+      "pyi",
+      "pyw"
+    ],
+    "defaultExt": "py",
+    "fileName": "main.py"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "#[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "\"\"\"[\\s\\S]*?\"\"\"",
+        "cls": "s"
+      },
+      {
+        "re": "'''[\\s\\S]*?'''",
+        "cls": "s"
+      },
+      {
+        "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'(?:[^'\\\\\\n]|\\\\.)*'",
+        "cls": "s"
+      },
+      {
+        "re": "@[A-Za-z_][A-Za-z0-9_.]*",
+        "cls": "d"
+      },
+      {
+        "re": "\\b(?:def|class|return|if|elif|else|for|while|in|not|and|or|import|from|as|with|try|except|finally|raise|yield|lambda|pass|break|continue|global|nonlocal|assert|del|async|await|is|None|True|False)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:print|len|range|str|int|float|bool|list|dict|set|tuple|open|sum|min|max|abs|sorted|enumerate|zip|map|filter|type|isinstance|super)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "[0-9][0-9_]*(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_][A-Za-z0-9_]*(?=\\()",
+        "cls": "f"
+      }
+    ]
+  },
+  "lsp": {
+    "discovery": {
+      "commands": [
+        "pyright-langserver"
+      ],
+      "envVars": [
+        "PYTHON_BIN"
+      ],
+      "knownPaths": [
+        "~/.local/bin/pyright-langserver"
+      ]
+    },
+    "command": [
+      "{resolved}"
+    ],
+    "languageId": "python",
+    "serverName": "pyright",
+    "memoryHint": "380MB",
+    "diagnosticsTimeoutMs": 2500,
+    "coldDiagnosticsTimeoutMs": 2500,
+    "bundledFallback": "stub",
+    "degradedNote": "pyright not found — Check and completion fall back to the bundled stub server",
+    "args": [
+      "--stdio"
+    ],
+    "eager": true
+  },
+  "run": {
+    "mode": "repl-session",
+    "requires": [
+      "repl-session@^1.0.0"
+    ],
+    "timeoutMs": 15000,
+    "command": [
+      "{toolchain}",
+      "-u"
+    ],
+    "sourceExt": ".py",
+    "bootstrap": "bootstrap.py",
+    "discovery": {
+      "commands": [
+        "python",
+        "python3"
+      ],
+      "envVars": [
+        "PYTHON_BIN"
+      ],
+      "knownPaths": [
+        "~/.local/bin/python",
+        "C:/Python313/python.exe",
+        "C:/Python312/python.exe",
+        "C:/Python311/python.exe"
+      ]
+    },
+    "versionArgs": [
+      "-V"
+    ]
+  },
+  "profiler": {
+    "adapter": "cProfile",
+    "memoryHint": "80MB"
+  }
+}

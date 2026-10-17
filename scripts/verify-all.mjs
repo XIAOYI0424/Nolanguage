@@ -28,11 +28,34 @@ const stages = [
   { name: 'Stage 2 · panel UI self-containment', script: 'scripts/check-panel-html.ts' },
   { name: 'Stage 2 · LSP log collector parsing', script: 'scripts/test-logcollector.ts' },
   { name: 'Stage 3 · Python + pyright closed loop', script: 'scripts/verify-stage3.ts' },
-  { name: 'Stage 4 · Python workspace (IDE)', script: 'scripts/verify-ide.ts' },
-  { name: 'Stage 4 · IDE UI self-containment', script: 'scripts/check-ide-html.ts' },
-  { name: 'UI · Vue pages mount in a DOM (jsdom)', script: 'scripts/verify-ui-dom.ts' },
+  { name: 'Stage 4 · Python workspace (backend)', script: 'scripts/verify-ide.ts' },
+  { name: 'Workspace · PyCharm shell (mount + self-containment)', script: 'scripts/verify-pycharm.ts' },
+  { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts' },
+  { name: 'Dev Panel pages mount in a DOM (jsdom)', script: 'scripts/verify-ui-dom.ts' },
+  // Stage 8: Markdown — zero-dependency renderer (blocks/inlines/safety),
+  // marksman discovery SKIP semantics, and the live mdRender/mdPreview round trip.
+  { name: 'Stage 8 · Markdown (renderer + discovery + preview)', script: 'scripts/verify-markdown.ts' },
   { name: 'Stage 5 · Go toolchain + gopls loop', script: 'scripts/verify-go.ts' },
+  // JavaScript runs on the Stage 9 warm pool: node discovery, the pool's
+  // per-session worker semantics, and the missing-LSP degrade path.
+  { name: 'Stage 9 · JavaScript (node + warm pool)', script: 'scripts/verify-javascript.ts' },
+  // Stage 10: user-code profiling — Python cProfile hotspots, Go pprof (SKIP
+  // when the toolchain is absent), the profiler.* commands and the WS round trip.
+  { name: 'Stage 10 · Profiler (Python cProfile + Go pprof)', script: 'scripts/verify-profiler.ts' },
+  // Language plugins: manifest contract + version ranges, the registry
+  // (scan/order/enable/install/uninstall + data separation), all five runtime
+  // extensions against real processes, and RunnerFactory's single path.
+  { name: 'Plugins · language substrate (registry + 5 runtimes)', script: 'scripts/verify-langplugins.ts' },
+  // The Tauri seam: WebSocket and stdio must be interchangeable, and the real
+  // engine must speak the protocol on a pipe (what the Rust relay does).
+  { name: 'Transport · ws ⇄ stdio equivalence', script: 'scripts/verify-transport.ts' },
   { name: 'Stage 6 · baseline system (git + SQLite + baselines)', script: 'scripts/verify-baseline.ts' },
+  { name: 'Stage 5 · extension host (child process + RPC)', script: 'scripts/verify-extensions.ts' },
+  // Project explorer: FsService containment/CRUD + the `fs*` wire protocol,
+  // including the upgrade-origin check.
+  { name: 'Stage 4 · project explorer (FsService + fs protocol)', script: 'scripts/verify-explorer.ts' },
+  // Desktop window launcher: engine resolution + profile + launch contract.
+  { name: 'Desktop · WebView host (engine + window)', script: 'scripts/verify-webview.ts' },
   // Needs `npm run build:exe` (or build-to-exe.bat) first; skipped when the
   // packaged binary is absent, so a fresh clone still verifies.
   { name: 'Package · packaged exe smoke test', script: 'scripts/smoke-exe.ts', requiresExe: true },
@@ -55,6 +78,12 @@ function run(script, env = {}) {
       process.stderr.write(d);
     });
     child.on('close', (code) => {
+      // A suite that dies before its first check reports 0/0, which on its own
+      // explains nothing. Echo what it actually said whenever it failed.
+      if (code !== 0) {
+        console.log(out.trim() ? out : '(the suite produced no output)');
+        console.log(`  exit code ${code}`);
+      }
       const m = /(\d+)\/(\d+) (?:parsing )?checks passed/.exec(out);
       resolve({
         code,

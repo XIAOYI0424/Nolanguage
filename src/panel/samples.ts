@@ -8,16 +8,21 @@
  *
  * Go samples additionally carry a `mode`: `run` compiles a `main` package,
  * `test` drives the real `go test` tool against a `*_test.go` file.
+ *
+ * NB: `LanguageId` is a plain `string` now. Languages come from plugin
+ * manifests (`LanguageRegistry`), so a union type here would re-introduce the
+ * hardcoded list the plugin architecture exists to remove. Samples are just
+ * *content*; a language with no sample still works.
  */
-export type LanguageId = 'python' | 'go';
+export type LanguageId = string;
 export type RunMode = 'run' | 'test';
 
 export interface Sample {
   id: string;
   name: string;
   languageId: LanguageId;
-  /** Go only; Python always runs. */
-  mode: RunMode;
+  /** Go only; Python always runs. Markdown samples have none — nothing executes. */
+  mode?: RunMode;
   code: string;
 }
 
@@ -30,15 +35,26 @@ export interface LanguageDescriptor {
   fileName: string;
   /** True when a separate "Test" action is meaningful. */
   supportsTest: boolean;
+  /**
+   * True when Run actually executes something. Render-only languages have no
+   * runner, so Run is disabled instead of being a button that errors.
+   */
+  supportsRun: boolean;
 }
 
-export const LANGUAGES: LanguageDescriptor[] = [
-  { id: 'python', displayName: 'Python', extension: '.py', fileName: 'main.py', supportsTest: false },
-  { id: 'go', displayName: 'Go', extension: '.go', fileName: 'main.go', supportsTest: true },
-];
-
-export function language(id: LanguageId): LanguageDescriptor {
-  return LANGUAGES.find((l) => l.id === id) ?? LANGUAGES[0];
+/**
+ * A starter document for a language that ships no sample of its own — which is
+ * the normal case for a user-installed plugin. It is deliberately minimal: the
+ * point is that opening a brand-new language gives an empty, runnable buffer
+ * instead of an empty editor that looks broken.
+ */
+export function starterFor(id: LanguageId): Sample {
+  return {
+    id: `starter-${id}`,
+    name: 'Starter file',
+    languageId: id,
+    code: '',
+  };
 }
 
 // ============================================================ Python
@@ -579,6 +595,217 @@ func main() {
 }
 `;
 
+
+// ============================================================ Markdown
+//
+// Markdown samples render in the Preview pane (right tool window) instead of
+// running. The tour sample is deliberately a *complete* exercise of the
+// renderer: every block and inline feature it supports appears here, so the
+// preview doubles as a visual regression fixture.
+
+const MD_TOUR = `# Nolanguage Markdown Tour
+
+Everything the built-in renderer supports, on one page.
+
+## Text formatting
+
+**bold**, *italic*, ***both***, ~~struck out~~, \*escaped\*, and \`inline code\`
+with a backtick inside: \`\` \`x\` \`\`. A [link](https://example.com "Example"),
+an <https://example.com/auto> autolink, and a [reference link][repo].
+
+[repo]: https://github.com/ "GitHub"
+
+## Lists
+
+- unordered item
+- another one
+  - nested under it
+  - back at two
+
+1. ordered first
+2. ordered second
+   1. deeper
+3. third
+
+- [x] finished task
+- [ ] pending task
+
+## Quote
+
+> Quoted text, with **bold** inside.
+> > Nested quote, quoting a quote.
+
+## Table
+
+| Feature      | Status | Notes              |
+| ------------ | :----: | ------------------ |
+| Headings     |   yes  | ATX and setext     |
+| Tables       |   yes  | GFM, aligned cells |
+| Task lists   |   yes  | \`[x]\` and \`[ ]\`   |
+
+## Code
+
+\`\`\`python
+def greet(name):
+    return f"hello, {name}"
+\`\`\`
+
+    indented code block
+    second line
+
+## Rules and breaks
+
+---
+
+Text after a rule.
+
+Hard break at the end of this line  
+second line of the same paragraph.
+
+---
+
+Safety: raw HTML is escaped, and only safe URL schemes become links.
+`;
+
+const MD_FRONTMATTER = `---
+title: Release notes
+date: 2026-10-15
+tags: [release, markdown, stage-8]
+---
+
+# Release notes
+
+Stage 8 adds the Markdown workspace: a zero-dependency renderer, a live
+preview pane, a heading outline, and optional marksman LSP integration.
+
+## What works
+
+- **Preview** — the right tool window renders the active document on a
+  250 ms debounce, and reports render time in its header.
+- **Outline** — the Structure tool window lists every heading with its line
+  number; clicking one moves the caret there.
+- **Breadcrumbs** — the nearest heading above the caret joins the path.
+
+## What degrades
+
+Without marksman installed, link completion and hover are unavailable, but
+rendering, the outline and breadcrumbs keep working. The status bar says so
+explicitly rather than failing silently.
+`;
+
+// ============================================================ JavaScript
+
+// The JavaScript sandbox runs a snippet *synchronously* inside a shared node
+// worker (see `src/js/JsRunner.ts`), so every sample here is timer- and
+// promise-free by contract, and a failure is signalled by throwing.
+const JS_DEMO_TEST = `// A tiny demo test — no dependencies, just assertions.
+//
+// Press Run (Ctrl+Enter). Each check prints PASS/FAIL, then a summary line.
+// The failed check throws at the end, and an uncaught throw is what makes the
+// run exit non-zero (there is no process.exit in the sandbox).
+//
+// Execution is synchronous per run, so this file deliberately uses no timers
+// and no promises — see the header of src/js/JsRunner.ts for the contract.
+
+function add(a, b) {
+  return a + b;
+}
+
+function divide(a, b) {
+  if (b === 0) throw new Error('division by zero');
+  return a / b;
+}
+
+function isPalindrome(text) {
+  const cleaned = Array.from(text.toLowerCase())
+    .filter(function (ch) { return /[a-z0-9]/.test(ch); })
+    .join('');
+  return cleaned === Array.from(cleaned).reverse().join('');
+}
+
+// ---- a minimal test harness ----
+const failures = [];
+
+function check(name, got, want) {
+  if (JSON.stringify(got) === JSON.stringify(want)) {
+    console.log('PASS  ' + name);
+    return;
+  }
+  console.log('FAIL  ' + name + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+  failures.push(name);
+}
+
+function attempt(fn) {
+  try { return fn(); } catch (err) { return err.message; }
+}
+
+console.log('running demo tests');
+console.log('-'.repeat(40));
+
+check('add two ints', add(2, 3), 5);
+check('add negatives', add(-4, -6), -10);
+check('divide exact', divide(10, 2), 5);
+check('divide by zero throws', attempt(function () { return divide(1, 0); }), 'division by zero');
+check('palindrome simple', isPalindrome('racecar'), true);
+check('palindrome with punctuation', isPalindrome('A man, a plan, a canal: Panama'), true);
+check('not a palindrome', isPalindrome('javascript'), false);
+
+// Expected failure so you can see a FAIL line and a non-zero exit code.
+check('intentional failing case', add(1, 1), 3);
+
+console.log('-'.repeat(40));
+if (failures.length) {
+  throw new Error(failures.length + ' check(s) failed: ' + failures.join(', '));
+}
+console.log('all checks passed');
+`;
+
+const JS_HELLO = `// Hello world, plus a few language basics.
+//
+// The sandbox exposes a small read-only \`process\` stub (version / platform /
+// env / argv). Each Run gets a fresh context inside the shared node process, so
+// nothing carries over between runs — that is what lets a snippet with a
+// top-level \`const\` be Run twice.
+
+const who = 'JavaScript';
+
+function greet(name) {
+  return 'hello, ' + name + ' from ' + who;
+}
+
+console.log(greet('world'));
+console.log('node ' + process.version + ' on ' + process.platform);
+
+// arrow functions + array methods
+const nums = [3, 1, 4, 1, 5, 9, 2, 6];
+const evensDoubled = nums.filter((n) => n % 2 === 0).map((n) => n * 2);
+console.log('evens x2:', evensDoubled.join(','));
+
+// destructuring + spread
+const { min, max } = { min: Math.min(...nums), max: Math.max(...nums) };
+const total = nums.reduce((a, b) => a + b, 0);
+console.log(\`min=\${min} max=\${max} total=\${total}\`);
+
+// classes + getters
+class Shape {
+  constructor(name) { this.name = name; }
+  get label() { return '<' + this.name + '>'; }
+}
+
+class Rect extends Shape {
+  constructor(w, h) { super('rect'); this.w = w; this.h = h; }
+  get area() { return this.w * this.h; }
+}
+
+const box = new Rect(4, 5);
+console.log(box.label + ' area=' + box.area);
+
+// runs are independent: this counter is always 1, because each Run starts from
+// a fresh context (it is what makes re-Running a \`const\` snippet work at all)
+globalThis.runs = (globalThis.runs || 0) + 1;
+console.log('runs visible to this snippet: ' + globalThis.runs);
+`;
+
 // ============================================================ registry
 
 export const SAMPLES: Sample[] = [
@@ -596,6 +823,12 @@ export const SAMPLES: Sample[] = [
   { id: 'go-concurrency', name: 'Goroutines + channels', languageId: 'go', mode: 'run', code: GO_CONCURRENCY },
   { id: 'go-structs', name: 'Structs + interfaces', languageId: 'go', mode: 'run', code: GO_STRUCTS },
   { id: 'go-error', name: 'Errors + recover', languageId: 'go', mode: 'run', code: GO_ERROR },
+  // --- JavaScript (executed by the sandbox warm pool) ---
+  { id: 'js-demo-test', name: 'Demo test (assertions)', languageId: 'javascript', mode: 'run', code: JS_DEMO_TEST },
+  { id: 'js-hello', name: 'Hello + session state', languageId: 'javascript', mode: 'run', code: JS_HELLO },
+  // --- Markdown (rendered, not run) ---
+  { id: 'md-tour', name: 'Renderer feature tour', languageId: 'markdown', code: MD_TOUR },
+  { id: 'md-frontmatter', name: 'Frontmatter + tags', languageId: 'markdown', code: MD_FRONTMATTER },
 ];
 
 /** Samples for one language, in declaration order. */
@@ -610,8 +843,13 @@ export function sampleById(id: string): Sample {
   return s;
 }
 
-/** The sample a language starts with — always its demo test. */
+/**
+ * The sample a language starts with: its first declared sample, else a blank
+ * starter named after the plugin.
+ *
+ * No language is special-cased — a plugin with no samples at all still gets a
+ * valid (empty) buffer, which is what `starterFor` is for.
+ */
 export function defaultSample(languageId: LanguageId = 'python'): Sample {
-  const own = samplesFor(languageId);
-  return own[0] ?? SAMPLES[0];
+  return samplesFor(languageId)[0] ?? starterFor(languageId);
 }

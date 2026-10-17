@@ -27,8 +27,10 @@ const manifest = parseManifest(JSON.parse(readFileSync(manifestPath, 'utf8')) as
 const runner = new HostRunner({
   extensionId: manifest.id,
   entryPath,
-  kernelVersion: '0.0.0',
-  sessionId: 'host',
+  // Placeholders only: the real values arrive in the `activate` request, when
+  // the parent tells the child which kernel/session it belongs to.
+  kernelVersion: arg('kernel-version') ?? '0.0.0',
+  sessionId: arg('session') ?? 'host',
 });
 process.stderr.write(`[extension-host] ${manifest.id} up (pid ${process.pid})\n`);
 void runner.run();

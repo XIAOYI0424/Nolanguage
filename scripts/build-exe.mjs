@@ -21,7 +21,7 @@
  * `node_modules`, so building adds no project dependencies.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, rmSync, statSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -42,16 +42,37 @@ const fail = (m) => {
 
 // ------------------------------------------------------------------- tools
 
-const toolsRequire = createRequire(join(TOOLS, 'package.json'));
-let esbuild;
-let postjectCli;
-try {
-  esbuild = toolsRequire('esbuild');
-  postjectCli = join(TOOLS, 'node_modules', 'postject', 'dist', 'cli.js');
-} catch {
-  fail(`build tools not found in ${TOOLS}\n  run: cd "${TOOLS}" && npm i --ignore-scripts esbuild postject`);
+// Tooling (esbuild/postject) is installed into the isolated node workspace on
+// this machine; on CI it is installed into the project's own node_modules.
+// Resolve from the isolated workspace first, then fall back to the project, so
+// the exact same build runs in both places without adding a project dependency.
+const projectRequire = createRequire(join(ROOT, 'package.json'));
+function toolRequire(name) {
+  try {
+    return createRequire(join(TOOLS, 'package.json'))(name);
+  } catch {
+    return projectRequire(name);
+  }
 }
-if (!existsSync(postjectCli)) fail(`postject missing at ${postjectCli}`);
+let esbuild;
+try {
+  esbuild = toolRequire('esbuild');
+} catch {
+  fail(`esbuild not found — run: npm i --no-save esbuild (or place it in ${TOOLS})`);
+}
+let postjectCli = '';
+try {
+  postjectCli = createRequire(join(TOOLS, 'package.json')).resolve('postject/dist/cli.js');
+} catch {
+  try {
+    postjectCli = projectRequire.resolve('postject/dist/cli.js');
+  } catch {
+    postjectCli = '';
+  }
+}
+if (!postjectCli || !existsSync(postjectCli)) {
+  fail(`postject not found — run: npm i --no-save postject (or place it in ${TOOLS})`);
+}
 
 // -------------------------------------------------------- 1 & 2. bundling
 
@@ -89,6 +110,40 @@ const resolveExtPlugin = {
 const PYRIGHT = join(ROOT, 'src', 'python', 'pyrightServer.py');
 
 /**
+ * Ship a source tree as embedded assets, keyed by its path under the repo root.
+ *
+ * Used for the built-in demo extensions (the extension host child process
+ * imports them by *path*) and for the official language plugins (`builtin/`,
+ * whose manifests and bootstrap scripts are read off disk by the registry). A
+ * packaged build has no source tree to read them from.
+ */
+function embeddedTree(relRoot, prefix) {
+  const root = join(ROOT, relRoot);
+  const out = {};
+  if (!existsSync(root)) return out;
+  const walk = (dir, keyPrefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      const key = `${keyPrefix}/${entry.name}`;
+      if (entry.isDirectory()) walk(full, key);
+      else out[`${prefix}${key}`] = readFileSync(full, 'utf8');
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
+/** Back-compat name for the demo extensions. */
+function embeddedExtensions() {
+  return embeddedTree(join('src', 'extensions', 'examples'), 'extensions/examples');
+}
+
+/** Official language plugins: manifests, grammar and bootstrap scripts. */
+function embeddedBuiltinLanguages() {
+  return embeddedTree('builtin', 'builtin');
+}
+
+/**
  * Node SEA requires the entry to be CommonJS (the blob is executed through the
  * CJS loader, so an ESM entry fails with "Cannot use import statement outside a
  * module"), and `useCodeCache` is only supported for CJS too.
@@ -111,6 +166,8 @@ async function bundle() {
       js:
         `globalThis.__NOLANGUAGE_EMBEDDED__ = ${JSON.stringify({
           'pyrightServer.py': readFileSync(PYRIGHT, 'utf8'),
+          ...embeddedExtensions(),
+          ...embeddedBuiltinLanguages(),
         })};\n`,
     },
   });

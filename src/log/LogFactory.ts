@@ -47,6 +47,15 @@ export class LogFactory implements LoggerFactory {
     });
   }
 
+  /**
+   * The render log scope of stage 8 ("Markdown: ... + render"): every preview
+   * render reports here, so the Logs tab can show render latency per document
+   * the way execution logs show run latency.
+   */
+  forMarkdown(component = 'markdown.render'): LoggerImpl {
+    return this.make('markdown', component, { languageId: 'markdown' });
+  }
+
   forUserCode(languageId: string, sessionId?: string): LoggerImpl {
     return this.make('user-code', `user-code.${languageId}`, {
       languageId,

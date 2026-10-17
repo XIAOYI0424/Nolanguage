@@ -1,61 +1,79 @@
 /**
- * WorkspaceService — the backend behind the IDE UI, now multi-language.
+ * WorkspaceService — the backend behind the IDE UI, driven by language plugins.
  *
- * Each language gets its own *slot*: a real buffer file on disk (so the
- * language server sees it), an execution runner, and a lazily-started LSP
- * client. Slots are independent — a broken gopls cannot stop Python from
- * running, and vice versa.
+ * **This file knows no language.** Every language is a manifest read by
+ * `LanguageRegistry`; every runner is built by `RunnerFactory` from
+ * `manifest.run.mode`; every toolchain path comes from `manifest.run.discovery`.
+ * If a language-specific `if` ever appears here again, the plugin boundary has
+ * been broken.
+ *
+ * Each language still gets its own *slot*: a real buffer file on disk (so the
+ * language server sees it), a runner, and a lazily-started LSP client. Slots
+ * stay independent — a broken gopls cannot stop Python from running.
  *
  *   run(lang, code)        → executes, returns stdout/stderr/exit code
  *   diagnose(lang, code)   → syncs the buffer, returns problems
  *   complete(lang, code,p) → completion items at a position
  *   hover(lang, code, p)   → hover text at a position
- *
- * Two deliberate asymmetries between the languages:
- *
- *  - **Python's server starts eagerly, Go's lazily.** gopls is a large process
- *    with a multi-second warm-up; most sessions never touch Go. Starting it on
- *    first use keeps startup fast without changing Python's behaviour (the
- *    Stage-3 checks depend on a ready server right after init).
- *
- *  - **Go is compiled.** There is no REPL namespace to carry between runs, so a
- *    Go "session" is a module directory rather than a pickled environment.
+ *   preview(lang, code)    → renders Markdown to sanitized HTML (stage 8)
  *
  * Every operation flows through the kernel's spines, so the Performance and
  * Logs tabs show the work the editor just triggered, tagged with languageId.
  */
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   LspClient,
-  discoverPythonServer,
+  fallbackServerSpec,
   fileUri,
   type CompletionItem,
   type Hover,
   type LspLaunchSpec,
 } from '../lsp/LspClient.js';
-import { PythonRunner, type RunResult as PyRunResult } from '../python/PythonRunner.js';
-import { GoRunner, type GoRunResult } from '../go/GoRunner.js';
-import { discoverGoServer, goVersion } from '../go/discover.js';
-import { LANGUAGES, defaultSample, language, type LanguageId, type RunMode } from './samples.js';
+import { renderMarkdown, type MdFrontmatter, type MdHeading, type MdRenderResult, type MdStats } from '../markdown/MdRenderer.js';
+import { defaultSample, type LanguageId, type RunMode } from './samples.js';
+import { LanguageRegistry, type RegistryRoot } from '../langs/Registry.js';
+import { RunnerFactory } from '../langs/RunnerFactory.js';
+import { defaultRuntimeRegistry } from '../runtimes/index.js';
+import type { HostContext, Runner } from '../runtimes/types.js';
+import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
+import {
+  bufferName,
+  primaryExtension,
+  supportsRun as manifestSupportsRun,
+  supportsTest as manifestSupportsTest,
+  type LanguageManifest,
+} from '../langs/manifest.js';
 import type { Kernel } from '../kernel/Kernel.js';
+import type { ExecService } from '../exec/ExecService.js';
 
 export interface WorkspaceServiceOptions {
-  pythonBin?: string;
-  /** Override Go discovery (else GO_BIN → PATH → known install dirs). */
-  goBin?: string;
+  /**
+   * Per-language toolchain overrides, keyed by plugin id. The documented escape
+   * hatch when a machine has several toolchains installed; the manifest's
+   * `run.discovery` is the default.
+   *
+   * This is the *only* way to pin a binary. There used to be one option per
+   * language (`pythonBin`, `goBin`, …), which meant this file had to know which
+   * ids existed — exactly the coupling the plugin boundary removes.
+   */
+  toolchain?: Record<string, string>;
   /** Override language-server discovery, per language. */
-  launch?: Partial<Record<LanguageId, LspLaunchSpec>>;
+  launch?: Partial<Record<string, LspLaunchSpec>>;
   /** Where the buffer files live (defaults to a temp dir). */
   workspaceDir?: string;
   /** Hard timeout for a single run. */
   runTimeoutMs?: number;
-  /**
-   * Start every language server during init. Default: only Python is eager,
-   * everything else starts on first use.
-   */
+  /** Start every language server during init instead of on first use. */
   eagerLsp?: boolean;
+  /** `NOLANGUAGE_HOME`; where `builtin/`, `languages/` and `data/` live. */
+  home?: string;
+  /** Extra plugin roots (the repo's `builtin/` during development). */
+  pluginRoots?: RegistryRoot[];
+  /** Inject a prepared registry (tests, and hosts that own the scan). */
+  registry?: LanguageRegistry;
 }
 
 export interface DiagnoseResult {
@@ -94,12 +112,26 @@ export interface WorkspaceRunResult {
   mode: RunMode;
   /** Which binary produced the output (interpreter / toolchain). */
   binary: string;
-  /** Go only: which phase decided the outcome. */
+  /** Set when a multi-step run failed part-way (compiled languages). */
   phase?: 'build' | 'run' | 'test';
-  /** Go only: the compiler rejected the source. */
+  /** The compiler rejected the source. */
   compileError?: boolean;
-  /** Go only: wall time spent compiling. */
+  /** Wall time spent in the build step. */
   buildMs?: number;
+}
+
+/** One rendered Markdown preview. `html` is sanitized by MdRenderer. */
+export interface PreviewResult {
+  languageId: LanguageId;
+  uri: string;
+  html: string;
+  title: string;
+  headings: MdHeading[];
+  frontmatter: MdFrontmatter;
+  stats: MdStats;
+  truncated: boolean;
+  /** Wall time of the render, milliseconds — the spec's render-latency metric. */
+  ms: number;
 }
 
 export interface LanguageStatus {
@@ -116,6 +148,10 @@ export interface LanguageStatus {
   sessions: number;
   bufferPath: string;
   bufferUri: string;
+  /** Why the runner could not be built, when it could not. */
+  runnerError?: string;
+  /** Runtime id from `manifest.run.mode`. */
+  runMode?: string;
   lsp: {
     /** `pending` = not started yet (lazy). */
     state: 'ready' | 'pending' | 'unavailable';
@@ -129,6 +165,30 @@ export interface LanguageStatus {
   };
 }
 
+/**
+ * The wire shape the UI consumes to build its language list, grammar and
+ * extension map. Sending the *manifest* rather than a hardcoded table is what
+ * lets a newly installed plugin highlight and run without a UI release.
+ */
+export interface LanguageDescriptorWire {
+  id: string;
+  displayName: string;
+  version: string;
+  extensions: string[];
+  defaultExt: string;
+  fileName: string;
+  supportsRun: boolean;
+  supportsTest: boolean;
+  runMode?: string;
+  hasLsp: boolean;
+  lspServerName?: string;
+  memoryHint?: string;
+  /** Highlighting rules straight from `manifest.grammar`. */
+  grammar: Array<{ re: string; cls: string; flags?: string }>;
+  /** True when the plugin came with the binary (vs. user-installed). */
+  builtin: boolean;
+}
+
 const SEVERITY_NAMES: Record<number, string> = {
   1: 'error',
   2: 'warning',
@@ -138,8 +198,18 @@ const SEVERITY_NAMES: Record<number, string> = {
 
 /** One language's buffer + runner + (lazy) language server. */
 interface Slot {
-  id: LanguageId;
-  runner: PythonRunner | GoRunner;
+  id: string;
+  manifest: LanguageManifest;
+  /**
+   * Absent for languages that render rather than execute, and for languages
+   * whose runner could not be built (see `runnerError`). Every consumer must
+   * degrade instead of assuming a runner exists.
+   */
+  runner?: Runner;
+  runnerError?: string;
+  /** Resolved toolchain from `manifest.run.discovery`. */
+  toolchain?: string;
+  toolchainSource?: string;
   lsp?: LspClient;
   lspError?: string;
   lspNote?: string;
@@ -167,64 +237,167 @@ interface Slot {
   queue: Promise<unknown>;
 }
 
+/**
+ * Interpreter used to host the platform's own stub language server.
+ *
+ * The stub (`src/python/pyrightServer.py`) is substrate code written in Python,
+ * so *it* needs an interpreter — this is a property of the bundled asset, not a
+ * fact about the language being edited. It is consulted only when a manifest
+ * declared `bundledFallback: "stub"` **and** its own toolchain was not found.
+ */
+function stubInterpreter(): string {
+  return process.env.PYTHON_BIN ?? 'python';
+}
+
 export class WorkspaceService {
-  private slots = new Map<LanguageId, Slot>();
+  private slots = new Map<string, Slot>();
   private rootDir = '';
   private ready = false;
   private readonly opts: WorkspaceServiceOptions;
+  private readonly registry: LanguageRegistry;
+  private readonly factory: RunnerFactory;
+  /** Stage 9 · execution plane (warm-worker pool). Optional: set after boot. */
+  exec?: ExecService;
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
+    this.registry =
+      opts.registry ??
+      new LanguageRegistry({ home: opts.home, extraRoots: opts.pluginRoots ?? defaultPluginRoots() });
+    this.factory = new RunnerFactory(defaultRuntimeRegistry());
   }
 
-  /** Create buffer files and bring up the eager language server(s). */
+  /** The language registry this workspace is built from. */
+  get languages(): LanguageRegistry {
+    return this.registry;
+  }
+
+  /** The runtime catalogue (for `/health` and the Plugins page). */
+  get runtimes(): RunnerFactory['registry'] {
+    return this.factory.registry;
+  }
+
+  /**
+   * Attach the execution plane once it has been constructed by the host.
+   *
+   * Kept for hosts that own the plane; no language currently routes through it
+   * from this service (the `inline-vm` runtime evaluates in-process).
+   */
+  setExec(exec: ExecService): void {
+    this.exec = exec;
+  }
+
+  /**
+   * Create buffer files and bring up the eager language server(s).
+   *
+   * The workspace directory defaults to a per-pid temp folder; `PANEL_WORKSPACE`
+   * overrides it so a host (or a test harness) can pin it to a location it
+   * already allows.
+   */
   async init(initial?: Partial<Record<LanguageId, string>>): Promise<void> {
     if (this.ready) return;
-    const dir = this.opts.workspaceDir ?? join(tmpdir(), `nolanguage-ide-${process.pid}`);
+    const dir =
+      this.opts.workspaceDir ??
+      process.env.PANEL_WORKSPACE ??
+      join(tmpdir(), `nolanguage-ide-${process.pid}`);
     this.rootDir = dir;
     await mkdir(dir, { recursive: true });
 
-    for (const desc of LANGUAGES) {
-      const langDir = join(dir, desc.id);
+    // The plugin scan is what defines the language set. No fallback list: an
+    // empty registry is a real, reportable failure, not something to paper over.
+    await this.registry.scan();
+    const manifests = this.registry.all();
+    if (!manifests.length) {
+      throw new Error(
+        `no language plugins found under ${this.registry.home} (looked for builtin/ and languages/)`,
+      );
+    }
+
+    for (const manifest of manifests) {
+      const id = manifest.id;
+      const langDir = join(dir, id);
       await mkdir(langDir, { recursive: true });
-      const docPath = join(langDir, desc.fileName);
-      const code = initial?.[desc.id] ?? defaultSample(desc.id).code;
+      const docPath = join(langDir, bufferName(manifest));
+      const code = initial?.[id] ?? defaultSample(id).code;
       await writeFile(docPath, code, 'utf8');
 
-      // Go needs a module: `go test` requires one, and gopls wants a workspace
-      // root it recognises.
-      if (desc.id === 'go') await writeFile(join(langDir, 'go.mod'), GO_MOD, 'utf8');
+      // Project files a language server needs (a Go module, a Cargo manifest).
+      for (const f of manifest.scaffold?.onFirstRun ?? []) {
+        const target = join(langDir, f.file);
+        if (!existsSync(target)) await writeFile(target, f.template, 'utf8');
+      }
 
-      const runner =
-        desc.id === 'go'
-          ? new GoRunner(this.kernel, this.opts.goBin)
-          : new PythonRunner(this.kernel, this.opts.pythonBin);
+      const toolchain = this.resolveToolchain(manifest);
+      let runner: Runner | undefined;
+      let runnerError: string | undefined;
+      if (manifestSupportsRun(manifest)) {
+        try {
+          await this.registry.ensureDataDir(id);
+          runner = this.factory.create(manifest, await this.hostContext(manifest, toolchain)) ?? undefined;
+        } catch (err) {
+          // A plugin whose runtime is missing must not take the workspace down;
+          // it shows up in `status()` as an unavailable language with a reason.
+          runnerError = (err as Error).message;
+          this.kernel.logger
+            .forComponent(`ide.workspace.${id}`)
+            .error('Runner unavailable', { language: id, runMode: manifest.run?.mode }, err as Error);
+        }
+      }
 
       const slot: Slot = {
-        id: desc.id,
+        id,
+        manifest,
         runner,
+        runnerError,
+        toolchain: toolchain.bin || undefined,
+        toolchainSource: toolchain.source,
         lspPending: true,
         docPath,
         docUri: fileUri(docPath),
         queue: Promise.resolve(),
       };
-      // Resolve the Go version now: it needs a process, and status() must stay
+      // Resolve the version now: it needs a process, and status() must stay
       // synchronous for the UI.
-      if (runner instanceof GoRunner && runner.available) {
-        slot.version = (await goVersion(runner.binary)) ?? undefined;
+      const versionArgs = manifest.run?.versionArgs;
+      if (versionArgs && toolchain.bin && toolchain.source !== 'missing') {
+        slot.version = (await probeVersion(toolchain.bin, versionArgs)) ?? undefined;
       }
-      this.slots.set(desc.id, slot);
+      this.slots.set(id, slot);
     }
 
-    const eager: LanguageId[] = this.opts.eagerLsp === true ? LANGUAGES.map((l) => l.id) : ['python'];
+    const eager: string[] = this.opts.eagerLsp === true
+      ? manifests.map((m) => m.id)
+      : manifests.filter((m) => m.lsp?.eager && !m.lsp.disabled).map((m) => m.id);
     for (const id of eager) await this.ensureLsp(id);
 
     this.kernel.logger.root().info('Workspace ready', {
       root: dir,
       languages: [...this.slots.keys()].join(','),
+      runtimes: this.factory.registry.list().map((r) => `${r.id}@${r.version}`).join(','),
       buffers: [...this.slots.values()].map((s) => s.docPath).join(' | '),
     });
     this.ready = true;
+  }
+
+  // ---------------- plugin plumbing ----------------
+
+  /** Resolve a toolchain: explicit override → manifest discovery → missing. */
+  private resolveToolchain(manifest: LanguageManifest): BinaryResolution {
+    const override = this.opts.toolchain?.[manifest.id];
+    if (override) return { bin: override, source: 'override' };
+    return discoverBinary(manifest.run?.discovery);
+  }
+
+  private async hostContext(manifest: LanguageManifest, toolchain: BinaryResolution): Promise<HostContext> {
+    const source = this.registry.sourceOf(manifest.id);
+    return {
+      kernel: this.kernel,
+      languageId: manifest.id,
+      dataDir: await this.registry.ensureDataDir(manifest.id),
+      pluginDir: source?.dir ?? this.registry.home,
+      toolchain: toolchain.source === 'missing' ? undefined : toolchain.bin,
+      exec: this.exec,
+    };
   }
 
   // ---------------- language-server lifecycle ----------------
@@ -233,7 +406,7 @@ export class WorkspaceService {
    * Start a language server on first use. Concurrent callers share one launch
    * via `lspStarting`, so a double Check does not spawn two gopls processes.
    */
-  private ensureLsp(id: LanguageId): Promise<void> {
+  private ensureLsp(id: string): Promise<void> {
     const slot = this.slots.get(id);
     if (!slot || !slot.lspPending) return Promise.resolve();
     if (slot.lspStarting) return slot.lspStarting;
@@ -244,26 +417,53 @@ export class WorkspaceService {
     return slot.lspStarting;
   }
 
+  /**
+   * Generic language-server launch.
+   *
+   * The four language branches this used to contain were *policy* — which
+   * binary to look for, what to call it, and whether the platform ships a
+   * fallback — so they now live in `manifest.lsp`. The only substrate-owned
+   * capability left is `bundledFallback: "stub"`, which names a server the
+   * binary carries rather than a language.
+   */
   private async startLsp(slot: Slot): Promise<void> {
     const log = this.kernel.logger.forComponent(`ide.workspace.${slot.id}`);
+    const spec = slot.manifest.lsp;
 
     let launch: LspLaunchSpec | undefined = this.opts.launch?.[slot.id];
     let note: string | undefined;
 
-    if (!launch && slot.id === 'python') {
-      launch = await discoverPythonServer(this.opts.pythonBin);
-    } else if (!launch) {
-      const res = discoverGoServer((slot.runner as GoRunner).discovery);
-      if (!res.launch) {
-        slot.lspError = res.note;
+    if (!launch) {
+      if (!spec || spec.disabled) {
+        slot.lspError = spec?.degradedNote ?? `"${slot.id}" declares no language server`;
+        log.warn('No language server declared', { language: slot.id });
+        return;
+      }
+
+      const found = discoverBinary(spec.discovery);
+      if (found.source !== 'missing' && found.bin) {
+        launch = {
+          languageId: spec.languageId ?? slot.id,
+          serverName: spec.serverName ?? slot.id,
+          command: found.bin,
+          args: spec.args ?? [],
+        };
+        note = `${launch.serverName} (${found.source})`;
+      } else if (spec.bundledFallback === 'stub') {
+        launch = fallbackServerSpec(slot.toolchain ?? stubInterpreter());
+        note = 'bundled stub server';
+      } else {
+        slot.lspError = spec.degradedNote ?? `${spec.serverName ?? 'language server'} not found`;
         log.warn('Language server unavailable — Check/completion disabled', {
           language: slot.id,
-          searched: res.searched.join(', ') || '(none)',
+          searched: [
+            ...(spec.discovery?.envVars ?? []),
+            ...(spec.discovery?.knownPaths ?? []),
+            ...(spec.discovery?.commands ?? []),
+          ].join(', ') || '(none)',
         });
         return;
       }
-      launch = res.launch;
-      note = `gopls (${res.source})`;
     }
     if (!launch) return;
 
@@ -288,6 +488,11 @@ export class WorkspaceService {
 
   // ---------------- public API ----------------
 
+  /** Is this language part of the workspace? */
+  hasLanguage(id: string): boolean {
+    return this.slots.has(id);
+  }
+
   bufferUri(id: LanguageId): string {
     return this.slots.get(id)?.docUri ?? '';
   }
@@ -297,8 +502,50 @@ export class WorkspaceService {
   }
 
   /**
-   * Status for every language. Python's values are also mirrored at the top
-   * level so the Stage-3 checks (written before Go existed) keep working.
+   * The directory buffers live in. Set at the top of `init()`, so it is valid
+   * even when `init()` later fails (a read-only or sandboxed workspace) — the
+   * caller can still report *where* the workspace was meant to be.
+   */
+  get root(): string {
+    return this.rootDir;
+  }
+
+  /**
+   * The language list the UI builds itself from — id, display name,
+   * extensions, grammar and capabilities, straight from the manifests.
+   */
+  languageList(): LanguageDescriptorWire[] {
+    const out: LanguageDescriptorWire[] = [];
+    for (const slot of this.slots.values()) {
+      const m = slot.manifest;
+      const source = this.registry.sourceOf(m.id);
+      out.push({
+        id: m.id,
+        displayName: m.displayName,
+        version: m.version,
+        extensions: (m.file.extensions ?? []).map((e) => e.replace(/^\./, '').toLowerCase()),
+        defaultExt: (m.file.defaultExt ?? m.file.extensions?.[0] ?? '').replace(/^\./, ''),
+        fileName: bufferName(m),
+        supportsRun: manifestSupportsRun(m),
+        supportsTest: manifestSupportsTest(m),
+        runMode: m.run?.mode,
+        hasLsp: !!m.lsp && !m.lsp.disabled,
+        lspServerName: m.lsp?.serverName,
+        memoryHint: m.lsp?.memoryHint,
+        grammar: m.grammar?.rules ?? [],
+        builtin: source?.kind === 'builtin',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Status for every language.
+   *
+   * The four scalar fields are a *mirror* of the first language, kept because
+   * the Stage-3 wire shape (written when Python was the only language) is still
+   * consumed by the status bar. "First" means first in manifest order — Python
+   * declares `order: 10`, so it keeps winning without this file naming it.
    */
   status(): {
     bufferPath: string;
@@ -314,63 +561,67 @@ export class WorkspaceService {
     };
     languages: LanguageStatus[];
   } {
-    const languages = LANGUAGES.map((d) => this.languageStatus(d.id));
-    const py = languages.find((l) => l.id === 'python')!;
+    const languages = [...this.slots.keys()].map((id) => this.languageStatus(id));
+    // Never `undefined`: a workspace with every plugin disabled still has to
+    // answer with the old shape.
+    const primary = languages[0];
     return {
-      bufferPath: py.bufferPath,
-      pythonBin: py.binary,
-      sessions: py.sessions,
+      bufferPath: primary?.bufferPath ?? '',
+      pythonBin: primary?.binary ?? '',
+      sessions: primary?.sessions ?? 0,
       lsp: {
-        available: py.lsp.state === 'ready',
-        running: py.lsp.running,
-        serverName: py.lsp.serverName,
-        capabilities: py.lsp.capabilities,
-        logRecords: py.lsp.logRecords,
-        error: py.lsp.error,
+        available: primary?.lsp.state === 'ready',
+        running: primary?.lsp.running ?? false,
+        serverName: primary?.lsp.serverName ?? 'none',
+        capabilities: primary?.lsp.capabilities ?? 0,
+        logRecords: primary?.lsp.logRecords ?? 0,
+        error: primary?.lsp.error,
       },
       languages,
     };
   }
 
   languageStatus(id: LanguageId): LanguageStatus {
-    const desc = language(id);
     const slot = this.slots.get(id);
     if (!slot) {
+      const entry = this.registry.entry(id);
+      const m = entry?.manifest;
       return {
         id,
-        displayName: desc.displayName,
-        extension: desc.extension,
-        fileName: desc.fileName,
-        supportsTest: desc.supportsTest,
+        displayName: m?.displayName ?? id,
+        extension: m ? primaryExtension(m) : '',
+        fileName: m ? bufferName(m) : '',
+        supportsTest: m ? manifestSupportsTest(m) : false,
         available: false,
         binary: '',
         binarySource: 'missing',
         sessions: 0,
         bufferPath: '',
         bufferUri: '',
+        runnerError: `"${id}" is not part of this workspace`,
         lsp: { state: 'unavailable', running: false, serverName: 'none', capabilities: 0, logRecords: 0 },
       };
     }
 
-    const isGo = slot.runner instanceof GoRunner;
-    const go = isGo ? (slot.runner as GoRunner) : undefined;
-    const binary = isGo ? go!.binary : (slot.runner as PythonRunner).binary;
-    const available = isGo ? go!.available : true;
+    const m = slot.manifest;
     const lspStatus = slot.lsp?.status();
+    const hasRunner = !!slot.runner;
 
     return {
       id,
-      displayName: desc.displayName,
-      extension: desc.extension,
-      fileName: desc.fileName,
-      supportsTest: desc.supportsTest,
-      available,
-      binary,
-      binarySource: go ? go.discovery.source : 'configured',
+      displayName: m.displayName,
+      extension: primaryExtension(m),
+      fileName: bufferName(m),
+      supportsTest: manifestSupportsTest(m),
+      available: hasRunner ? slot.runner!.available : !manifestSupportsRun(m),
+      binary: slot.runner?.binary ?? slot.toolchain ?? '',
+      binarySource: slot.toolchainSource ?? 'configured',
       version: slot.version,
-      sessions: slot.runner.sessionCount(),
+      sessions: slot.runner?.sessionCount() ?? 0,
       bufferPath: slot.docPath,
       bufferUri: slot.docUri,
+      runnerError: slot.runnerError,
+      runMode: m.run?.mode,
       lsp: {
         state: slot.lsp ? 'ready' : slot.lspError ? 'unavailable' : 'pending',
         running: lspStatus?.running ?? false,
@@ -384,74 +635,88 @@ export class WorkspaceService {
     };
   }
 
-  /** Execute code in the given (or default) session. */
+  /**
+   * Execute code in the given (or default) session.
+   *
+   * One path: ask the slot's runner. There is no `instanceof` ladder here any
+   * more — the runtime returned by `RunnerFactory` already speaks the uniform
+   * `RunOutcome` shape.
+   */
   async run(
     id: LanguageId,
     code: string,
-    opts: { sessionId?: string; reset?: boolean; mode?: RunMode; timeoutMs?: number } = {},
+    opts: {
+      sessionId?: string;
+      reset?: boolean;
+      mode?: RunMode;
+      timeoutMs?: number;
+      onData?: (stream: 'stdout' | 'stderr', text: string) => void;
+      onStdinReady?: (sink: (data: string) => void) => void;
+    } = {},
   ): Promise<WorkspaceRunResult> {
     const slot = this.requireSlot(id);
-    const sessionId = opts.sessionId ?? 'ide';
-    const mode: RunMode = opts.mode ?? 'run';
-    // Go compiles before it runs, so it needs more headroom than Python.
-    const timeoutMs = opts.timeoutMs ?? this.opts.runTimeoutMs ?? (id === 'go' ? 30_000 : 15_000);
-
-    if (opts.reset) await slot.runner.resetSession(sessionId);
-
-    if (slot.runner instanceof GoRunner) {
-      const r: GoRunResult = await slot.runner.run({ code, sessionId, mode, timeoutMs });
-      return {
-        languageId: id,
-        sessionId: r.sessionId,
-        runId: r.runId,
-        exitCode: r.exitCode,
-        signal: r.signal,
-        durationMs: r.durationMs,
-        stdout: r.stdout,
-        stderr: r.stderr,
-        timedOut: r.timedOut,
-        logLines: r.logLines,
-        mode,
-        binary: r.goBin,
-        phase: r.phase,
-        compileError: r.compileError,
-        buildMs: r.buildMs,
-      };
+    if (!slot.runner) {
+      // Render-only languages and broken plugins get the same clear answer
+      // instead of a TypeError on a missing runner.
+      if (!manifestSupportsRun(slot.manifest)) {
+        throw new Error(`"${id}" documents render — there is nothing to run`);
+      }
+      throw new Error(`"${id}" cannot run: ${slot.runnerError ?? 'no runner available'}`);
     }
 
-    const r: PyRunResult = await (slot.runner as PythonRunner).run({ code, sessionId, timeoutMs });
+    const sessionId = opts.sessionId ?? 'ide';
+    const mode: RunMode = opts.mode ?? 'run';
+    if (opts.reset) await slot.runner.resetSession(sessionId);
+
+    const outcome = await slot.runner.run({
+      code,
+      sessionId,
+      mode,
+      timeoutMs: opts.timeoutMs ?? this.opts.runTimeoutMs,
+      onData: opts.onData,
+      onStdinReady: opts.onStdinReady,
+    });
+
     return {
       languageId: id,
-      sessionId: r.sessionId,
-      runId: r.runId,
-      exitCode: r.exitCode,
-      signal: r.signal,
-      durationMs: r.durationMs,
-      stdout: r.stdout,
-      stderr: r.stderr,
-      timedOut: r.timedOut,
-      logLines: r.logLines,
-      mode: 'run',
-      binary: r.pythonBin,
+      sessionId: outcome.sessionId,
+      runId: outcome.runId,
+      exitCode: outcome.exitCode,
+      signal: outcome.signal,
+      durationMs: outcome.durationMs,
+      stdout: outcome.stdout,
+      stderr: outcome.stderr,
+      timedOut: outcome.timedOut,
+      logLines: outcome.logLines,
+      mode,
+      binary: outcome.binary,
+      phase: outcome.phase,
+      compileError: outcome.compileError,
+      buildMs: outcome.buildMs,
     };
   }
 
   async resetSession(id: LanguageId, sessionId = 'ide'): Promise<boolean> {
-    return this.requireSlot(id).runner.resetSession(sessionId);
+    const slot = this.requireSlot(id);
+    // Render-only languages have no session; "nothing to reset" is success.
+    if (!slot.runner) return false;
+    return slot.runner.resetSession(sessionId);
   }
 
   /** Sync the buffer and return the problems the language server reports. */
   async diagnose(id: LanguageId, code: string): Promise<DiagnoseResult> {
     const slot = this.requireSlot(id);
     await this.ensureLsp(id);
+    const spec = slot.manifest.lsp;
     return this.serialize(slot, async () => {
       await writeFile(slot.docPath, code, 'utf8').catch(() => undefined);
       if (!slot.lsp) {
         return { uri: slot.docUri, items: [], errors: 0, warnings: 0, fromLsp: false, note: slot.lspError };
       }
       slot.lsp.changeDocument(slot.docUri, code, id);
-      // gopls does a full type-check on the first pass; give it longer.
-      let wait = await slot.lsp.waitForDiagnostics(slot.docUri, id === 'go' ? 6000 : 2500);
+      // Type-checking servers need a longer first pass; the numbers are policy,
+      // so they come from the manifest instead of a language branch.
+      let wait = await slot.lsp.waitForDiagnostics(slot.docUri, spec?.diagnosticsTimeoutMs ?? 2500);
       // A cold server (fresh process, uncached module) can still be loading when
       // the first wait expires. `published: false` means it never answered, so
       // nudge the document and wait once more — without this, "no answer yet"
@@ -459,7 +724,7 @@ export class WorkspaceService {
       // errors on the very first Check of a session.
       if (!wait.published) {
         slot.lsp.changeDocument(slot.docUri, code, id);
-        wait = await slot.lsp.waitForDiagnostics(slot.docUri, id === 'go' ? 20000 : 2500);
+        wait = await slot.lsp.waitForDiagnostics(slot.docUri, spec?.coldDiagnosticsTimeoutMs ?? 2500);
       }
       const mapped = wait.items.map((d) => ({
         line: d.range.start.line,
@@ -510,10 +775,73 @@ export class WorkspaceService {
     });
   }
 
+  /**
+   * Render a Markdown document to sanitized HTML (stage 8).
+   *
+   * This is the spec's "render latency" column of the performance spine and
+   * the "render logs" column of the log spine, so it flows through the same
+   * machinery a run does: a `markdown.render` span, `markdown.render` /
+   * `markdown.blocks` metrics, and a `markdown`-scoped log record per
+   * render — visible in the Performance and Logs tabs without the UI doing
+   * anything special.
+   *
+   * The renderer itself is pure; measurement wraps it here so tests stay
+   * deterministic and the UI can still see a real duration.
+   */
+  async preview(id: LanguageId, code: string): Promise<PreviewResult> {
+    const slot = this.requireSlot(id);
+    return this.serialize(slot, async () => {
+      const t0 = performance.now();
+      const span = this.kernel.tracer.startSpan('markdown.render', {
+        attributes: { languageId: id, bytes: code.length },
+      });
+      const log = this.kernel.logger.forMarkdown().span(span);
+      try {
+        const r: MdRenderResult = renderMarkdown(code);
+        const durationMs = performance.now() - t0;
+        const m = this.kernel.perfMetrics();
+        m.record('markdown.render', durationMs);
+        m.record('markdown.blocks', r.stats.blocks);
+        log.info('Rendered preview', {
+          ms: Number(durationMs.toFixed(3)),
+          headings: r.stats.headings,
+          blocks: r.stats.blocks,
+          words: r.stats.words,
+          codeBlocks: r.stats.codeBlocks,
+          links: r.stats.links,
+          truncated: r.truncated,
+        });
+        span
+          .setAttribute('headings', r.stats.headings)
+          .setAttribute('blocks', r.stats.blocks)
+          .setAttribute('truncated', r.truncated)
+          .end();
+        // Keep the buffer on disk so marksman (when installed) sees the same
+        // document the preview just rendered.
+        await writeFile(slot.docPath, code, 'utf8').catch(() => undefined);
+        return {
+          languageId: id,
+          uri: slot.docUri,
+          html: r.html,
+          title: r.title,
+          headings: r.headings,
+          frontmatter: r.frontmatter,
+          stats: r.stats,
+          truncated: r.truncated,
+          ms: Number(durationMs.toFixed(3)),
+        };
+      } catch (err) {
+        span.setAttribute('error', (err as Error).message).end();
+        log.error('Preview render failed', { bytes: code.length }, err as Error);
+        throw err;
+      }
+    });
+  }
+
   async close(): Promise<void> {
     for (const slot of this.slots.values()) {
       await slot.lsp?.stop().catch(() => undefined);
-      await slot.runner.close().catch(() => undefined);
+      await slot.runner?.close().catch(() => undefined);
     }
   }
 
@@ -537,12 +865,19 @@ export class WorkspaceService {
   }
 }
 
-const GO_MOD = `// Generated by Nolanguage — one module per IDE workspace.
-module nolanguage/ide
-
-go 1.21
-`;
-
 async function readText(path: string): Promise<string> {
   return readFile(path, 'utf8').catch(() => '');
+}
+
+/**
+ * Default plugin roots when the host does not supply any.
+ *
+ * `<cwd>/builtin` is where the official plugins live in a source checkout —
+ * and every harness runs from the repo root, so this is what makes `init()`
+ * work out of the box. A packaged build has no such directory; the host
+ * (`server.ts`) materialises the embedded copy and passes it explicitly.
+ */
+function defaultPluginRoots(): RegistryRoot[] {
+  const dir = join(process.cwd(), 'builtin');
+  return existsSync(dir) ? [{ dir, kind: 'builtin', removable: false }] : [];
 }

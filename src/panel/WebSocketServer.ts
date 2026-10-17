@@ -8,6 +8,8 @@
  *  - Text/Binary/Close/Ping/Pong frame parsing, including client masking.
  *  - Payload lengths 7-bit / 16-bit / 64-bit.
  *  - Fragmented (continuation) frames on the read path.
+ *  - Origin checking on the upgrade, because a WebSocket handshake bypasses the
+ *    same-origin policy and this server can read and write local files.
  *  - `createWebSocketServer({ port, host, onConnection })`.
  */
 import { createServer, type Server, type IncomingMessage } from 'node:http';
@@ -16,6 +18,12 @@ import type { Duplex } from 'node:stream';
 import { EventEmitter } from 'node:events';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+/**
+ * Hostnames that mean "this machine". A page served from any of these on the
+ * bound port is the app itself; anything else is a third-party origin.
+ */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 const OPCODE = {
   CONT: 0x0,
@@ -33,6 +41,11 @@ export interface WsServerOptions {
   onRequest?: (req: IncomingMessage, res: import('node:http').ServerResponse) => boolean;
   /** Auto ping interval to keep intermediaries from closing idle sockets. */
   pingIntervalMs?: number;
+  /**
+   * Extra origins allowed to upgrade, on top of the loopback origins derived
+   * from the bound port. `['*']` disables the check entirely.
+   */
+  allowedOrigins?: string[];
 }
 
 export interface WsServerEvents {
@@ -265,10 +278,13 @@ export class WebSocketServer extends EventEmitter {
   private connections = new Set<WebSocketConnection>();
   private pingTimer?: ReturnType<typeof setInterval>;
   private opts: WsServerOptions;
+  /** The port actually bound, which differs from `opts.port` when it is 0. */
+  private boundPort: number;
 
   constructor(opts: WsServerOptions) {
     super();
     this.opts = opts;
+    this.boundPort = opts.port;
     this.http = createServer((req, res) => {
       if (this.opts.onRequest?.(req, res)) return;
       res.writeHead(404, { 'content-type': 'text/plain' });
@@ -277,7 +293,44 @@ export class WebSocketServer extends EventEmitter {
     this.http.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket as Duplex, head));
   }
 
+  /**
+   * Decide whether an upgrade may proceed.
+   *
+   * WebSocket handshakes are **exempt from the same-origin policy** — the
+   * browser will happily open a socket to `ws://127.0.0.1:<port>` from any page
+   * the user happens to be visiting, so the server has to refuse. That matters
+   * here because the panel can list, read, write and delete files: an
+   * unchecked upgrade is a local file-disclosure hole reachable from a single
+   * `<script>` on a random website.
+   *
+   * Browsers always send `Origin` on a WebSocket upgrade. Native clients — the
+   * verification suites, a future CLI — send none, and are allowed, because
+   * they are already outside the browser's protection model.
+   */
+  private originAllowed(req: IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (typeof origin !== 'string' || origin === '') return true;
+    const extra = this.opts.allowedOrigins;
+    if (extra?.includes('*')) return true;
+    if (extra?.includes(origin)) return true;
+    let url: URL;
+    try {
+      url = new URL(origin);
+    } catch {
+      return false; // `Origin: null` (sandboxed / file://) and other junk
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    if (!LOOPBACK_HOSTS.has(url.hostname)) return false;
+    const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
+    return port === this.boundPort;
+  }
+
   private handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (!this.originAllowed(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     const key = req.headers['sec-websocket-key'];
     if (typeof key !== 'string' || req.headers.upgrade?.toLowerCase() !== 'websocket') {
       socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
@@ -305,6 +358,7 @@ export class WebSocketServer extends EventEmitter {
       this.http.listen(this.opts.port, host, () => {
         const addr = this.http.address();
         const port = typeof addr === 'object' && addr ? addr.port : this.opts.port;
+        this.boundPort = port;
         const pingMs = this.opts.pingIntervalMs ?? 30_000;
         this.pingTimer = setInterval(() => {
           for (const c of this.connections) {

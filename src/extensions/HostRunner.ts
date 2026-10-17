@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { JsonRpcConnection } from '../lsp/jsonrpc.js';
 import { HostLogCollector } from './HostLogCollector.js';
+import type { ExtensionModule, ExtensionContext } from './api.js';
 import {
   PROTOCOL,
   type ActivateParams,
@@ -25,23 +26,6 @@ import {
   type LogBatchParams,
   type ReadyParams,
 } from './protocol.js';
-
-/** What the extension module may export (plain JS, no types at runtime). */
-export interface ExtensionModule {
-  activate?: (ctx: ExtensionContext) => void | Promise<void>;
-  deactivate?: () => void | Promise<void>;
-  execute?: (commandId: string, args: unknown[]) => unknown | Promise<unknown>;
-}
-
-export interface ExtensionContext {
-  extensionId: string;
-  kernelVersion: string;
-  sessionId: string;
-  /** Batched logger: records are pushed to the kernel, not printed here. */
-  log: HostLogCollector;
-  /** Diagnostics helper (host process facts). */
-  host: { pid: number; uptimeMs: () => number };
-}
 
 export interface HostRunnerOptions {
   /** Heartbeat cadence; the first one is sent right after `ready`. */
@@ -59,7 +43,9 @@ export class HostRunner {
 
   constructor(private params: ActivateParams, opts: HostRunnerOptions = {}) {
     this.opts = opts;
-    this.rpc = new JsonRpcConnection(process.stdin, process.stdout);
+    // Child side: outbound (write) goes to stdout (parent reads it), inbound
+    // (read) comes from stdin (parent writes it).
+    this.rpc = new JsonRpcConnection(process.stdout, process.stdin);
     this.rpc.on('close', () => {
       this.log?.stop();
       process.exit(this.active ? 0 : 0);
@@ -110,6 +96,11 @@ export class HostRunner {
         if (this.active) return { ok: true, alreadyActive: true };
         const p = params as Partial<ActivateParams>;
         const entryPath = p.entryPath ?? this.params.entryPath;
+        // The parent knows the real kernel version / session; adopt them so the
+        // context an extension sees is accurate (the argc placeholders are only
+        // a fallback for hand-launched hosts).
+        if (p.kernelVersion) this.params.kernelVersion = p.kernelVersion;
+        if (p.sessionId) this.params.sessionId = p.sessionId;
         this.log = new HostLogCollector({
           extensionId: p.extensionId ?? this.params.extensionId,
           push: (records) => {

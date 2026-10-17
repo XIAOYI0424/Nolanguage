@@ -13,7 +13,7 @@
  */
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -58,4 +58,27 @@ export function isPackaged(): boolean {
 /** Every asset key that is available in this build (empty for source runs). */
 export function embeddedAssetNames(): string[] {
   return Object.keys(embeddedStore() ?? {});
+}
+
+/**
+ * Materialise every embedded asset whose key starts with `prefix` and return
+ * the directory they landed in (or `undefined` outside a packaged build).
+ *
+ * Keys carry their relative path (`extensions/examples/hello/extension.json`),
+ * so the whole tree is recreated under one temp root. Used to ship the built-in
+ * demo extensions inside the executable: the extension host child process
+ * imports them by path, and a path is the only thing `import()` accepts.
+ */
+export function materializeAssets(prefix: string): string | undefined {
+  const store = embeddedStore();
+  if (!store) return undefined;
+  const keys = Object.keys(store).filter((k) => k.startsWith(prefix));
+  if (!keys.length) return undefined;
+  const root = join(tmpdir(), 'nolanguage-embedded');
+  for (const key of keys) {
+    const target = join(root, key);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, store[key], 'utf8');
+  }
+  return join(root, ...prefix.split('/').filter(Boolean));
 }

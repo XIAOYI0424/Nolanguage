@@ -34,6 +34,10 @@ export interface RunOptions {
   cwd?: string;
   /** Capture each stdout line as a log record (default true). */
   captureOutput?: boolean;
+  /** Stream each stdout/stderr chunk live (e.g. to surface prompts / partial output). */
+  onData?: (stream: 'stdout' | 'stderr', text: string) => void;
+  /** Called once the child is spawned; feed its stdin via the sink (interactive `input()`). */
+  onStdinReady?: (sink: (data: string) => void) => void;
 }
 
 export interface RunResult {
@@ -193,6 +197,7 @@ export class PythonRunner {
     const onLine = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
       const text = chunk.toString('utf8');
       (stream === 'stdout' ? stdoutChunks : stderrChunks).push(text);
+      opts.onData?.(stream, text);
       if (!capture) return;
       for (const raw of text.split('\n')) {
         const line = raw.replace(/\r$/, '');
@@ -213,6 +218,14 @@ export class PythonRunner {
     };
     child.stdout.on('data', onLine('stdout'));
     child.stderr.on('data', onLine('stderr'));
+    // Keep stdin open and hand the caller a writer so interactive `input()`
+    // works — the panel can pipe a user's keystrokes straight into the process.
+    if (opts.onStdinReady) {
+      const sink = (d: string): void => {
+        try { child.stdin?.write(d); } catch { /* closed */ }
+      };
+      opts.onStdinReady(sink);
+    }
 
     let timedOut = false;
     const timer = setTimeout(() => {

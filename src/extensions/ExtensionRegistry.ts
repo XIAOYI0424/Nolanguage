@@ -23,6 +23,8 @@ export interface RegisteredExtension {
   manifest: ExtensionManifest;
   /** Directory the manifest was read from (entry paths resolve against it). */
   dir: string;
+  /** Absolute path of the manifest file (handed to the host child process). */
+  manifestPath: string;
   /** Absolute path of the entry module. */
   entryPath: string;
   /** False when `engines.kernel` does not match the running kernel. */

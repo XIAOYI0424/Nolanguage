@@ -72,7 +72,7 @@ export interface ServiceRegistry {
 
 export type LogResourceScope =
   | 'kernel' | 'extension' | 'language-server'
-  | 'execution' | 'user-code' | 'ai';
+  | 'execution' | 'user-code' | 'ai' | 'markdown';
 
 export interface LogCorrelation {
   gitCommit?: string;
@@ -130,6 +130,8 @@ export interface LoggerFactory {
   forExecution(component: string, sessionId?: string): Logger;
   /** Logger scoped to user code output (scope = 'user-code'). */
   forUserCode(languageId: string, sessionId?: string): Logger;
+  /** Logger scoped to the Markdown render pipeline (scope = 'markdown'). */
+  forMarkdown(component?: string): Logger;
   root(): Logger;
 }
 

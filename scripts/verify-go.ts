@@ -18,10 +18,22 @@ import { resolveGoBin, discoverGoServer, goVersion } from '../src/go/discover.js
 import { WorkspaceService } from '../src/panel/WorkspaceService.js';
 import { defaultSample, sampleById } from '../src/panel/samples.js';
 
-const results: { name: string; ok: boolean; detail: string }[] = [];
+const results: { name: string; ok: boolean; detail: string; skipped?: boolean }[] = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+}
+
+/**
+ * An optional external tool is absent, so the check could not run.
+ *
+ * Reported separately from PASS and FAIL on purpose: counting it as a pass
+ * would overstate what was actually verified, and failing it would blame this
+ * project for a machine that simply has no `gopls` installed.
+ */
+function skip(name: string, detail = ''): void {
+  results.push({ name, ok: true, detail, skipped: true });
+  console.log(`SKIP  ${name}${detail ? '  — ' + detail : ''}`);
 }
 
 function makeKernel(): Kernel {
@@ -42,12 +54,21 @@ async function main(): Promise<void> {
   check('go version reported', !!version, version ?? 'n/a');
 
   const server = discoverGoServer(go);
-  check('gopls discovered', !!server.launch, `${server.serverName} (via ${server.source})`);
-  check(
-    'gopls launch spec is well formed',
-    !!server.launch && server.launch.languageId === 'go' && server.launch.args.includes('serve'),
-    server.launch ? `${server.launch.command} ${server.launch.args.join(' ')}` : 'none',
-  );
+  // gopls is an *optional* external tool: a machine can have a working Go
+  // toolchain and no language server, and the platform is required to keep
+  // working in that state (the IDE reports "diagnosis only, no execution").
+  // So its absence is a skip, never a failure.
+  if (server.launch) {
+    check('gopls discovered', true, `${server.serverName} (via ${server.source})`);
+    check(
+      'gopls launch spec is well formed',
+      server.launch.languageId === 'go' && server.launch.args.includes('serve'),
+      `${server.launch.command} ${server.launch.args.join(' ')}`,
+    );
+  } else {
+    skip('gopls discovered', `not installed — searched ${server.searched.join(', ')}`);
+    skip('gopls launch spec is well formed', 'no server to describe');
+  }
 
   if (go.source === 'missing') {
     console.log('\nGo toolchain missing — skipping execution checks.');
@@ -151,7 +172,7 @@ async function main(): Promise<void> {
   if (!server.launch) {
     check('gopls unavailable — LSP checks skipped', true, 'graceful degradation');
   } else {
-    const ws = new WorkspaceService(kernel, { goBin: go.bin });
+    const ws = new WorkspaceService(kernel, { toolchain: { go: go.bin } });
     await ws.init({ go: defaultSample('go').code });
 
     const st = ws.status();
@@ -242,7 +263,8 @@ async function main(): Promise<void> {
 
 function report(): void {
   const failed = results.filter((r) => !r.ok);
-  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+  const skipped = results.filter((r) => r.skipped).length;
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed${skipped ? ` (${skipped} skipped: optional tool missing)` : ''}`);
   if (failed.length) {
     console.log('failed: ' + failed.map((f) => f.name).join('; '));
     process.exit(1);
