@@ -2,10 +2,14 @@
  * Python profiling bootstrap (stdlib only: cProfile + pstats).
  *
  * Usage: `python profile.py <snippet.py> <out.json>`
- * It execs the snippet under cProfile, then writes a JSON report with the raw
- * pstats rows (function, calls, tottime, cumtime) so the Node side can
- * normalise them into hotspots. Inlined as a string constant so it bundles
- * into the packaged exe with no asset embedding.
+ * It execs the snippet under cProfile, then writes a JSON report with:
+ *   - `rows`   : the raw pstats rows (function, calls, tottime, cumtime) so the
+ *               Node side can normalise them into hotspots.
+ *   - `flame`  : a call tree (list of root frames) for flamegraph rendering,
+ *               built from pstats' caller graph with cycle protection.
+ *
+ * Inlined as a string constant so it bundles into the packaged exe with no
+ * asset embedding.
  */
 export const PYTHON_PROFILE_SRC = [
   'import cProfile, pstats, json, sys, io, time, traceback, contextlib',
@@ -34,9 +38,11 @@ export const PYTHON_PROFILE_SRC = [
   'wall = (time.perf_counter() - t0) * 1000.0',
   '',
   'rows = []',
+  'flame = []',
   'try:',
   '    stats = pstats.Stats(pr)',
-  '    for func, (cc, nc, tt, ct, callers) in stats.stats.items():',
+  '    s = stats.stats',
+  '    for func, (cc, nc, tt, ct, callers) in s.items():',
   '        filename, lineno, name = func',
   '        rows.append({',
   '            "file": filename,',
@@ -47,6 +53,30 @@ export const PYTHON_PROFILE_SRC = [
   '            "tottimeMs": tt * 1000.0,',
   '            "cumtimeMs": ct * 1000.0,',
   '        })',
+  '    # ---- build the call tree (roots = functions with no callers) ----',
+  '    callees_of = {}',
+  '    for func in s:',
+  '        callees_of[func] = [g for g in s if func in s[g][4]]',
+  '    roots = [func for func in s if not s[func][4]]',
+  '    if not roots and s:',
+  '        roots = [max(s, key=lambda f: s[f][3])]',
+  '    seen_depth = 0',
+  '    def frame(func, path):',
+  '        global seen_depth',
+  '        cc, nc, tt, ct, callers = s[func]',
+  '        filename, lineno, name = func',
+  '        children = []',
+  '        for g in callees_of[func]:',
+  '            if g in path:  # recursion / cycle: stop descending',
+  '                continue',
+  '            children.append(frame(g, path | {func}))',
+  '        seen_depth = max(seen_depth, len(path))',
+  '        return {',
+  '            "name": name, "file": filename, "line": lineno,',
+  '            "selfMs": tt * 1000.0, "totalMs": ct * 1000.0,',
+  '            "calls": nc, "children": children,',
+  '        }',
+  '    flame = [frame(r, {r}) for r in roots]',
   'except Exception as e:',
   '    error = ((error + "\\n") if error else "") + "stats failed: " + str(e)',
   '',
@@ -58,5 +88,6 @@ export const PYTHON_PROFILE_SRC = [
   '        "stdout": out.getvalue(),',
   '        "stderr": err.getvalue(),',
   '        "rows": rows,',
+  '        "flame": flame,',
   '    }, f)',
 ].join('\n');

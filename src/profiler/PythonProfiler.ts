@@ -136,6 +136,7 @@ export class PythonProfiler {
       wallMs: Math.round(wallMs),
       sampleCount: rows.length,
       hotspots,
+      flame: parsed?.flame?.length ? parsed.flame.map(roundFrame) : undefined,
       stdout: parsed?.stdout ?? '',
       stderr: parsed?.stderr ?? '',
       ok,
@@ -147,4 +148,26 @@ export class PythonProfiler {
 
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+/** Recursively round the timings in a call-tree frame. */
+function roundFrame(f: {
+  name: string;
+  file: string;
+  line: number;
+  selfMs: number;
+  totalMs: number;
+  calls: number;
+  children: unknown[];
+}): import('./types.js').ProfileFrame {
+  const kids = (f.children as unknown[]).map((c) => roundFrame(c as Parameters<typeof roundFrame>[0]));
+  return {
+    name: f.name,
+    file: f.file,
+    line: f.line,
+    selfMs: round(f.selfMs),
+    totalMs: round(f.totalMs),
+    calls: f.calls,
+    children: kids,
+  };
 }

@@ -208,6 +208,20 @@ export function renderPyCharmHtml(_port: number): string {
   .ctxmenu .citem.dis { color:var(--text-tertiary); pointer-events:none; }
   .ctxmenu .csep { height:1px; margin:4px 6px; background:var(--border-soft); }
 
+  /* ---------- command palette (nlg run <script> -- <args>) ---------- */
+  .palette { position:fixed; z-index:200; left:50%; top:14%; transform:translateX(-50%);
+    width:min(680px, 92vw); background:var(--bg-secondary); border:1px solid var(--border);
+    border-radius:8px; box-shadow:0 10px 36px rgba(0,0,0,.4); display:none; overflow:hidden; }
+  .palette.open { display:block; }
+  .palette .ph { display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); }
+  .palette .ph .pfx { font-family:var(--mono); color:var(--accent); font-size:13px; }
+  .palette input { flex:1; border:none; background:transparent; font-family:var(--mono); font-size:13px; padding:2px 0; }
+  .palette input:focus { outline:none; }
+  .palette .hint { font-size:11px; color:var(--text-tertiary); padding:0 10px 6px; }
+  .palette .out { max-height:38vh; overflow:auto; padding:8px 10px; font-family:var(--mono); font-size:12px;
+    white-space:pre-wrap; background:var(--bg-primary); }
+  .palette .out .err { color:var(--err); } .palette .out .ok { color:var(--ok); } .palette .out .dim { color:var(--text-tertiary); }
+
   /* center column */
   .center { flex:1; display:flex; flex-direction:column; min-width:0; background:var(--bg-primary); }
 
@@ -574,6 +588,13 @@ export function renderPyCharmHtml(_port: number): string {
 <!-- search everywhere -->
 <div class="scrim" id="scrim"></div>
 <div class="ctxmenu" id="ctxMenu"></div>
+
+<!-- command palette: runs nlg run <script> -- <args> server-side -->
+<div class="palette" id="palette">
+  <div class="ph"><span class="pfx">&gt;</span><input id="palInput" type="text" placeholder="nlg run lang-install -- install examples/cpp@1.0.0" spellcheck="false" autocomplete="off" /></div>
+  <div class="hint">Enter runs it · Esc closes · e.g. <code>nlg run verify-plugins</code> or <code>nlg run lang-install -- install examples/cpp@1.0.0</code></div>
+  <div class="out" id="palOut"></div>
+</div>
 <div class="modal" id="searchModal">
   <div class="mtop"><span class="ic" data-ic="search" data-size="18"></span><input id="searchInput" placeholder="Search Everything (files, symbols, actions)…" /><button class="tbtn iconly" id="searchClose"><span class="ic" data-ic="close" data-size="16"></span></button></div>
   <div class="chips" id="searchChips">
@@ -2270,6 +2291,19 @@ export function renderPyCharmHtml(_port: number): string {
       case 'fsError': onFsError(m); break;
       case 'completion': onCompletion(m); break;
       case 'hover': onHover(m); break;
+      case 'profileResult':
+        // Stash it so a freshly opened /profile page can render immediately
+        // without the engine relaying state.
+        try { localStorage.setItem('nl-profile', JSON.stringify(m)); } catch (e) { /* ignore */ }
+        toast(m.ok ? ('profile ready · ' + (m.source || '') + ' · ' + (m.sampleCount || 0) + ' fns') : ('profile failed: ' + (m.error || 'unknown')));
+        break;
+      case 'scriptOut':
+        appendPaletteOut(m.text, m.stream === 'stderr' ? 'err' : '');
+        break;
+      case 'scriptResult':
+        PAL_BUSY = false;
+        appendPaletteOut('\n[exit ' + (m.code == null ? '?' : m.code) + (m.error ? ' · ' + m.error : '') + ']\n', m.ok ? 'ok' : 'err');
+        break;
     }
   }
 
@@ -2339,6 +2373,9 @@ export function renderPyCharmHtml(_port: number): string {
     'Tools': [
       { label: 'Extensions', act: openExt },
       { label: 'Language Plugins', act: openPlugins },
+      { sep: true },
+      { label: 'Profile current file', sc: 'Alt+9', act: profileCurrent },
+      { label: 'Command Palette…', sc: 'Ctrl+P', act: openPalette },
       { sep: true },
       { label: 'Performance', sc: 'Alt+8', act: function () { toggleWindow('perf'); } },
       { label: 'Logs', sc: 'Alt+0', act: function () { toggleWindow('logs'); } }
@@ -2495,6 +2532,66 @@ export function renderPyCharmHtml(_port: number): string {
   // reading a validation report and watching a budget — a modal is too small
   // for that, and the IDE already has a place for "the whole picture": a tab.
   function openPlugins() { window.open('/plugins', '_blank'); }
+  function openProfile() { window.open('/profile', '_blank'); }
+  /** Profile the current editor buffer and open the flamegraph page. */
+  function profileCurrent() {
+    if (!ta) return;
+    var lg = currentLang;
+    BRIDGE.send({ kind: 'profile', code: ta.value, language: lg, timeoutMs: 60000 });
+    openProfile();
+  }
+  /** Open the command palette (the UI surface for nlg run <script> -- <args>). */
+  function openPalette() {
+    var p = $('palette');
+    if (!p) return;
+    p.classList.add('open');
+    var inp = $('palInput');
+    if (inp) { inp.value = 'nlg run '; inp.focus(); inp.select(); }
+  }
+  function closePalette() { var p = $('palette'); if (p) p.classList.remove('open'); }
+  /** Parse nlg [run] <script> [--] <args…> and run it server-side. */
+  function runPalette() {
+    var inp = $('palInput');
+    if (!inp) return;
+    var raw = inp.value.trim();
+    if (!raw) return;
+    var toks = tokenize(raw);
+    var i = 0;
+    if (toks[i] === 'nlg') i++;
+    if (toks[i] === 'run') i++;
+    var script = toks[i++];
+    if (!script) { appendPaletteOut('usage: nlg run <script> -- <args>\n', 'err'); return; }
+    var args = [];
+    if (toks[i] === '--') i++;
+    for (; i < toks.length; i++) args.push(toks[i]);
+    PAL_BUSY = true;
+    appendPaletteOut('$ ' + raw + '\n', 'dim');
+    BRIDGE.send({ kind: 'runScript', script: script, args: args });
+    closePalette();
+  }
+  /** Whitespace tokenizer that keeps double-quoted segments intact. */
+  function tokenize(s) {
+    var out = [], cur = '', q = false, i = 0;
+    while (i < s.length) {
+      var c = s.charAt(i);
+      if (c === '"') { q = !q; i++; continue; }
+      if (q || !/\s/.test(c)) cur += c;
+      else if (cur) { out.push(cur); cur = ''; }
+      i++;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+  var PAL_BUSY = false;
+  function appendPaletteOut(text, cls) {
+    var o = $('palOut');
+    if (!o) return;
+    var span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = text;
+    o.appendChild(span);
+    o.scrollTop = o.scrollHeight;
+  }
   function openRecent() { renderRecent(); openModal('recentModal'); }
   function renderRecent() {
     var b = $('recentBody');
@@ -2716,6 +2813,7 @@ export function renderPyCharmHtml(_port: number): string {
     if (e.ctrlKey && e.shiftKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveAsNative(); return; }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S') && !e.shiftKey && !e.altKey) { e.preventDefault(); saveFile(); return; }
     if (e.ctrlKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); openNativeFile(); return; }
+    if (e.ctrlKey && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); openPalette(); return; }
     if (e.key === 'Escape') { hideCtx(); return; }
     if (e.key === 'Shift' && !e.repeat) {
       var now = Date.now();
@@ -2746,6 +2844,17 @@ export function renderPyCharmHtml(_port: number): string {
   paintIcons(document);
   renderMenus();
   renderStrip();
+
+  // Command palette: Enter runs, Esc closes.
+  (function wirePalette() {
+    var inp = $('palInput');
+    if (inp) inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); runPalette(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+    });
+    var pal = $('palette');
+    if (pal) pal.addEventListener('click', function (e) { if (e.target === pal) closePalette(); });
+  })();
   renderCfgLabel();
   renderTabs();
   ta.value = FILES[currentFile] || '';

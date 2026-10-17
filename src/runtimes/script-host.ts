@@ -18,9 +18,77 @@
  *   Any non-JSON stdout line is treated as user output (a script that just
  *   prints is still usable).
  */
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ulid } from '../util/ulid.js';
+
+/**
+ * `script-host` OS-level memory budget.
+ *
+ * The V8 `--max-old-space-size` flag caps only the *old space heap*; the
+ * child-side RSS watchdog (see `script-host-watchdog.mjs`) is the real
+ * OS-level cap. The user delegated a "sensible default range", so we pick
+ * **64 MB – 4 GB, default 256 MB** — enough headroom for real programs, tight
+ * enough to contain a runaway script on a shared machine. The range is a
+ * clamp: a plugin or operator cannot ask for less than 64 MB (V8 will not boot
+ * reliably) or more than 4 GB (the heap flag is ignored past ~4 GB anyway).
+ */
+const MB = 1024 * 1024;
+const SCRIPT_HOST_MEM_MIN = 64 * MB;
+const SCRIPT_HOST_MEM_MAX = 4 * 1024 * MB;
+const SCRIPT_HOST_MEM_DEFAULT = 256 * MB;
+const V8_HEAP_CAP_MAX = 4096; // `--max-old-space-size` is ignored past ~4 GB.
+
+/** Parse a human memory string (`"256MB"`, `"1GB"`, `"512"`) to bytes. */
+export function parseHumanBytes(hint: string | undefined): number | null {
+  if (!hint) return null;
+  const m = /^\s*([0-9]*\.?[0-9]+)\s*([a-zA-Z]*)\s*$/.exec(String(hint));
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = (m[2] || 'b').toLowerCase();
+  const factor: Record<string, number> = {
+    b: 1, k: 1024, kb: 1024,
+    m: MB, mb: MB,
+    g: 1024 * MB, gb: 1024 * MB,
+  };
+  const mult = factor[unit];
+  if (!mult) return null;
+  return Math.round(n * mult);
+}
+
+/**
+ * Resolve the effective memory cap in bytes.
+ * Priority: `NOLANGUAGE_SCRIPT_HOST_MEM_LIMIT` env → manifest `memoryHint` →
+ * default. A bad/empty hint never disables the cap (unlike the budget parser,
+ * where 0 means "free"); here it falls back to the default.
+ */
+export function resolveMemLimitBytes(config: RunConfig, env: NodeJS.ProcessEnv): number {
+  const raw =
+    parseHumanBytes(env.NOLANGUAGE_SCRIPT_HOST_MEM_LIMIT) ??
+    parseHumanBytes(config.memoryHint);
+  let bytes = raw ?? SCRIPT_HOST_MEM_DEFAULT;
+  if (bytes < SCRIPT_HOST_MEM_MIN) bytes = SCRIPT_HOST_MEM_MIN;
+  if (bytes > SCRIPT_HOST_MEM_MAX) bytes = SCRIPT_HOST_MEM_MAX;
+  return bytes;
+}
+
+/**
+ * Absolute path to the RSS watchdog, or `null` when it is unavailable (e.g. an
+ * unusual build where the sibling `.mjs` is not on disk). The V8 heap cap still
+ * applies in that case, so skipping the watchdog is safe.
+ */
+function resolveWatchdogPath(): string | null {
+  try {
+    const p = fileURLToPath(new URL('./script-host-watchdog.mjs', import.meta.url));
+    if (existsSync(p)) return p;
+  } catch {
+    // `import.meta.url` can be a non-file URL in some builds (e.g. SEA).
+  }
+  return null;
+}
 import type {
   HostContext,
   RunConfig,
@@ -86,6 +154,14 @@ export class ScriptHostRunner implements Runner {
     let exitCode: number | null = 0;
     let timedOut = false;
 
+    // Resolve the OS-level cap once per run (env can change between runs).
+    const memLimitBytes = resolveMemLimitBytes(this.config, process.env);
+    const heapMiB = Math.min(
+      V8_HEAP_CAP_MAX,
+      Math.max(64, Math.floor(memLimitBytes / MB)),
+    );
+    const watchdog = resolveWatchdogPath();
+
     const result = await new Promise<{ code: number | null; timedOut: boolean }>((resolve) => {
       let settled = false;
       const done = (code: number | null, to: boolean): void => {
@@ -96,7 +172,12 @@ export class ScriptHostRunner implements Runner {
 
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(process.execPath, ['--max-old-space-size=256', script], {
+        // Heap cap first (cheap, fast OOM), then the RSS watchdog as the real
+        // OS-level cap. `-r` must come before the script argument.
+        const nodeArgs = [`--max-old-space-size=${heapMiB}`];
+        if (watchdog) nodeArgs.push('-r', watchdog);
+        nodeArgs.push(script);
+        child = spawn(process.execPath, nodeArgs, {
           cwd: session.dir,
           env: {
             ...process.env,
@@ -104,6 +185,7 @@ export class ScriptHostRunner implements Runner {
             NL_SOURCE_FILE: sourcePath,
             NL_LANGUAGE: this.ctx.languageId,
             NL_DATA_DIR: this.ctx.dataDir,
+            NL_MEM_LIMIT_BYTES: String(memLimitBytes),
           },
           windowsHide: true,
         });
@@ -178,6 +260,13 @@ export class ScriptHostRunner implements Runner {
 
     exitCode = result.code;
     timedOut = result.timedOut;
+    // Exit 137 (128 + SIGKILL) is the RSS watchdog's "exceeded the OS memory
+    // cap" signal. Surface it as a readable error instead of a bare code.
+    if (exitCode === 137) {
+      const mb = Math.round(memLimitBytes / MB);
+      stderr.push(`\n[script-host] process killed: exceeded OS memory cap of ${mb} MB (RSS watchdog).\n`);
+      log.warn('script-host exceeded memory cap', { memLimitBytes, mb });
+    }
     const durationMs = Date.now() - started;
     const outText = stdout.join('');
     const errText = stderr.join('');
@@ -185,7 +274,11 @@ export class ScriptHostRunner implements Runner {
     const metrics = this.ctx.kernel.perfMetrics();
     metrics.record('execution.run', durationMs);
     metrics.record('execution.lines', logLines);
-    log.info('script-host finished', { durationMs, exitCode, timedOut, script });
+    metrics.record('execution.memLimit', memLimitBytes);
+    log.info('script-host finished', {
+      durationMs, exitCode, timedOut, script,
+      memLimitBytes, heapMiB, watchdog: !!watchdog,
+    });
 
     return {
       sessionId: session.id,

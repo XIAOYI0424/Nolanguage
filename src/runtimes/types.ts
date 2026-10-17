@@ -81,6 +81,15 @@ export interface RunConfig {
   vmTimeoutMs?: number;
   /** `script-host`: plugin-relative entry point. */
   script?: string;
+  /**
+   * `script-host`: optional OS-level memory cap as a human string
+   * (`"256MB"`, `"1GB"`). Overridden by `NOLANGUAGE_SCRIPT_HOST_MEM_LIMIT`.
+   * Clamped to the safe range [64MB, 4GB]; default 256MB. The cap is enforced
+   * two ways: a V8 `--max-old-space-size` (heap) and a child-side RSS watchdog
+   * that self-terminates the process past the cap (Node exposes no portable
+   * `setrlimit`, so this is a soft but cross-platform limit with zero deps).
+   */
+  memoryHint?: string;
   /** Files the plugin needs in the session directory before the first run. */
   scaffold?: ScaffoldSpec;
   /** Where the toolchain lives; `{toolchain}` in `command` resolves to it. */

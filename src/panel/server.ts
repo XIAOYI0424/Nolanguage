@@ -23,7 +23,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { Kernel } from '../kernel/Kernel.js';
 import { LogLevel } from '../log/LogLevel.js';
@@ -34,6 +34,7 @@ import { renderPerfHtml } from './perf-ui.js';
 import { renderExtensionsHtml } from './extensions-ui.js';
 import { renderPluginsHtml } from './plugins-ui.js';
 import { renderPyCharmHtml } from './pycharm-ui.js';
+import { renderProfileHtml } from './profile-ui.js';
 import { SAMPLES, type LanguageId } from './samples.js';
 import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
@@ -360,6 +361,11 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
    */
   /** Clients currently attached, so page-specific frames can be broadcast. */
   const wsClients = new Set<Transport>();
+  /** Last user-code profile result, so a /profile page opened after the IDE
+   * triggered a run can render it without the IDE relaying state. */
+  let lastProfile: unknown = null;
+  /** Project root — where `resolve-loader.mjs` and `scripts/` live. */
+  const projectRoot = join(__dirname, '..', '..');
 
   /**
    * One plugin operation from the Plugins page. Every op answers on the
@@ -582,12 +588,45 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
               code: String(msg.code ?? ''),
               timeoutMs: msg.timeoutMs ? Number(msg.timeoutMs) : undefined,
             })
-            .then((r) => reply({ kind: 'profileResult', ...r }))
+            .then((r) => {
+              lastProfile = r;
+              reply({ kind: 'profileResult', ...r });
+              // A /profile page opened in another tab gets it live.
+              for (const c of wsClients) {
+                if (c === transport) continue;
+                try {
+                  c.send({ kind: 'profileResult', ...r });
+                } catch {
+                  /* closed client missed the update */
+                }
+              }
+            })
             .catch((err: unknown) =>
               reply({ kind: 'profileResult', ok: false, error: (err as Error).message, hotspots: [], sampleCount: 0 }),
             );
           break;
         }
+
+        case 'profileLast':
+          reply(lastProfile ? { kind: 'profileResult', ...(lastProfile as object) } : { kind: 'profileResult', ok: false, error: 'no profile yet', hotspots: [], sampleCount: 0 });
+          break;
+
+        case 'profileCaps':
+          reply({
+            kind: 'profileCaps',
+            languages: profiler ? profiler.languages().map((m) => ({
+              id: m.id,
+              displayName: m.displayName,
+              adapter: m.profiler?.adapter ?? '',
+              available: profiler.adapterFor(m.id)?.available ?? false,
+            })) : [],
+          });
+          break;
+
+        // ---------- command palette (nlg run <script> -- <args>) ----------
+        case 'runScript':
+          void handleRunScript(msg, reply, projectRoot);
+          break;
 
         case 'resetSession': {
           const sessionId = String(msg.sessionId ?? 'ide');
@@ -663,6 +702,7 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
   } else {
     const monitorHtml = renderPanelHtml(port);
     const perfHtml = renderPerfHtml(port);
+    const profileHtml = renderProfileHtml(port);
     const extensionsHtml = renderExtensionsHtml(port);
     const pluginsHtml = renderPluginsHtml();
     const pycharmHtml = renderPyCharmHtml(port);
@@ -684,6 +724,7 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
         if (url === '/' || url === '/index.html' || url === '/ide') return html(pycharmHtml), true;
         if (url === '/monitor' || url === '/panel') return html(monitorHtml), true;
         if (url === '/perf' || url === '/performance') return html(perfHtml), true;
+        if (url === '/profile' || url === '/profiles') return html(profileHtml), true;
         if (url === '/extensions') return html(extensionsHtml), true;
         if (url === '/plugins' || url === '/languages') return html(pluginsHtml), true;
         if (url === '/pycharm' || url === '/ide-pycharm') return html(pycharmHtml), true;
@@ -860,6 +901,61 @@ function handleTerm(cmd: string, reply: (p: unknown) => void, conn: unknown): vo
   child.on('close', (code, signal) => {
     st.termChild = undefined;
     reply({ kind: 'termResult', cmd, stdout: '', stderr: '', code: code ?? null, ms: Date.now() - started });
+  });
+}
+
+/**
+ * Command-palette script runner (the server side of `nlg run <script> -- <args>`).
+ *
+ * Mirrors the `nlg` wrapper exactly: it resolves `<script>` to `scripts/<script>.ts`
+ * (run through the resolve-loader) or `<script>.mjs` (run directly), then spawns
+ * Node with the user's args. The script name is whitelisted to `[A-Za-z0-9_-]+`
+ * and must exist on disk, so a palette entry can never reach an arbitrary path.
+ * Output streams back live as `scriptOut`; a final `scriptResult` carries the
+ * exit code.
+ */
+function handleRunScript(
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+  projectRoot: string,
+): void {
+  const script = typeof msg.script === 'string' ? msg.script : '';
+  if (!/^[A-Za-z0-9_-]+$/.test(script)) {
+    reply({ kind: 'scriptResult', ok: false, code: -1, ms: 0, error: `invalid script name: ${JSON.stringify(script)}` });
+    return;
+  }
+  const args = Array.isArray(msg.args) ? (msg.args as unknown[]).map((a) => String(a)) : [];
+  const tsPath = join(projectRoot, 'scripts', `${script}.ts`);
+  const mjsPath = join(projectRoot, 'scripts', `${script}.mjs`);
+  const useTs = existsSync(tsPath);
+  const entry = useTs ? tsPath : mjsPath;
+  if (!useTs && !existsSync(mjsPath)) {
+    reply({ kind: 'scriptResult', ok: false, code: -1, ms: 0, error: `script not found: scripts/${script}.(ts|mjs)` });
+    return;
+  }
+  const nodeArgs = useTs
+    ? ['--experimental-transform-types', '--experimental-loader', pathToFileURL(join(projectRoot, 'resolve-loader.mjs')).href, entry, ...args]
+    : [entry, ...args];
+  const started = Date.now();
+  let bytes = 0;
+  const CAP = 4 * 1024 * 1024;
+  const child = spawn(process.execPath, nodeArgs, {
+    cwd: projectRoot,
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const cap = (d: Buffer): void => {
+    bytes += d.length;
+    if (bytes > CAP) { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+  };
+  child.stdout?.on('data', (d) => { cap(d); reply({ kind: 'scriptOut', stream: 'stdout', text: d.toString('utf8') }); });
+  child.stderr?.on('data', (d) => { cap(d); reply({ kind: 'scriptOut', stream: 'stderr', text: d.toString('utf8') }); });
+  child.on('error', (err) => {
+    reply({ kind: 'scriptResult', ok: false, code: 1, ms: Date.now() - started, error: String(err) });
+  });
+  child.on('close', (code) => {
+    reply({ kind: 'scriptResult', ok: code === 0, code: code ?? null, ms: Date.now() - started });
   });
 }
 

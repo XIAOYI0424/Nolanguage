@@ -164,6 +164,9 @@ export class GoProfiler {
       wallMs: Math.round(wallMs),
       sampleCount: hotspots.length,
       hotspots,
+      flame: hotspots.length
+        ? hotspotsToFlame(hotspots)
+        : undefined,
       stdout: execOut,
       stderr: execErr || build.err,
       ok,
@@ -185,6 +188,37 @@ export class GoProfiler {
       GOTOOLCHAIN: process.env.GOTOOLCHAIN ?? 'local',
     };
   }
+}
+
+/**
+ * Build a flamegraph frame from the flat `-top` hotspots.
+ *
+ * `go tool pprof -top` gives no call edges we parse here, so we synthesise a
+ * single root (`go:cpu.prof`) whose children are the hotspots. It is a valid
+ * (if shallow) call tree the UI renders uniformly; a future adapter using
+ * `pprof -tree`/`-flame` can replace this with a real hierarchy.
+ */
+export function hotspotsToFlame(hotspots: ProfileHotspot[]): import('./types.js').ProfileFrame[] {
+  const total = hotspots.reduce((s, h) => s + h.cumtimeMs, 0);
+  return [
+    {
+      name: 'go:cpu.prof',
+      file: '',
+      line: 0,
+      selfMs: 0,
+      totalMs: Math.round(total * 1000) / 1000,
+      calls: 0,
+      children: hotspots.map((h) => ({
+        name: h.name,
+        file: h.file,
+        line: h.line,
+        selfMs: Math.round(h.tottimeMs * 1000) / 1000,
+        totalMs: Math.round(h.cumtimeMs * 1000) / 1000,
+        calls: h.calls,
+        children: [],
+      })),
+    },
+  ];
 }
 
 /** Parse `go tool pprof -top` text rows into hotspots. */

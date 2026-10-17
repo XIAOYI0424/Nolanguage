@@ -47,6 +47,26 @@ export interface ProfileHotspot {
   cumtimeMs: number;
 }
 
+/**
+ * A node in the call tree, used to render a flamegraph.
+ *
+ * `selfMs` is the time spent in the function body only (excludes callees);
+ * `totalMs` is the time including callees. A frame's `totalMs` is the width of
+ * its flamegraph rectangle; the `children` widths sum to (at most) it. The
+ * tree is built by the adapters (Python from cProfile's caller graph, Go from
+ * a synthesised root over the flat `-top` rows) and normalised into this shape
+ * so the UI treats every language identically.
+ */
+export interface ProfileFrame {
+  name: string;
+  file: string;
+  line: number;
+  selfMs: number;
+  totalMs: number;
+  calls: number;
+  children: ProfileFrame[];
+}
+
 export interface ProfileResult {
   languageId: ProfilerLanguage;
   /** Which backend produced the samples. */
@@ -56,6 +76,12 @@ export interface ProfileResult {
   /** Total functions observed (before topN clipping). */
   sampleCount: number;
   hotspots: ProfileHotspot[];
+  /**
+   * Call tree for flamegraph rendering (may be empty when the adapter cannot
+   * derive a hierarchy — e.g. a flat summary). Always append-only for the UI:
+   * a missing tree just hides the graph and keeps the hotspots table.
+   */
+  flame?: ProfileFrame[];
   /** Captured program output. */
   stdout: string;
   stderr: string;

@@ -34,6 +34,10 @@ const stages = [
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.
   { name: 'Plugins · page self-containment', script: 'scripts/check-plugins-html.ts' },
+  { name: 'Profile · flamegraph page self-containment', script: 'scripts/check-profile-html.ts' },
+  // script-host OS-level memory cap: human-string parsing, env-wins-over-
+  // manifest precedence, the 256MB default, and the [64MB, 4GB] clamp.
+  { name: 'Runtimes · script-host memory cap', script: 'scripts/verify-script-host.ts' },
   { name: 'Dev Panel pages mount in a DOM (jsdom)', script: 'scripts/verify-ui-dom.ts' },
   // Stage 8: Markdown — zero-dependency renderer (blocks/inlines/safety),
   // marksman discovery SKIP semantics, and the live mdRender/mdPreview round trip.
