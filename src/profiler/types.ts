@@ -13,7 +13,15 @@
  * attribution engine in stage 11) can treat languages uniformly.
  */
 
-export type ProfilerLanguage = 'python' | 'go';
+/**
+ * Language id as seen by the profiler.
+ *
+ * This used to be a union (`'python' | 'go'`), which forced every caller to
+ * know the language set — the exact coupling Phase 6 removed. It is a string
+ * now: `ProfilerService` validates it against the manifests at call time and
+ * fails loudly, which is both more correct and more extensible than a union.
+ */
+export type ProfilerLanguage = string;
 
 export interface ProfileOptions {
   languageId: ProfilerLanguage;

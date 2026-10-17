@@ -7,6 +7,7 @@
  */
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -48,6 +49,14 @@ export class PythonProfiler {
 
   get binary(): string {
     return this.pythonBin;
+  }
+
+  /**
+   * A path we were handed is checked; a bare command name (the default `python`)
+   * is assumed to be on PATH, because that is what PATH means.
+   */
+  get available(): boolean {
+    return /[\\/]/.test(this.pythonBin) ? existsSync(this.pythonBin) : true;
   }
 
   async profile(opts: ProfileOptions): Promise<ProfileResult> {

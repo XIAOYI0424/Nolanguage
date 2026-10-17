@@ -2338,6 +2338,7 @@ export function renderPyCharmHtml(_port: number): string {
     ],
     'Tools': [
       { label: 'Extensions', act: openExt },
+      { label: 'Language Plugins', act: openPlugins },
       { sep: true },
       { label: 'Performance', sc: 'Alt+8', act: function () { toggleWindow('perf'); } },
       { label: 'Logs', sc: 'Alt+0', act: function () { toggleWindow('logs'); } }
@@ -2490,6 +2491,10 @@ export function renderPyCharmHtml(_port: number): string {
   $('scrim').addEventListener('click', closeModals);
   function openAbout() { openModal('aboutModal'); }
   function openExt() { openModal('extModal'); BRIDGE.send({ kind: 'listExtensions' }); }
+  // Plugins live in their own page because managing them means typing a path,
+  // reading a validation report and watching a budget — a modal is too small
+  // for that, and the IDE already has a place for "the whole picture": a tab.
+  function openPlugins() { window.open('/plugins', '_blank'); }
   function openRecent() { renderRecent(); openModal('recentModal'); }
   function renderRecent() {
     var b = $('recentBody');

@@ -8,6 +8,7 @@
     "demo": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/demo.ts",
     "demo:extensions": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/demo-extensions.ts",
     "ide": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/panel/server.ts",
+    "lang-install": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/lang-install.ts",
     "panel": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/panel/server.ts",
     "panel:python": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/panel/server.ts",
     "python": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types src/python/run.ts",

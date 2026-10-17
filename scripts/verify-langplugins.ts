@@ -18,11 +18,11 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-langplugins.ts
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Kernel } from '../src/kernel/Kernel.js';
-import { validateManifest, bufferName, primaryExtension, supportsRun } from '../src/langs/manifest.js';
+import { validateManifest, bufferName, primaryExtension, supportsRun, type LanguageManifest } from '../src/langs/manifest.js';
 import { LanguageRegistry, type RegistryRoot } from '../src/langs/Registry.js';
 import { RunnerFactory } from '../src/langs/RunnerFactory.js';
 import { RuntimeRegistry, satisfies, parseRequirement } from '../src/runtimes/RuntimeRegistry.js';
@@ -102,6 +102,42 @@ function testManifest(): void {
 
   const badRequires = validateManifest(baseManifest({ run: { mode: 'template', requires: [1] } }));
   check('manifest: `run.requires` must be strings', !badRequires.ok && badRequires.issues.some((i) => i.field === 'run.requires'));
+}
+
+// ========================================================== 3. examples shelf
+
+/**
+ * `examples/` is the copy-paste shelf: a plugin a user can install as-is. An
+ * example that no longer validates is worse than no example at all, so every
+ * manifest there is checked — including that the factory can assemble it, which
+ * is the check that catches a `run` block renamed under someone's feet.
+ */
+async function testExamples(): Promise<void> {
+  const dir = join(ROOT, 'examples');
+  if (!existsSync(dir)) {
+    skip('examples: the shelf exists', 'examples/ missing');
+    return;
+  }
+  const entries = (await readdir(dir, { withFileTypes: true }))
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
+  check('examples: the shelf is not empty', entries.length > 0, entries.join(',') || '(none)');
+
+  for (const name of entries) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await readFile(join(dir, name, 'manifest.json'), 'utf8')) as unknown;
+    } catch {
+      check(`examples: ${name} has a readable manifest`, false, name);
+      continue;
+    }
+    const v = validateManifest(raw);
+    check(`examples: ${name} validates`, v.ok, v.issues.map((i) => `${i.field}: ${i.message}`).join('; ').slice(0, 90));
+    if (!v.ok) continue;
+    const diag = new RunnerFactory(defaultRuntimeRegistry()).diagnose(raw as LanguageManifest);
+    check(`examples: ${name} assembles into a runner`, diag.ok, diag.reason ?? '');
+  }
 }
 
 // ============================================================ 2. versions
@@ -474,6 +510,7 @@ async function main(): Promise<void> {
   try {
     testManifest();
     testVersions();
+    await testExamples();
     await testRegistry(kernel);
 
     if (!pythonBin) {

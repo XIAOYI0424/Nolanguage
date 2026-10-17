@@ -32,10 +32,12 @@ import { PanelHub, type PanelFilter, type PanelSink } from './PanelHub.js';
 import { renderPanelHtml } from './ui.js';
 import { renderPerfHtml } from './perf-ui.js';
 import { renderExtensionsHtml } from './extensions-ui.js';
+import { renderPluginsHtml } from './plugins-ui.js';
 import { renderPyCharmHtml } from './pycharm-ui.js';
 import { SAMPLES, type LanguageId } from './samples.js';
 import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
+import { bufferName, normaliseExtensions } from '../langs/manifest.js';
 import type { RegistryRoot } from '../langs/Registry.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { ExecService } from '../exec/ExecService.js';
@@ -103,6 +105,54 @@ function envToolchains(): Record<string, string> {
     ['markdown', process.env.MARKSMAN_BIN],
   ];
   return Object.fromEntries(pins.filter((p): p is [string, string] => !!p[1]));
+}
+
+/**
+ * The payload the Plugins page renders.
+ *
+ * Everything here is derived from manifests plus the Phase 4 budget — the page
+ * never has a language id of its own, which is the same rule the IDE follows.
+ */
+function pluginPayload(workspace: WorkspaceService): Record<string, unknown> {
+  const registry = workspace.languages;
+  const budget = workspace.resourceSummary();
+  const budgetOf = new Map(budget.profiles.map((p) => [p.languageId, p]));
+  const slots = new Map(workspace.status().languages.map((l) => [l.id, l]));
+  const plugins = (registry.isScanned() ? registry.installed() : []).map((p) => {
+    const m = p.manifest;
+    const res = budgetOf.get(m.id);
+    const slot = slots.get(m.id);
+    return {
+      id: m.id,
+      displayName: m.displayName,
+      version: m.version,
+      publisher: m.publisher ?? '',
+      description: m.description ?? '',
+      kind: p.source.kind,
+      removable: p.source.removable,
+      enabled: p.enabled,
+      extensions: normaliseExtensions(m.file),
+      fileName: bufferName(m),
+      runMode: m.run?.mode,
+      needsRunner: !!m.run,
+      runnerError: slot?.runnerError ?? '',
+      lspServerName: m.lsp?.serverName,
+      debugAdapter: m.debug?.adapter,
+      profilerAdapter: m.profiler?.adapter,
+      memoryBytes: res?.memoryBytes ?? 0,
+      memoryRunning: res?.lspRunning ?? false,
+      migrations: (m.migrations ?? []).length,
+      validation: p.validation.issues,
+      validationOk: p.validation.ok,
+      dir: p.source.dir,
+    };
+  });
+  return {
+    kind: 'plugins',
+    plugins,
+    resource: budget,
+    runtimes: workspace.runtimes.list(),
+  };
 }
 
 /**
@@ -272,19 +322,18 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
     kernel.logger.root().warn('Execution plane unavailable', { error: (err as Error).message });
   }
 
-  // ---- Stage 10 · user-code profiler (Python cProfile / Go pprof) ----
+  // ---- Stage 10 · user-code profiler (adapters resolved from manifests) ----
   let profiler: ProfilerService | undefined;
   try {
     profiler = new ProfilerService(kernel, {
       pythonBin: process.env.PYTHON_BIN,
       goBin: process.env.GO_BIN,
+      // The profiler reads manifests instead of knowing language ids, so it is
+      // bound to the workspace's registry rather than to a list of languages.
+      languages: () => (workspace.languages.isScanned() ? workspace.languages.all() : []),
     });
     profiler.registerCommands();
-    kernel.logger.root().info('Profiler ready', {
-      python: profiler.python.binary,
-      go: profiler.go.binary,
-      goAvailable: profiler.go.available,
-    });
+    kernel.logger.root().info('Profiler ready', { adapters: JSON.stringify(profiler.describe()) });
   } catch (err) {
     kernel.logger.root().warn('Profiler unavailable', { error: (err as Error).message });
   }
@@ -309,11 +358,80 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
    * `label` is for logging only; `key` is this client's identity for the
    * interactive-execution state (terminal child, run stdin sink).
    */
+  /** Clients currently attached, so page-specific frames can be broadcast. */
+  const wsClients = new Set<Transport>();
+
+  /**
+   * One plugin operation from the Plugins page. Every op answers on the
+   * requesting client with `pluginOp { ok }`, and a success re-broadcasts the
+   * whole list so a second tab (or the IDE) sees the change too.
+   *
+   * Failures are answers, not exceptions: a user who points the installer at a
+   * directory that is not a plugin must be told *why*, not dropped.
+   */
+  const handlePluginOp = async (
+    msg: Record<string, unknown>,
+    reply: (payload: unknown) => void,
+  ): Promise<void> => {
+    const op = String(msg.kind ?? '');
+    const id = String(msg.id ?? '');
+    const answer = (ok: boolean, extra: Record<string, unknown> = {}): void => {
+      reply({ kind: 'pluginOp', ok, op, id, ...extra });
+      if (ok) {
+        const payload = pluginPayload(workspace);
+        for (const c of wsClients) {
+          try {
+            c.send(payload);
+          } catch {
+            /* a closed client simply missed the update */
+          }
+        }
+      }
+    };
+    try {
+      if (op === 'langInstall') {
+        const dir = String(msg.dir ?? '').trim();
+        if (!dir) throw new Error('dir is required');
+        const installed = await workspace.languages.install(resolve(dir));
+        await workspace.pluginsSynced();
+        kernel.logger.root().info('Plugin installed', { id: installed.id, version: installed.version });
+        answer(true, { installed });
+        return;
+      }
+      if (op === 'langEnable') {
+        await workspace.languages.enable(id);
+        await workspace.pluginsSynced();
+        answer(true);
+        return;
+      }
+      if (op === 'langDisable') {
+        await workspace.languages.disable(id);
+        await workspace.pluginsSynced();
+        answer(true);
+        return;
+      }
+      if (op === 'langUninstall') {
+        const keepData = msg.keepData !== false;
+        const gone = await workspace.languages.uninstall(id, { keepData });
+        await workspace.pluginsSynced();
+        if (!gone) throw new Error(`"${id}" is not installed`);
+        answer(true);
+        return;
+      }
+      answer(false, { error: `unknown plugin op: ${op}` });
+    } catch (err) {
+      kernel.logger.root().warn('Plugin operation failed', { op, id, error: (err as Error).message });
+      answer(false, { error: (err as Error).message });
+    }
+  };
+
   const attachClient = (transport: Transport, label: string, key: object): void => {
     const clientId = hub.allocateClientId();
     const reply = (payload: unknown): void => transport.send(payload);
 
     hub.addClient({ id: clientId, send: reply } as PanelSink);
+    wsClients.add(transport);
+    transport.onClose(() => wsClients.delete(transport));
     // Tell IDE clients what the workspace can do. `languages` is derived from
     // the plugin manifests, so a newly installed language shows up in the UI
     // without a page release.
@@ -326,6 +444,8 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
     // …and where the project explorer is rooted, so the tree can paint a root
     // row immediately instead of waiting for the first `fsList` round-trip.
     reply({ kind: 'fsRoot', reqId: 0, ...fs.describe() });
+    // Plugins page bootstrap: installed set + budget + runtimes in one frame.
+    reply(pluginPayload(workspace));
     kernel.logger.root().info('Client connected', { client: label, clients: hub.clientCount() });
 
     transport.onMessage((raw: string) => {
@@ -335,6 +455,27 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
         return;
       }
       switch (msg.kind) {
+        // ---------- Phase 3 · plugins ----------
+        case 'listPlugins':
+          reply(pluginPayload(workspace));
+          break;
+
+        case 'langEnable':
+        case 'langDisable':
+        case 'langUninstall':
+        case 'langInstall':
+          void handlePluginOp(msg, reply);
+          break;
+
+        case 'reclaimResources':
+          void workspace
+            .enforceResources()
+            .then((reaped) => reply({ kind: 'resources', resource: workspace.resourceSummary(), reaped }))
+            .catch((err: unknown) =>
+              reply({ kind: 'error', message: `reclaim failed: ${(err as Error).message}` }),
+            );
+          break;
+
         // ---------- monitoring (shared) ----------
         case 'filter': {
           const f = msg as unknown as PanelFilter & { pattern?: string };
@@ -523,6 +664,7 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
     const monitorHtml = renderPanelHtml(port);
     const perfHtml = renderPerfHtml(port);
     const extensionsHtml = renderExtensionsHtml(port);
+    const pluginsHtml = renderPluginsHtml();
     const pycharmHtml = renderPyCharmHtml(port);
 
     ws = new WebSocketServer({
@@ -543,6 +685,7 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
         if (url === '/monitor' || url === '/panel') return html(monitorHtml), true;
         if (url === '/perf' || url === '/performance') return html(perfHtml), true;
         if (url === '/extensions') return html(extensionsHtml), true;
+        if (url === '/plugins' || url === '/languages') return html(pluginsHtml), true;
         if (url === '/pycharm' || url === '/ide-pycharm') return html(pycharmHtml), true;
         if (url === '/health') {
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -571,6 +714,7 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
     kernel.logger.root().info('Dev server ready', {
       workspace: `${base}/`,
       monitor: `${base}/monitor`,
+      plugins: `${base}/plugins`,
       ws: `ws://${addr.host}:${addr.port}/`,
     });
   }

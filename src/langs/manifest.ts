@@ -93,6 +93,40 @@ export interface ProfilerSpec {
   memoryHint?: string;
 }
 
+/** One data-migration step shipped by a plugin, run on upgrade. */
+export interface MigrationSpec {
+  /** Version the step upgrades *from*. */
+  from: string;
+  /** Version the step upgrades *to*. */
+  to: string;
+  /** Plugin-relative script, run with the data directory as its argument. */
+  file: string;
+}
+
+/** A debug adapter a language server can drive. */
+export interface DebugSpec {
+  /** Adapter id (`debugpy`, `delve`); resolved against `manifest.debug.discovery`. */
+  adapter: string;
+  /** DAP `type` sent in `initialize`. Defaults to the adapter id. */
+  type?: string;
+  /** How to find the adapter binary. */
+  discovery?: {
+    commands?: string[];
+    envVars?: string[];
+    knownPaths?: string[];
+  };
+  /** Launch command; `{resolved}` is replaced by the discovery result. */
+  command?: string[];
+  /** Extra arguments (`--listen` style adapters only). */
+  args?: string[];
+  /** Human name for the status bar (`debugpy`, `delve`). */
+  serverName?: string;
+  /** Rough resident-set hint, for the resource budget. */
+  memoryHint?: string;
+  /** What to tell the user when discovery fails. */
+  degradedNote?: string;
+}
+
 export interface LanguageManifest {
   id: string;
   displayName: string;
@@ -114,7 +148,14 @@ export interface LanguageManifest {
   lsp?: LspSpec;
   run?: RunConfig;
   dap?: DapSpec;
+  debug?: DebugSpec;
   profiler?: ProfilerSpec;
+  /**
+   * Data migrations, run in order when the plugin is upgraded. The plugin body
+   * is replaced wholesale; this is the hook that keeps `data/<id>/` (sessions,
+   * run configs, breakpoints) readable across versions.
+   */
+  migrations?: MigrationSpec[];
 }
 
 /** Where a manifest came from. Same format either way. */
@@ -237,6 +278,41 @@ export function validateManifest(raw: unknown): ManifestValidation {
     for (const key of ['commands', 'envVars', 'knownPaths']) {
       if (d[key] !== undefined && (!Array.isArray(d[key]) || (d[key] as unknown[]).some((x) => typeof x !== 'string'))) {
         add(`lsp.discovery.${key}`, 'must be an array of strings');
+      }
+    }
+  }
+
+  const debug = m.debug as Record<string, unknown> | undefined;
+  if (debug !== undefined) {
+    if (!asString(debug.adapter)) add('debug.adapter', 'is required when `debug` is present');
+    const dd = debug.discovery as Record<string, unknown> | undefined;
+    if (dd !== undefined) {
+      for (const key of ['commands', 'envVars', 'knownPaths']) {
+        if (dd[key] !== undefined && (!Array.isArray(dd[key]) || (dd[key] as unknown[]).some((x) => typeof x !== 'string'))) {
+          add(`debug.discovery.${key}`, 'must be an array of strings');
+        }
+      }
+    }
+    if (debug.command !== undefined && (!Array.isArray(debug.command) || (debug.command as unknown[]).some((x) => typeof x !== 'string'))) {
+      add('debug.command', 'must be an array of strings');
+    }
+  }
+
+  const dap = m.dap as Record<string, unknown> | undefined;
+  if (dap !== undefined && asString(dap.adapter) && asString(debug?.adapter) && asString(dap.adapter) !== asString(debug?.adapter)) {
+    // Two spellings of the same field is how manifests rot; catch it at install.
+    add('dap', `adapter "${String(dap.adapter)}" contradicts debug.adapter "${String(debug?.adapter)}" — keep one of them`);
+  }
+
+  const migrations = m.migrations;
+  if (migrations !== undefined) {
+    if (!Array.isArray(migrations)) add('migrations', 'must be an array of {from, to, file}');
+    else {
+      for (const [i, s] of migrations.entries()) {
+        const step = s as Record<string, unknown>;
+        if (!VERSION_RE.test(asString(step.from))) add(`migrations[${i}].from`, 'must be semver (1.0.0)');
+        if (!VERSION_RE.test(asString(step.to))) add(`migrations[${i}].to`, 'must be semver (1.0.0)');
+        if (!asString(step.file)) add(`migrations[${i}].file`, 'is required');
       }
     }
   }

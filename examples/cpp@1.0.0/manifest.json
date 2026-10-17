@@ -1,0 +1,175 @@
+{
+  "id": "cpp",
+  "displayName": "C++",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "example",
+  "description": "C++ compiled with g++, clang++ or c++, then run from the same scratch directory. An example plugin: copy it, change the toolchain list, install it.",
+  "order": 50,
+  "trust": {
+    "sandbox": "subprocess"
+  },
+  "file": {
+    "extensions": [
+      "cpp",
+      "cc",
+      "cxx",
+      "c++",
+      "hpp",
+      "hh",
+      "hxx",
+      "h"
+    ],
+    "defaultExt": "cpp",
+    "fileName": "main.cpp"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "#[^\\n]*",
+        "cls": "d"
+      },
+      {
+        "re": "//[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "/\\*[\\s\\S]*?\\*/",
+        "cls": "c"
+      },
+      {
+        "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'(?:[^'\\\\\\n]|\\\\.)*'",
+        "cls": "s"
+      },
+      {
+        "re": "\\b(?:alignas|alignof|asm|auto|bool|break|case|catch|char|class|const|constexpr|const_cast|continue|decltype|default|delete|do|double|dynamic_cast|else|enum|explicit|export|extern|false|float|for|friend|goto|if|inline|int|long|mutable|namespace|new|noexcept|nullptr|operator|private|protected|public|register|reinterpret_cast|return|short|signed|sizeof|static|static_cast|struct|switch|template|this|throw|true|try|typedef|typeid|typename|union|unsigned|using|virtual|void|volatile|while)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:std|string|vector|map|set|pair|array|tuple|optional|variant|function|size_t|ptrdiff_t|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|cout|cin|cerr|endl)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "\\b[0-9][0-9_]*(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?[fFlLuU]*\\b",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_][A-Za-z0-9_]*(?=\\()",
+        "cls": "f"
+      },
+      {
+        "re": "\\b[A-Z][A-Za-z0-9_]*\\b",
+        "cls": "cl"
+      }
+    ]
+  },
+  "lsp": {
+    "discovery": {
+      "commands": [
+        "clangd"
+      ],
+      "envVars": [
+        "CLANGD"
+      ],
+      "knownPaths": [
+        "C:/Program Files/LLVM/bin/clangd.exe",
+        "C:/msys64/mingw64/bin/clangd.exe",
+        "/usr/bin/clangd",
+        "/usr/local/bin/clangd",
+        "~/.local/bin/clangd"
+      ]
+    },
+    "command": [
+      "{resolved}"
+    ],
+    "languageId": "cpp",
+    "serverName": "clangd",
+    "memoryHint": "500MB",
+    "diagnosticsTimeoutMs": 6000,
+    "coldDiagnosticsTimeoutMs": 30000,
+    "degradedNote": "clangd not installed - Run works, Check and completion do not",
+    "args": []
+  },
+  "run": {
+    "mode": "template",
+    "requires": [
+      "template@^1.0.0"
+    ],
+    "timeoutMs": 30000,
+    "sourceExt": ".cpp",
+    "discovery": {
+      "commands": [
+        "g++",
+        "clang++",
+        "c++"
+      ],
+      "envVars": [
+        "CXX"
+      ],
+      "knownPaths": [
+        "C:/mingw64/bin/g++.exe",
+        "C:/msys64/mingw64/bin/g++.exe",
+        "C:/Program Files/LLVM/bin/clang++.exe",
+        "/usr/bin/g++",
+        "/usr/local/bin/g++",
+        "~/.local/bin/g++"
+      ]
+    },
+    "versionArgs": [
+      "--version"
+    ],
+    "steps": [
+      {
+        "role": "build",
+        "cmd": "\"{toolchain}\" -std=c++17 -O0 \"{file}\" -o \"{workdir}/nl_main{exe}\""
+      },
+      {
+        "role": "run",
+        "cmd": "\"{workdir}/nl_main{exe}\""
+      }
+    ],
+    "modes": {
+      "test": {
+        "timeoutMs": 60000,
+        "steps": [
+          {
+            "role": "build",
+            "cmd": "\"{toolchain}\" -std=c++17 \"{file}\" -o \"{workdir}/nl_main{exe}\""
+          },
+          {
+            "role": "test",
+            "cmd": "\"{workdir}/nl_main{exe}\""
+          }
+        ]
+      }
+    }
+  },
+  "debug": {
+    "adapter": "codelldb",
+    "type": "cppdbg",
+    "discovery": {
+      "commands": [
+        "codelldb"
+      ],
+      "envVars": [
+        "CODELLDB"
+      ],
+      "knownPaths": [
+        "~/.local/bin/codelldb",
+        "C:/Users/Public/codelldb/adapter/codelldb.exe"
+      ]
+    },
+    "command": [
+      "{resolved}",
+      "--port",
+      "0"
+    ],
+    "serverName": "codelldb",
+    "memoryHint": "120MB",
+    "degradedNote": "codelldb not installed - debugging is unavailable for C++"
+  }
+}

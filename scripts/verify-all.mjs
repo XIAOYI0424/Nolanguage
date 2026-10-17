@@ -31,6 +31,9 @@ const stages = [
   { name: 'Stage 4 · Python workspace (backend)', script: 'scripts/verify-ide.ts' },
   { name: 'Workspace · PyCharm shell (mount + self-containment)', script: 'scripts/verify-pycharm.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts' },
+  // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
+  // promise that every message it sends is one the server answers.
+  { name: 'Plugins · page self-containment', script: 'scripts/check-plugins-html.ts' },
   { name: 'Dev Panel pages mount in a DOM (jsdom)', script: 'scripts/verify-ui-dom.ts' },
   // Stage 8: Markdown — zero-dependency renderer (blocks/inlines/safety),
   // marksman discovery SKIP semantics, and the live mdRender/mdPreview round trip.
@@ -46,6 +49,12 @@ const stages = [
   // (scan/order/enable/install/uninstall + data separation), all five runtime
   // extensions against real processes, and RunnerFactory's single path.
   { name: 'Plugins · language substrate (registry + 5 runtimes)', script: 'scripts/verify-langplugins.ts' },
+  // Phase 3 + 4: install/uninstall/enable/disable applied live, the memory
+  // budget (LRU + idle + the eager exemption), and upgrade migration scripts.
+  { name: 'Plugins · lifecycle, budget + migrations', script: 'scripts/verify-plugins.ts' },
+  // Phase 6: the DAP runtime — a real framed-JSON-RPC session against a mock
+  // adapter, degradation when no adapter is installed, and the debug contract.
+  { name: 'Phase 6 · DAP runtime (mock adapter + degradation)', script: 'scripts/verify-dap.ts' },
   // The Tauri seam: WebSocket and stdio must be interchangeable, and the real
   // engine must speak the protocol on a pipe (what the Rust relay does).
   { name: 'Transport · ws ⇄ stdio equivalence', script: 'scripts/verify-transport.ts' },

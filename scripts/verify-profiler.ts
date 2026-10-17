@@ -19,6 +19,8 @@ import { Kernel } from '../src/kernel/Kernel.js';
 import { PythonProfiler } from '../src/profiler/PythonProfiler.js';
 import { GoProfiler } from '../src/profiler/GoProfiler.js';
 import { ProfilerService } from '../src/profiler/ProfilerService.js';
+import { LanguageRegistry } from '../src/langs/Registry.js';
+import { resolve } from 'node:path';
 
 const PORT = Number(process.env.VERIFY_PORT ?? 7519);
 
@@ -108,13 +110,33 @@ async function testGo(kernel: Kernel): Promise<void> {
 // ============================================================== command bus
 
 async function testCommands(kernel: Kernel): Promise<void> {
-  const svc = new ProfilerService(kernel);
-  svc.registerCommands();
+  // The profiler is driven by manifests, so bind it the way `server.ts` does.
+  const registry = new LanguageRegistry({
+    extraRoots: [{ dir: resolve('builtin'), kind: 'builtin', removable: false }],
+  });
+  await registry.scan();
+  const svc = new ProfilerService(kernel, { languages: () => registry.all() });
+  svc.registerCommands(registry.all());
   check('commands: profiler.profile is registered', kernel.commands.has('profiler.profile'));
   check('commands: profiler.python is registered', kernel.commands.has('profiler.python'));
   check('commands: profiler.go is registered', kernel.commands.has('profiler.go'));
+  check('commands: profiler.markdown is not registered (no profiler declared)', !kernel.commands.has('profiler.markdown'));
   const r = await kernel.commands.execute<{ hotspots: unknown[]; source: string }>('profiler.python', PY_HOT);
   check('commands: profiler.python executes and returns hotspots', r.source === 'cProfile' && r.hotspots.length > 0, `${r.hotspots.length}`);
+
+  // An unknown adapter is a loud failure, not a silent fallback to Python.
+  const broken = JSON.parse(JSON.stringify(registry.get('go') ?? {}));
+  broken.profiler.adapter = 'perf-does-not-exist';
+  const svc2 = new ProfilerService(kernel, { languages: () => [broken] });
+  let threw = '';
+  try {
+    await svc2.profile({ languageId: 'go', code: 'package main' });
+  } catch (err) {
+    threw = (err as Error).name ?? '';
+  }
+  check('unknown adapter id fails loudly instead of falling back', threw === 'ProfilerAdapterNotFoundError', threw || '(no error)');
+  check('a language without a profiler is reported as unsupported', svc.supports('markdown') === false);
+  check('a language that declares one is supported', svc.supports('python') === true);
 }
 
 // ================================================================= backend

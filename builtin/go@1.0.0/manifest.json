@@ -144,5 +144,28 @@
   "profiler": {
     "adapter": "pprof",
     "memoryHint": "50MB"
+  },
+  "debug": {
+    "adapter": "delve",
+    "type": "go",
+    "discovery": {
+      "commands": [
+        "dlv"
+      ],
+      "envVars": [
+        "DLV_BIN"
+      ],
+      "knownPaths": [
+        "~/go/bin/dlv",
+        "~/go/bin/dlv.exe"
+      ]
+    },
+    "command": [
+      "{resolved}",
+      "dap"
+    ],
+    "serverName": "delve",
+    "memoryHint": "80MB",
+    "degradedNote": "delve not installed - debugging is unavailable for Go"
   }
 }

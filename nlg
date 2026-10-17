@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  nlg - the conversion layer.
+#
+#  This repo runs TypeScript straight from source, which means every entry
+#  point needs two experimental Node flags plus a custom ESM resolver (the
+#  `.js` -> `.ts` mapping the sources use). Typing that every time is how a
+#  command line becomes folklore. `nlg` turns "what I want to run" into the
+#  exact invocation:
+#
+#      nlg run lang-install -- install examples/cpp@1.0.0
+#        -> node --experimental-transform-types --experimental-loader \
+#                ./resolve-loader.mjs scripts/lang-install.ts \
+#                install examples/cpp@1.0.0
+#
+#  Usage:
+#      nlg run <script> [--] [args...]   run scripts/<script>.ts (or .mjs)
+#      nlg <script> [args...]            same, `run` is optional
+#      nlg ide [args...]                 the editor backend (src/panel/server.ts)
+#      nlg help                          this text
+#      nlg scripts                       list what can be run
+#
+#  `run` + `--` are dropped, everything after the script name is passed through
+#  untouched - including flags like `--home`, which is the whole point.
+#
+#  Windows has a twin: nlg.cmd (cmd.exe). Keep the two in sync.
+# ============================================================================
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT" || exit 1
+
+NODE_FLAGS=(--experimental-transform-types --experimental-loader ./resolve-loader.mjs)
+
+list_scripts() {
+  local f
+  for f in scripts/*.ts scripts/*.mjs; do
+    [ -e "$f" ] || continue
+    printf '  %s\n' "$(basename "${f%.*}")"
+  done
+}
+
+usage() {
+  cat <<'EOF'
+nlg - the conversion layer between a short command and the exact node call
+
+  nlg run <script> [--] [args...]   run scripts/<script>.ts (or .mjs)
+  nlg <script> [args...]            same, `run` is optional
+  nlg ide [args...]                 the editor backend (src/panel/server.ts)
+  nlg help                          this text
+  nlg scripts                       list what can be run
+
+examples:
+  nlg run lang-install -- install examples/cpp@1.0.0
+  nlg run lang-install -- list
+  nlg run verify-plugins
+  nlg ide
+EOF
+}
+
+first="${1:-}"
+if [ "$first" = "help" ] || [ "$first" = "-h" ] || [ "$first" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [ "$first" = "scripts" ]; then
+  echo "scripts/ (nlg run <name>):"
+  list_scripts
+  exit 0
+fi
+
+# `run` is a keyword, not a script name: drop it so `nlg run x` == `nlg x`.
+if [ "$first" = "run" ]; then
+  shift
+fi
+
+name="${1:-}"
+if [ -z "$name" ]; then
+  echo "nlg: what should I run? (try: nlg help)" >&2
+  exit 2
+fi
+shift
+# `--` separates the command from its arguments and is not one of them.
+if [ "${1:-}" = "--" ]; then
+  shift
+fi
+
+if [ -f "scripts/$name.ts" ]; then
+  exec node "${NODE_FLAGS[@]}" "scripts/$name.ts" "$@"
+fi
+
+if [ -f "scripts/$name.mjs" ]; then
+  exec node "scripts/$name.mjs" "$@"
+fi
+
+if [ "$name" = "ide" ] || [ "$name" = "panel" ]; then
+  exec node "${NODE_FLAGS[@]}" src/panel/server.ts "$@"
+fi
+
+echo "nlg: no script named \"$name\"" >&2
+echo "available:" >&2
+list_scripts >&2
+exit 2

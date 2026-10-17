@@ -34,11 +34,12 @@ import {
 } from '../lsp/LspClient.js';
 import { renderMarkdown, type MdFrontmatter, type MdHeading, type MdRenderResult, type MdStats } from '../markdown/MdRenderer.js';
 import { defaultSample, type LanguageId, type RunMode } from './samples.js';
-import { LanguageRegistry, type RegistryRoot } from '../langs/Registry.js';
+import { LanguageRegistry, type RegistryChange, type RegistryRoot } from '../langs/Registry.js';
 import { RunnerFactory } from '../langs/RunnerFactory.js';
 import { defaultRuntimeRegistry } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
+import { ProfileManager, parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
   bufferName,
   primaryExtension,
@@ -60,6 +61,12 @@ export interface WorkspaceServiceOptions {
    * ids existed — exactly the coupling the plugin boundary removes.
    */
   toolchain?: Record<string, string>;
+  /** Phase 4 · memory budget for language plugins (bytes). */
+  memoryBudgetBytes?: number;
+  /** Phase 4 · budget for language servers specifically (bytes). */
+  lspMemoryBudgetBytes?: number;
+  /** Phase 4 · idle time after which a language server is stopped (ms). */
+  lspIdleMs?: number;
   /** Override language-server discovery, per language. */
   launch?: Partial<Record<string, LspLaunchSpec>>;
   /** Where the buffer files live (defaults to a temp dir). */
@@ -258,6 +265,12 @@ export class WorkspaceService {
   private readonly factory: RunnerFactory;
   /** Stage 9 · execution plane (warm-worker pool). Optional: set after boot. */
   exec?: ExecService;
+  /** Phase 4 · memory budget for language servers. Binds itself in the constructor. */
+  readonly resources: ProfileManager;
+  /** Guards `applyRegistryChange` against overlapping applications. */
+  private syncing = false;
+  /** Serialises queued plugin syncs (see `queueSync`). */
+  private syncChain: Promise<unknown> = Promise.resolve();
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
@@ -265,6 +278,22 @@ export class WorkspaceService {
       opts.registry ??
       new LanguageRegistry({ home: opts.home, extraRoots: opts.pluginRoots ?? defaultPluginRoots() });
     this.factory = new RunnerFactory(defaultRuntimeRegistry());
+    this.resources = new ProfileManager({
+      budgetBytes: opts.memoryBudgetBytes,
+      lspBudgetBytes: opts.lspMemoryBudgetBytes,
+      idleMs: opts.lspIdleMs,
+    });
+    this.resources.bind({
+      profiles: () => this.resourceProfiles(),
+      stopLsp: (id) => this.releaseLsp(id),
+    });
+    // Phase 3: a plugin installed/enabled/disabled from the Plugins page must
+    // take effect here, not after a restart. The registry tells us what happened;
+    // `applyRegistryChange` does the work.
+    this.registry.onDidChange((change) => {
+      if (!this.ready) return;
+      void this.queueSync(change);
+    });
   }
 
   /** The language registry this workspace is built from. */
@@ -314,61 +343,17 @@ export class WorkspaceService {
     }
 
     for (const manifest of manifests) {
-      const id = manifest.id;
-      const langDir = join(dir, id);
-      await mkdir(langDir, { recursive: true });
-      const docPath = join(langDir, bufferName(manifest));
-      const code = initial?.[id] ?? defaultSample(id).code;
-      await writeFile(docPath, code, 'utf8');
-
-      // Project files a language server needs (a Go module, a Cargo manifest).
-      for (const f of manifest.scaffold?.onFirstRun ?? []) {
-        const target = join(langDir, f.file);
-        if (!existsSync(target)) await writeFile(target, f.template, 'utf8');
-      }
-
-      const toolchain = this.resolveToolchain(manifest);
-      let runner: Runner | undefined;
-      let runnerError: string | undefined;
-      if (manifestSupportsRun(manifest)) {
-        try {
-          await this.registry.ensureDataDir(id);
-          runner = this.factory.create(manifest, await this.hostContext(manifest, toolchain)) ?? undefined;
-        } catch (err) {
-          // A plugin whose runtime is missing must not take the workspace down;
-          // it shows up in `status()` as an unavailable language with a reason.
-          runnerError = (err as Error).message;
-          this.kernel.logger
-            .forComponent(`ide.workspace.${id}`)
-            .error('Runner unavailable', { language: id, runMode: manifest.run?.mode }, err as Error);
-        }
-      }
-
-      const slot: Slot = {
-        id,
-        manifest,
-        runner,
-        runnerError,
-        toolchain: toolchain.bin || undefined,
-        toolchainSource: toolchain.source,
-        lspPending: true,
-        docPath,
-        docUri: fileUri(docPath),
-        queue: Promise.resolve(),
-      };
-      // Resolve the version now: it needs a process, and status() must stay
-      // synchronous for the UI.
-      const versionArgs = manifest.run?.versionArgs;
-      if (versionArgs && toolchain.bin && toolchain.source !== 'missing') {
-        slot.version = (await probeVersion(toolchain.bin, versionArgs)) ?? undefined;
-      }
-      this.slots.set(id, slot);
+      const code = initial?.[manifest.id] ?? defaultSample(manifest.id).code;
+      await this.addSlot(manifest, code);
     }
 
     const eager: string[] = this.opts.eagerLsp === true
       ? manifests.map((m) => m.id)
       : manifests.filter((m) => m.lsp?.eager && !m.lsp.disabled).map((m) => m.id);
     for (const id of eager) await this.ensureLsp(id);
+    for (const id of this.slots.keys()) this.resources.noteUse(id);
+    // Phase 4: the budget only means something if it is re-checked.
+    this.resources.start();
 
     this.kernel.logger.root().info('Workspace ready', {
       root: dir,
@@ -377,6 +362,164 @@ export class WorkspaceService {
       buffers: [...this.slots.values()].map((s) => s.docPath).join(' | '),
     });
     this.ready = true;
+  }
+
+  /**
+   * Create one language's slot: buffer file, scaffolded project files, runner.
+   *
+   * Split out of `init()` so the Plugins page can add a language after boot — an
+   * installed plugin must be usable without restarting the IDE.
+   */
+  private async addSlot(manifest: LanguageManifest, code: string): Promise<Slot> {
+    const id = manifest.id;
+    const langDir = join(this.rootDir, id);
+    await mkdir(langDir, { recursive: true });
+    const docPath = join(langDir, bufferName(manifest));
+    if (!existsSync(docPath)) await writeFile(docPath, code, 'utf8');
+
+    // Project files a language server needs (a Go module, a Cargo manifest).
+    for (const f of manifest.scaffold?.onFirstRun ?? []) {
+      const target = join(langDir, f.file);
+      if (!existsSync(target)) await writeFile(target, f.template, 'utf8');
+    }
+
+    const toolchain = this.resolveToolchain(manifest);
+    let runner: Runner | undefined;
+    let runnerError: string | undefined;
+    if (manifestSupportsRun(manifest)) {
+      try {
+        await this.registry.ensureDataDir(id);
+        runner = this.factory.create(manifest, await this.hostContext(manifest, toolchain)) ?? undefined;
+      } catch (err) {
+        // A plugin whose runtime is missing must not take the workspace down;
+        // it shows up in `status()` as an unavailable language with a reason.
+        runnerError = (err as Error).message;
+        this.kernel.logger
+          .forComponent(`ide.workspace.${id}`)
+          .error('Runner unavailable', { language: id, runMode: manifest.run?.mode }, err as Error);
+      }
+    }
+
+    const slot: Slot = {
+      id,
+      manifest,
+      runner,
+      runnerError,
+      toolchain: toolchain.bin || undefined,
+      toolchainSource: toolchain.source,
+      lspPending: true,
+      docPath,
+      docUri: fileUri(docPath),
+      queue: Promise.resolve(),
+    };
+    // Resolve the version now: it needs a process, and status() must stay
+    // synchronous for the UI.
+    const versionArgs = manifest.run?.versionArgs;
+    if (versionArgs && toolchain.bin && toolchain.source !== 'missing') {
+      slot.version = (await probeVersion(toolchain.bin, versionArgs)) ?? undefined;
+    }
+    this.slots.set(id, slot);
+    this.resources.noteUse(id);
+    return slot;
+  }
+
+  /** Tear down a language and forget it. Used when a plugin is removed. */
+  private async removeSlot(id: string): Promise<void> {
+    const slot = this.slots.get(id);
+    if (!slot) return;
+    await slot.lsp?.stop().catch(() => undefined);
+    await slot.runner?.close().catch(() => undefined);
+    this.slots.delete(id);
+    this.resources.forget(id);
+  }
+
+  /** Resolves once every queued plugin sync has finished. */
+  pluginsSynced(): Promise<void> {
+    return this.syncChain.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  /**
+   * Queue a registry change for application. Serialised on `syncChain` so two
+   * rapid installs do not interleave their slot creation.
+   */
+  private queueSync(change: RegistryChange): Promise<void> {
+    this.syncChain = this.syncChain
+      .then(() => this.applyRegistryChange(change))
+      .catch((err: unknown) => {
+        this.kernel.logger.root().warn('Plugin change could not be applied', {
+          change: `${change.type}:${change.id}`,
+          error: (err as Error).message,
+        });
+      });
+    return this.pluginsSynced();
+  }
+
+  /**
+   * React to a registry change: add, remove, enable or disable a language,
+   * without restarting the workspace.
+   *
+   * An enabled/disabled plugin is the difference between "in the picker" and
+   * "not in the picker" — which is a slot's presence, not a flag on it.
+   *
+   * Two things this deliberately does **not** do:
+   *
+   *   - it does not call `registry.scan()`. The registry emits *after* it has
+   *     updated its own state, and `scan()` emits `rescan` — which would call
+   *     this method again, forever. (This bug shipped once; the symptom was a
+   *     package that never finished enabling anything.)
+   *   - it does not react to `rescan`. A rescan means "the directory was read",
+   *     not "the language set changed"; `applyRegistryChange` is idempotent,
+   *     so there is nothing to do anyway.
+   */
+  async applyRegistryChange(change: RegistryChange): Promise<{ added: string[]; removed: string[] }> {
+    if (change.type === 'rescan') return { added: [], removed: [] };
+    if (this.syncing) return { added: [], removed: [] };
+    this.syncing = true;
+    try {      const wanted = new Set(this.registry.all().map((m) => m.id));
+      const removed: string[] = [];
+      for (const id of [...this.slots.keys()]) {
+        if (wanted.has(id)) continue;
+        await this.removeSlot(id);
+        removed.push(id);
+      }
+      const added: string[] = [];
+      for (const manifest of this.registry.all()) {
+        const existing = this.slots.get(manifest.id);
+        // Read the buffer *before* removing the slot that owns it.
+        const preserved = existing ? await readText(existing.docPath) : '';
+        if (existing) {
+          // A version upgrade changes the manifest under the slot; recreate it so
+          // the run config, discovery and grammar all match the new body.
+          if (existing.manifest.version === manifest.version) continue;
+          await this.removeSlot(manifest.id);
+          removed.push(manifest.id);
+        }
+        await this.addSlot(manifest, preserved || defaultSample(manifest.id).code);
+        added.push(manifest.id);
+      }
+      this.kernel.logger.root().info('Plugins applied', {
+        change: `${change.type}:${change.id}`,
+        added: added.join(',') || '-',
+        removed: removed.join(',') || '-',
+        languages: [...this.slots.keys()].join(','),
+      });
+      return { added, removed };
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  /** The manifest for a language, for hosts that build their own capabilities. */
+  manifestOf(id: string): LanguageManifest | undefined {
+    return this.slots.get(id)?.manifest ?? this.registry.get(id);
+  }
+
+  /** Every manifest currently active in the workspace (host capability lists). */
+  manifests(): LanguageManifest[] {
+    return this.registry.isScanned() ? this.registry.all() : [];
   }
 
   // ---------------- plugin plumbing ----------------
@@ -405,15 +548,26 @@ export class WorkspaceService {
   /**
    * Start a language server on first use. Concurrent callers share one launch
    * via `lspStarting`, so a double Check does not spawn two gopls processes.
+   *
+   * Before starting anything, the budget gets a say (Phase 4): if this language
+   * would push the language-server budget over, a quieter non-eager server is
+   * stopped first. That is the one place the budget *acts* — the timer only
+   * reports `overBudget`, it does not pre-empt a server the user is about to
+   * need.
    */
   private ensureLsp(id: string): Promise<void> {
     const slot = this.slots.get(id);
     if (!slot || !slot.lspPending) return Promise.resolve();
     if (slot.lspStarting) return slot.lspStarting;
-    slot.lspStarting = this.startLsp(slot).finally(() => {
-      slot.lspPending = false;
-      slot.lspStarting = undefined;
-    });
+    // Shed *before* the new server exists, so the language about to be used is
+    // never the one that gets stopped to make room.
+    slot.lspStarting = this.resources
+      .enforce()
+      .then(() => this.startLsp(slot))
+      .finally(() => {
+        slot.lspPending = false;
+        slot.lspStarting = undefined;
+      });
     return slot.lspStarting;
   }
 
@@ -473,6 +627,7 @@ export class WorkspaceService {
       await client.openDocument(slot.docUri, await readText(slot.docPath), slot.id);
       slot.lsp = client;
       slot.lspNote = note;
+      this.resources.noteUse(slot.id);
       log.info('Language server ready', {
         language: slot.id,
         server: launch.serverName,
@@ -514,9 +669,27 @@ export class WorkspaceService {
    * The language list the UI builds itself from — id, display name,
    * extensions, grammar and capabilities, straight from the manifests.
    */
+  /**
+   * Slot ids in *manifest* order, not insertion order.
+   *
+   * A plugin installed later than Python still belongs after it: `order` is the
+   * manifest's presentation decision, and the language picker and the status
+   * bar must show the same sequence no matter when a plugin was added.
+   */
+  private orderedSlotIds(): string[] {
+    return [...this.slots.values()]
+      .sort(
+        (a, b) =>
+          (a.manifest.order ?? Number.MAX_SAFE_INTEGER) - (b.manifest.order ?? Number.MAX_SAFE_INTEGER) ||
+          a.id.localeCompare(b.id),
+      )
+      .map((s) => s.id);
+  }
+
   languageList(): LanguageDescriptorWire[] {
     const out: LanguageDescriptorWire[] = [];
-    for (const slot of this.slots.values()) {
+    for (const id of this.orderedSlotIds()) {
+      const slot = this.slots.get(id)!;
       const m = slot.manifest;
       const source = this.registry.sourceOf(m.id);
       out.push({
@@ -560,8 +733,10 @@ export class WorkspaceService {
       error?: string;
     };
     languages: LanguageStatus[];
+    /** Phase 4 · memory accounting for every language. */
+    resource: ReturnType<ProfileManager['summary']>;
   } {
-    const languages = [...this.slots.keys()].map((id) => this.languageStatus(id));
+    const languages = this.orderedSlotIds().map((id) => this.languageStatus(id));
     // Never `undefined`: a workspace with every plugin disabled still has to
     // answer with the old shape.
     const primary = languages[0];
@@ -578,6 +753,7 @@ export class WorkspaceService {
         error: primary?.lsp.error,
       },
       languages,
+      resource: this.resources.summary(),
     };
   }
 
@@ -655,6 +831,7 @@ export class WorkspaceService {
     } = {},
   ): Promise<WorkspaceRunResult> {
     const slot = this.requireSlot(id);
+    this.touch(id);
     if (!slot.runner) {
       // Render-only languages and broken plugins get the same clear answer
       // instead of a TypeError on a missing runner.
@@ -698,6 +875,7 @@ export class WorkspaceService {
 
   async resetSession(id: LanguageId, sessionId = 'ide'): Promise<boolean> {
     const slot = this.requireSlot(id);
+    this.touch(id);
     // Render-only languages have no session; "nothing to reset" is success.
     if (!slot.runner) return false;
     return slot.runner.resetSession(sessionId);
@@ -706,6 +884,7 @@ export class WorkspaceService {
   /** Sync the buffer and return the problems the language server reports. */
   async diagnose(id: LanguageId, code: string): Promise<DiagnoseResult> {
     const slot = this.requireSlot(id);
+    this.touch(id);
     await this.ensureLsp(id);
     const spec = slot.manifest.lsp;
     return this.serialize(slot, async () => {
@@ -749,6 +928,7 @@ export class WorkspaceService {
 
   async complete(id: LanguageId, code: string, line: number, character: number): Promise<CompletionItem[]> {
     const slot = this.requireSlot(id);
+    this.touch(id);
     await this.ensureLsp(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return [];
@@ -790,6 +970,7 @@ export class WorkspaceService {
    */
   async preview(id: LanguageId, code: string): Promise<PreviewResult> {
     const slot = this.requireSlot(id);
+    this.touch(id);
     return this.serialize(slot, async () => {
       const t0 = performance.now();
       const span = this.kernel.tracer.startSpan('markdown.render', {
@@ -838,7 +1019,68 @@ export class WorkspaceService {
     });
   }
 
+  // ---------------- Phase 4 · resources ----------------
+
+  /**
+   * What every language currently costs, straight from its manifest.
+   *
+   * The manifest's `memoryHint` is the only number we have without shelling out
+   * to the OS, and it is a *hint*: it keeps the accounting honest about the
+   * difference between a pyright and a markdown server, which is what the
+   * budget needs. Real RSS would be better where the platform allows it.
+   */
+  private resourceProfiles(): ResourceProfile[] {
+    const now = Date.now();
+    return [...this.slots.values()].map((slot) => {
+      const m = slot.manifest;
+      const lspBytes = parseMemoryHint(m.lsp?.memoryHint);
+      return {
+        languageId: slot.id,
+        memoryBytes: lspBytes + parseMemoryHint(m.profiler?.memoryHint) + (slot.runner ? runtimeMemoryBytes(m.run?.mode) : 0),
+        lspMemoryBytes: lspBytes,
+        lspRunning: !!slot.lsp,
+        eager: m.lsp?.eager === true,
+        lastUsedAt: this.resources.lastUsedAt(slot.id, now),
+      };
+    });
+  }
+
+  /**
+   * Stop a language server and leave a note to restart it on next use.
+   *
+   * Called by `ProfileManager` only — a user never sees a server disappear,
+   * because `lspPending` brings it back on the next Check/Complete.
+   */
+  private async releaseLsp(id: string): Promise<void> {
+    const slot = this.slots.get(id);
+    if (!slot) return;
+    await slot.lsp?.stop().catch(() => undefined);
+    if (!slot.lsp) return; // Nothing to do (already stopped).
+    slot.lsp = undefined;
+    slot.lspStarting = undefined;
+    slot.lspPending = true;
+    this.kernel.logger
+      .forComponent(`ide.workspace.${id}`)
+      .info('Language server released by the resource manager — restarts on next use', { language: id });
+  }
+
+  /** Memory accounting for `/health`, the status bar and the Plugins page. */
+  resourceSummary() {
+    return this.resources.summary();
+  }
+
+  /** Run a budget pass now (used by tests and the Plugins page's "Reclaim" button). */
+  async enforceResources() {
+    return this.resources.enforce();
+  }
+
+  /** Touch a language, so LRU and idle reclamation see it as in use. */
+  private touch(id: LanguageId): void {
+    this.resources.noteUse(id);
+  }
+
   async close(): Promise<void> {
+    this.resources.stop();
     for (const slot of this.slots.values()) {
       await slot.lsp?.stop().catch(() => undefined);
       await slot.runner?.close().catch(() => undefined);

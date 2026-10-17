@@ -123,5 +123,27 @@
   "profiler": {
     "adapter": "cProfile",
     "memoryHint": "80MB"
+  },
+  "debug": {
+    "adapter": "debugpy",
+    "type": "python",
+    "discovery": {
+      "commands": [
+        "debugpy-adapter"
+      ],
+      "envVars": [
+        "DEBUGPY_ADAPTER"
+      ],
+      "knownPaths": [
+        "~/.local/bin/debugpy-adapter"
+      ]
+    },
+    "command": [
+      "{resolved}"
+    ],
+    "args": [],
+    "serverName": "debugpy",
+    "memoryHint": "60MB",
+    "degradedNote": "debugpy not installed - debugging is unavailable for Python"
   }
 }

@@ -16,6 +16,7 @@
  * survives uninstall unless the user asks otherwise.
  */
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -24,6 +25,7 @@ import {
   validateManifest,
   type LanguageManifest,
   type ManifestValidation,
+  type MigrationSpec,
   type PluginSource,
 } from './manifest.js';
 
@@ -192,6 +194,14 @@ export class LanguageRegistry {
     }
   }
 
+  /**
+   * True once `scan()` has completed. Hosts that bind closures (the profiler,
+   * the Plugins page) can poll this instead of guessing.
+   */
+  isScanned(): boolean {
+    return this.scanned;
+  }
+
   // ---------------- queries ----------------
 
   all(): LanguageManifest[] {
@@ -283,12 +293,23 @@ export class LanguageRegistry {
   // ---------------- install / uninstall ----------------
 
   /**
-   * Copy a plugin directory into `languages/<id>@<version>/`.
+   * Copy a plugin directory into `languages/<id>@<version>/` and migrate data.
    *
-   * Only the *body* is copied — user data under `data/<id>/` is never touched
-   * by an install, so reinstalling cannot destroy run configs.
+   * Two things happen before the body is replaced:
+   *
+   *   1. **Migrations run.** A plugin whose data layout changed between versions
+   *      ships `migrations/1.0.0-to-1.1.0.js` and declares it in its manifest;
+   *      each step is a subprocess invoked with the data directory, and steps
+   *      that already ran are skipped (recorded in `data/<id>/migrations.json`).
+   *   2. **A failed migration aborts the install.** The old plugin directory is
+   *      left untouched, so a broken upgrade downgrades the plugin to "unchanged"
+   *      rather than "unusable".
+   *
+   * Only the *body* is copied — user data under `data/<id>/` is never touched by
+   * the copy itself, so reinstalling cannot destroy run configs. The migrations
+   * are the one thing allowed to change it, on purpose.
    */
-  async install(srcDir: string): Promise<{ id: string; version: string; dir: string }> {
+  async install(srcDir: string): Promise<{ id: string; version: string; dir: string; migrated: string[] }> {
     const manifestPath = join(srcDir, 'manifest.json');
     if (!existsSync(manifestPath)) throw new Error(`no manifest.json in ${srcDir}`);
     const raw: unknown = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -298,13 +319,93 @@ export class LanguageRegistry {
       throw new Error(`invalid manifest: ${detail}`);
     }
     const manifest = raw as LanguageManifest;
+    const previous = this.plugins.get(manifest.id);
+    const migrated = await this.runMigrations(manifest, previous?.manifest, srcDir);
     const target = this.installDir(manifest.id, manifest.version);
     await mkdir(join(this.home, 'languages'), { recursive: true });
     await rm(target, { recursive: true, force: true }).catch(() => undefined);
     await cp(srcDir, target, { recursive: true });
+    // An older copy of the same plugin must not linger: `scan()` keeps the
+    // highest version anyway, but leaving 1.0.0 on disk after installing 1.1.0
+    // just confuses anyone looking at the directory.
+    if (previous?.source.removable && previous.source.dir !== target && resolve(previous.source.dir) !== resolve(srcDir)) {
+      await rm(previous.source.dir, { recursive: true, force: true }).catch(() => undefined);
+    }
     await this.scan();
     this.emit({ type: 'added', id: manifest.id });
-    return { id: manifest.id, version: manifest.version, dir: target };
+    return { id: manifest.id, version: manifest.version, dir: target, migrated };
+  }
+
+  /**
+   * Run the migration steps between `previous` and `manifest`.
+   *
+   * Each step is a subprocess (`node migrations/1.0.0-to-1.1.0.js <dataDir>
+   * <from> <to>`), never `import()`d: a migration is plugin code, and plugin
+   * code does not run inside the host process. A script must exit 0; anything
+   * else — including an ENOENT for the script itself — aborts the install.
+   */
+  private async runMigrations(
+    manifest: LanguageManifest,
+    previous: LanguageManifest | undefined,
+    srcDir: string,
+  ): Promise<string[]> {
+    const steps = manifest.migrations ?? [];
+    if (!steps.length || !previous) return [];
+    if (versionKey(manifest.version) <= versionKey(previous.version)) {
+      // Same or lower version: nothing to migrate. Reinstalling the same build
+      // must be a no-op for data, so a user can repair a broken plugin.
+      return [];
+    }
+    const done = await this.appliedMigrations(manifest.id);
+    const applied: string[] = [];
+    for (const step of steps) {
+      if (step.from !== previous.version) continue; // Not on the path from where we are.
+      const key = `${step.from}->${step.to}`;
+      if (done.has(key)) continue;
+      await this.runMigrationScript(manifest.id, join(srcDir, step.file), step);
+      applied.push(key);
+      done.add(key);
+      await this.recordMigrations(manifest.id, done);
+    }
+    return applied;
+  }
+
+  private async runMigrationScript(id: string, script: string, step: MigrationSpec): Promise<void> {
+    if (!existsSync(script)) {
+      throw new Error(`migration script ${step.file} for "${id}" is missing (${script})`);
+    }
+    const dataDir = await this.ensureDataDir(id);
+    const scriptArgs = [dataDir, step.from, step.to];
+    const child = spawn(process.execPath, [script, ...scriptArgs], {
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, NL_PLUGIN_ID: id, NL_DATA_DIR: dataDir },
+    });
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      let err = '';
+      child.stderr?.on('data', (c: Buffer) => (err += c.toString('utf8')));
+      child.on('error', rejectPromise);
+      // 0 is the only acceptable exit: a half-migrated data directory is worse
+      // than a failed upgrade, so the install aborts with the old body intact.
+      child.on('close', (code) =>
+        code === 0 ? resolvePromise() : rejectPromise(new Error(`migration ${step.file} for "${id}" exited ${code}: ${err.trim()}`)),
+      );
+    });
+  }
+
+  /** `data/<id>/migrations.json`, the record of what already ran. */
+  private async appliedMigrations(id: string): Promise<Set<string>> {
+    try {
+      const raw = JSON.parse(await readFile(join(this.dataDir(id), 'migrations.json'), 'utf8')) as { applied?: string[] };
+      return new Set(Array.isArray(raw.applied) ? raw.applied : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  private async recordMigrations(id: string, applied: Set<string>): Promise<void> {
+    const dir = await this.ensureDataDir(id);
+    await writeFile(join(dir, 'migrations.json'), JSON.stringify({ applied: [...applied] }, null, 2), 'utf8');
   }
 
   /**
