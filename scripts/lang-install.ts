@@ -27,12 +27,13 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve, sep } from 'node:path';
-import { LanguageRegistry, type RegistryRoot } from '../src/langs/Registry.js';
+import { LanguageRegistry, describeUnmet, type RegistryRoot } from '../src/langs/Registry.js';
 import type { LanguageManifest } from '../src/langs/manifest.js';
 
 const args = process.argv.slice(2);
 const positional: string[] = [];
 const dropData = args.includes('--drop-data');
+const strictDeps = args.includes('--strict');
 const wantsHelp = args.includes('--help') || args.includes('-h') || args.includes('help');
 const homeIdx = args.indexOf('--home');
 if (homeIdx >= 0 && !args[homeIdx + 1]) fail('--home needs a directory', 2);
@@ -43,7 +44,7 @@ for (let i = 0; i < args.length; i++) {
     i++; // consume its value
     continue;
   }
-  if (a === '--drop-data' || a === '--help' || a === '-h' || a === 'help') continue;
+  if (a === '--drop-data' || a === '--strict' || a === '--help' || a === '-h' || a === 'help') continue;
   if (a.startsWith('-')) fail(`unknown flag: ${a}`, 2);
   positional.push(a);
 }
@@ -128,7 +129,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const out = await reg.install(src);
+    const out = await reg.install(src, { strictDeps });
     const wasEnabled = reg.isEnabled(out.id);
     if (!wasEnabled) await reg.enable(out.id); // a reinstall must not resurrect a banned plugin
     console.log(`installed ${out.id}@${out.version}`);
@@ -136,6 +137,16 @@ async function main(): Promise<void> {
     console.log(`  data      ${reg.dataDir(out.id)}`);
     console.log(`  enabled   ${wasEnabled ? 'yes' : 'yes (was disabled)'}`);
     if (out.migrated.length) console.log(`  migrated  ${out.migrated.join(', ')}`);
+    if (out.requirements.requires.length) {
+      // `run.requires` names host runtimes, so an unmet one is reported rather
+      // than answered with "install something" — nothing can be installed.
+      if (out.requirements.ok) {
+        console.log(`  requires  ${out.requirements.requires.join(', ')} (met)`);
+      } else {
+        console.log(`  WARNING   unmet requirement: ${out.requirements.unmet.join(', ')}`);
+        console.log(`            ${describeUnmet(out.id, out.requirements)}`);
+      }
+    }
     console.log('note: a running IDE applies this on its next start, or live from /plugins');
     return;
   }

@@ -217,7 +217,7 @@ export class ProfileManager {
    * request contributes 0 — which also makes the caller's loop notice that
    * stopping did not help and give up instead of spinning.
    */
-  private async stop(id: string, reason: ReapReason): Promise<void> {
+  private async stopServer(id: string, reason: ReapReason): Promise<void> {
     try {
       await this.provider?.stopLsp(id);
     } catch {
@@ -247,7 +247,7 @@ export class ProfileManager {
       if (!running.length) return; // Nothing reclaimable; `overBudget` reports it.
       const victim = pickVictim(running);
       if (!victim) return;
-      await this.stop(victim.languageId, overLsp ? 'lsp-budget' : 'total-budget');
+      await this.stopServer(victim.languageId, overLsp ? 'lsp-budget' : 'total-budget');
       const after =
         (this.provider?.profiles() ?? []).filter((p) => p.lspRunning).reduce((a, p) => a + p.lspMemoryBytes, 0);
       if (after >= lspBytes) return; // The stop did not help; do not loop.
@@ -261,7 +261,7 @@ export class ProfileManager {
     for (const p of this.provider?.profiles() ?? []) {
       if (!p.lspRunning || p.eager) continue;
       if (this.lastUsedAt(p.languageId, p.lastUsedAt) > cutoff) continue;
-      await this.stop(p.languageId, 'idle');
+      await this.stopServer(p.languageId, 'idle');
     }
   }
 

@@ -114,9 +114,23 @@ check('theme: ships a Light variant', /\[data-theme="light"\]/.test(html));
 // was removed on purpose (user request), so it must NOT be present.
 check('editor: code background is solid (no indent-guide gradient)',
   !html.includes('repeating-linear-gradient(to right, var(--text-primary)'));
+/**
+ * The real inline scripts, from a real parser.
+ *
+ * The page legitimately mentions `<script>` inside CSS and HTML comments (the
+ * command palette's usage hint), which a `<script>…</script>` regex happily
+ * mistakes for a script element — and then hands a slab of CSS to `eval`.
+ * Only an element is a script, so ask the parser.
+ */
+function scriptBlocks(markup: string): string[] {
+  const dom = new JSDOM(markup, { runScripts: 'outside-only' });
+  return Array.from(dom.window.document.querySelectorAll('script'))
+    .map((s: any) => (s.textContent ?? '') as string)
+    .filter((text) => text.trim().length > 0);
+}
+
 check('shell: inline script parses', (() => {
-  const code = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1] as string)
-    .sort((a, b) => b.length - a.length)[0];
+  const code = scriptBlocks(html).sort((a, b) => b.length - a.length)[0] ?? '';
   try { new Function(code); return true; } catch { return false; }
 })());
 
@@ -152,7 +166,11 @@ function mountPage(markup: string, seed?: string, bridge: 'ws' | 'tauri' = 'ws')
   if (bridge === 'tauri') FakeTauri.install(w);
   else w.WebSocket = FakeSocket;
   if (seed) { try { w.localStorage.setItem('nolanguage.pycharm.v1', seed); } catch { /* no storage */ } }
-  const blocks = Array.from(markup.matchAll(/<script>([\s\S]*?)<\/script>/g)).map((m) => m[1] as string);
+  // Read the scripts back out of the parsed document: a regex over the markup
+  // would also "find" the `<script>` the page mentions inside a comment.
+  const blocks = Array.from(dom.window.document.querySelectorAll('script'))
+    .map((s: any) => (s.textContent ?? '') as string)
+    .filter((text) => text.trim().length > 0);
   for (const block of blocks) w.eval(block);
   return { window: w, socket: bridge === 'tauri' ? undefined : FakeSocket.instances[FakeSocket.instances.length - 1] };
 }

@@ -28,6 +28,7 @@ import {
   type MigrationSpec,
   type PluginSource,
 } from './manifest.js';
+import type { RuntimeRegistry } from '../runtimes/RuntimeRegistry.js';
 
 export interface RegistryRoot {
   dir: string;
@@ -55,6 +56,47 @@ export interface RegistryOptions {
   roots?: RegistryRoot[];
   /** Extra roots appended after the defaults. */
   extraRoots?: RegistryRoot[];
+  /**
+   * The host's runtime catalogue, used to check `run.requires`. When absent the
+   * default set is imported lazily on first use.
+   */
+  runtimes?: RuntimeRegistry;
+}
+
+export interface InstallOptions {
+  /**
+   * Refuse to install when `run.requires` cannot be met, instead of installing
+   * and reporting. The check happens before anything is copied, so a refusal
+   * leaves the previous body untouched.
+   */
+  strictDeps?: boolean;
+}
+
+/** The outcome of checking one plugin's `run.requires`. */
+export interface RequirementReport {
+  ok: boolean;
+  /** The requirement strings that were not met, e.g. `["quantum@^2.0.0"]`. */
+  unmet: string[];
+  /** What this build provides — named so an unmet requirement has context. */
+  available: Array<{ id: string; version: string }>;
+  requires: string[];
+}
+
+/**
+ * Explain an unmet requirement. A runtime is a capability of this build, not an
+ * installable plugin, so "install X" would be a lie — say what is missing, what
+ * exists, and what kind of thing it is.
+ */
+export function describeUnmet(id: string, report: RequirementReport): string {
+  const available = report.available.length
+    ? report.available.map((r) => `${r.id} ${r.version}`).join(', ')
+    : 'none';
+  return (
+    `"${id}" requires ${report.unmet.join(', ')}, which this build does not provide ` +
+    `(available runtimes: ${available}). ` +
+    'A runtime is a host capability rather than an installable language plugin, ' +
+    'so it cannot be added by installing something else.'
+  );
 }
 
 interface ConfigFile {
@@ -69,6 +111,9 @@ function versionKey(v: string): number {
 
 export class LanguageRegistry {
   readonly home: string;
+  /** Injected runtime catalogue (host-provided) or lazily imported default. */
+  private runtimes?: RuntimeRegistry;
+  private lazyRuntimes?: RuntimeRegistry;
   private roots: RegistryRoot[] = [];
   private plugins = new Map<string, InstalledPlugin>();
   private disabled = new Set<string>();
@@ -77,6 +122,7 @@ export class LanguageRegistry {
 
   constructor(private opts: RegistryOptions = {}) {
     this.home = resolve(opts.home ?? process.env.NOLANGUAGE_HOME ?? join(homedir(), '.nolanguage'));
+    this.runtimes = opts.runtimes;
     const base: RegistryRoot[] = opts.roots ?? [
       { dir: join(this.home, 'builtin'), kind: 'builtin', removable: false },
       { dir: join(this.home, 'languages'), kind: 'user', removable: true },
@@ -308,8 +354,19 @@ export class LanguageRegistry {
    * Only the *body* is copied — user data under `data/<id>/` is never touched by
    * the copy itself, so reinstalling cannot destroy run configs. The migrations
    * are the one thing allowed to change it, on purpose.
+   *
+   * `manifest.run.requires` is checked *before* anything is copied. Those are
+   * requirements on **host runtimes** (`template`, `repl-session`, …), which are
+   * capabilities compiled into this build rather than installable plugins, so an
+   * unmet one cannot be fixed by installing something else — it is reported, and
+   * `strictDeps` turns it into a refusal that leaves the old body intact. The
+   * runner performs the same check at run time; doing it here means a plugin
+   * that can never run is announced at install time instead of at first Run.
    */
-  async install(srcDir: string): Promise<{ id: string; version: string; dir: string; migrated: string[] }> {
+  async install(
+    srcDir: string,
+    opts: InstallOptions = {},
+  ): Promise<{ id: string; version: string; dir: string; migrated: string[]; requirements: RequirementReport }> {
     const manifestPath = join(srcDir, 'manifest.json');
     if (!existsSync(manifestPath)) throw new Error(`no manifest.json in ${srcDir}`);
     const raw: unknown = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -319,6 +376,13 @@ export class LanguageRegistry {
       throw new Error(`invalid manifest: ${detail}`);
     }
     const manifest = raw as LanguageManifest;
+
+    // Dependencies first: a refusal must happen before the body is replaced.
+    const requirements = await this.checkRequirements(manifest);
+    if (!requirements.ok && opts.strictDeps) {
+      throw new Error(`${manifest.id} cannot be installed: ${describeUnmet(manifest.id, requirements)}`);
+    }
+
     const previous = this.plugins.get(manifest.id);
     const migrated = await this.runMigrations(manifest, previous?.manifest, srcDir);
     const target = this.installDir(manifest.id, manifest.version);
@@ -333,7 +397,54 @@ export class LanguageRegistry {
     }
     await this.scan();
     this.emit({ type: 'added', id: manifest.id });
-    return { id: manifest.id, version: manifest.version, dir: target, migrated };
+    return { id: manifest.id, version: manifest.version, dir: target, migrated, requirements };
+  }
+
+  /**
+   * Check one manifest's `run.requires` against the host's runtimes.
+   *
+   * The runtime registry is injected when a host has one; otherwise the default
+   * set is imported lazily, so a registry that never sees a `requires` line
+   * never pays for it.
+   */
+  async checkRequirements(manifest: LanguageManifest): Promise<RequirementReport> {
+    const requires = manifest.run?.requires ?? [];
+    if (!requires.length) return { ok: true, unmet: [], available: [], requires: [] };
+    const runtimes = this.runtimes ?? (await this.defaultRuntimes());
+    const result = runtimes.satisfiesAll(requires);
+    return {
+      ok: result.ok,
+      unmet: result.unmet,
+      available: runtimes.list(),
+      requires: [...requires],
+    };
+  }
+
+  private async defaultRuntimes(): Promise<RuntimeRegistry> {
+    if (!this.lazyRuntimes) {
+      // Dynamic on purpose: this keeps `src/langs` free of a static dependency
+      // on the runtime implementations.
+      const mod = (await import('../runtimes/index.js')) as { defaultRuntimeRegistry: () => RuntimeRegistry };
+      this.lazyRuntimes = mod.defaultRuntimeRegistry();
+    }
+    return this.lazyRuntimes;
+  }
+
+  /**
+   * Every installed plugin's runtime requirements and whether they are met —
+   * what `nlg lang deps` and the Plugins page show. Plugins without a `run`
+   * section are omitted: they declare nothing to check.
+   */
+  async dependencyAudit(): Promise<Array<{ id: string; version: string; requires: string[]; ok: boolean; unmet: string[] }>> {
+    this.ensureScanned();
+    const out: Array<{ id: string; version: string; requires: string[]; ok: boolean; unmet: string[] }> = [];
+    for (const plugin of this.plugins.values()) {
+      const requires = plugin.manifest.run?.requires ?? [];
+      if (!requires.length) continue;
+      const report = await this.checkRequirements(plugin.manifest);
+      out.push({ id: plugin.manifest.id, version: plugin.manifest.version, requires, ok: report.ok, unmet: report.unmet });
+    }
+    return out.sort((a, b) => a.id.localeCompare(b.id));
   }
 
   /**

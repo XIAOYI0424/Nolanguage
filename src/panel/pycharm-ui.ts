@@ -208,7 +208,7 @@ export function renderPyCharmHtml(_port: number): string {
   .ctxmenu .citem.dis { color:var(--text-tertiary); pointer-events:none; }
   .ctxmenu .csep { height:1px; margin:4px 6px; background:var(--border-soft); }
 
-  /* ---------- command palette (nlg run <script> -- <args>) ---------- */
+  /* ---------- command palette (nlg run SCRIPT -- ARGS) ---------- */
   .palette { position:fixed; z-index:200; left:50%; top:14%; transform:translateX(-50%);
     width:min(680px, 92vw); background:var(--bg-secondary); border:1px solid var(--border);
     border-radius:8px; box-shadow:0 10px 36px rgba(0,0,0,.4); display:none; overflow:hidden; }
@@ -589,7 +589,7 @@ export function renderPyCharmHtml(_port: number): string {
 <div class="scrim" id="scrim"></div>
 <div class="ctxmenu" id="ctxMenu"></div>
 
-<!-- command palette: runs nlg run <script> -- <args> server-side -->
+<!-- command palette: runs nlg run SCRIPT -- ARGS server-side -->
 <div class="palette" id="palette">
   <div class="ph"><span class="pfx">&gt;</span><input id="palInput" type="text" placeholder="nlg run lang-install -- install examples/cpp@1.0.0" spellcheck="false" autocomplete="off" /></div>
   <div class="hint">Enter runs it · Esc closes · e.g. <code>nlg run verify-plugins</code> or <code>nlg run lang-install -- install examples/cpp@1.0.0</code></div>
@@ -2302,7 +2302,7 @@ export function renderPyCharmHtml(_port: number): string {
         break;
       case 'scriptResult':
         PAL_BUSY = false;
-        appendPaletteOut('\n[exit ' + (m.code == null ? '?' : m.code) + (m.error ? ' · ' + m.error : '') + ']\n', m.ok ? 'ok' : 'err');
+        appendPaletteOut('\\n[exit ' + (m.code == null ? '?' : m.code) + (m.error ? ' · ' + m.error : '') + ']\\n', m.ok ? 'ok' : 'err');
         break;
     }
   }
@@ -2560,12 +2560,12 @@ export function renderPyCharmHtml(_port: number): string {
     if (toks[i] === 'nlg') i++;
     if (toks[i] === 'run') i++;
     var script = toks[i++];
-    if (!script) { appendPaletteOut('usage: nlg run <script> -- <args>\n', 'err'); return; }
+    if (!script) { appendPaletteOut('usage: nlg run <script> -- <args>\\n', 'err'); return; }
     var args = [];
     if (toks[i] === '--') i++;
     for (; i < toks.length; i++) args.push(toks[i]);
     PAL_BUSY = true;
-    appendPaletteOut('$ ' + raw + '\n', 'dim');
+    appendPaletteOut('$ ' + raw + '\\n', 'dim');
     BRIDGE.send({ kind: 'runScript', script: script, args: args });
     closePalette();
   }
