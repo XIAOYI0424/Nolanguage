@@ -106,6 +106,13 @@ Section "安装 ${APP_NAME}" SecInstall
   DetailPrint "正在解压 ${APP_NAME}.exe…"
   File "${APP_EXE}"
 
+  ; The CLI shim and the PATH helper travel with the app: `nlg` has to work on a
+  ; machine that never installed Node or a source checkout, and the PATH edit
+  ; has to be undoable, which is what path-tool.ps1's receipt is for.
+  DetailPrint "正在安装 nlg 命令…"
+  File "${__FILEDIR__}\nlg.cmd"
+  File "${__FILEDIR__}\path-tool.ps1"
+
   DetailPrint "正在写入卸载程序…"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -119,6 +126,12 @@ Section "安装 ${APP_NAME}" SecInstall
 
   DetailPrint "正在创建桌面快捷方式…"
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_NAME}.exe" "" "$INSTDIR\${APP_NAME}.exe"
+
+  ; HKCU PATH, with a receipt recording the exact previous value, so uninstall
+  ; restores it instead of deleting anything that looks like ours.
+  DetailPrint "正在把 nlg 加入用户 PATH（可在卸载时精确还原）…"
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\path-tool.ps1" -Action add -InstallDir "$INSTDIR"'
+  Pop $0
 
   DetailPrint "正在写入注册表（设置 → 应用 中可卸载）…"
   WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"         "${APP_NAME}"
@@ -147,9 +160,16 @@ Section "Uninstall"
   nsExec::ExecToLog 'taskkill /IM "${APP_NAME}.exe" /F /T'
   Pop $0
 
+  ; Restore PATH before the helper script is deleted with the directory.
+  DetailPrint "正在还原用户 PATH（按安装时记录的 receipt）…"
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\path-tool.ps1" -Action remove -InstallDir "$INSTDIR"'
+  Pop $0
+
   DetailPrint "正在删除程序文件…"
   Delete "$INSTDIR\${APP_NAME}.exe"
   Delete "$INSTDIR\uninstall.exe"
+  Delete "$INSTDIR\nlg.cmd"
+  Delete "$INSTDIR\path-tool.ps1"
 
   DetailPrint "正在删除快捷方式…"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"

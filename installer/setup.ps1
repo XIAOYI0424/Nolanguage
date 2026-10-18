@@ -43,6 +43,13 @@ Write-Host "Installing Nolanguage to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Force $SourceExe (Join-Path $InstallDir 'Nolanguage.exe')
 
+# `nlg` (the bundled CLI shim) and the receipt-based PATH helper travel with the
+# app; without them a fresh install has no command-line entry point at all.
+foreach ($extra in 'nlg.cmd', 'path-tool.ps1') {
+  $src = Join-Path $ScriptDir $extra
+  if (Test-Path $src) { Copy-Item -Force $src (Join-Path $InstallDir $extra) }
+}
+
 $appExe = Join-Path $InstallDir 'Nolanguage.exe'
 $ws = New-Object -ComObject WScript.Shell
 
@@ -84,6 +91,12 @@ if ($proc) {
   Start-Sleep -Seconds 3
 }
 $InstallDir = '{{INSTALLDIR}}'
+# Restore PATH from the install receipt before the helper is deleted with the
+# directory below. path-tool.ps1 drops its own receipt afterwards.
+$pathTool = Join-Path $InstallDir 'path-tool.ps1'
+if (Test-Path $pathTool) {
+  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $pathTool -Action remove -InstallDir $InstallDir | Out-Null
+}
 $attempt = 0
 while ((Test-Path $InstallDir) -and ($attempt -lt 5)) {
   Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
@@ -97,11 +110,6 @@ $sm = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Nolanguage'
 if (Test-Path $sm) { Remove-Item -Recurse -Force $sm }
 $desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Nolanguage.lnk'
 if (Test-Path $desktop) { Remove-Item -Force $desktop }
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -like "*{{INSTALLDIR}}*") {
-  $new = ($userPath -split ';' | Where-Object { $_ -and $_ -ne '{{INSTALLDIR}}' }) -join ';'
-  [Environment]::SetEnvironmentVariable('Path', $new, 'User')
-}
 $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nolanguage'
 if (Test-Path $uninstKey) { Remove-Item -Recurse -Force $uninstKey }
 Write-Host 'Nolanguage uninstalled.'
@@ -114,6 +122,17 @@ Write-Host 'Nolanguage uninstalled.'
   $unsc.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$uninst`""
   $unsc.WorkingDirectory = $InstallDir
   $unsc.Save()
+}
+
+# --- PATH: add the install dir so `nlg` resolves, with a receipt for undo ---
+$pathTool = Join-Path $InstallDir 'path-tool.ps1'
+if ($NoPath) {
+  Write-Host "Skipping PATH (nlg stays at $(Join-Path $InstallDir 'nlg.cmd'))"
+} elseif (Test-Path $pathTool) {
+  Write-Host 'Adding nlg to the user PATH (recorded in a receipt for exact restore)'
+  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $pathTool -Action add -InstallDir $InstallDir | Out-Null
+} else {
+  Write-Host 'path-tool.ps1 not found next to setup.ps1; PATH left unchanged'
 }
 
 # --- Registry uninstall entry ---

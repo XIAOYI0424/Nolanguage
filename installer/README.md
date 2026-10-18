@@ -22,7 +22,36 @@
 3. **安装进度** —— 进度条 + 实时日志（正在解压 / 正在写快捷方式 / 正在写注册表）
 4. **完成页** —— 可勾选"运行 Nolanguage (Desktop)"
 
-安装内容：`Nolanguage.exe`、`uninstall.exe`，开始菜单「Nolanguage」「Nolanguage (Web)」「Uninstall Nolanguage」，桌面快捷方式，以及 `HKCU` 卸载项（`DisplayIcon` / `EstimatedSize` / `QuietUninstallString`，设置 → 应用 里可正常卸载）。全程无需管理员权限。
+安装内容：`Nolanguage.exe`、`uninstall.exe`、`nlg.cmd`（命令行入口）、`path-tool.ps1`（PATH 记录/还原），开始菜单「Nolanguage」「Nolanguage (Web)」「Uninstall Nolanguage」，桌面快捷方式，以及 `HKCU` 卸载项（`DisplayIcon` / `EstimatedSize` / `QuietUninstallString`，设置 → 应用 里可正常卸载）。全程无需管理员权限。
+
+### 安装后就有 `nlg`（无需 Node、无需源码树）
+
+安装器把安装目录写进**用户 PATH**，并记录一份 receipt 到 `%LOCALAPPDATA%\Nolanguage\install-receipt.json`：
+
+```json
+{
+  "schemaVersion": 1,
+  "installDir": "C:\\Users\\you\\AppData\\Local\\Programs\\Nolanguage",
+  "path": { "scope": "user", "value": "...\\Nolanguage", "before": "<安装前的原值>", "after": "<安装后的值>" },
+  "command": "...\\Nolanguage\\nlg.cmd"
+}
+```
+
+新开一个终端即可：
+
+```bash
+nlg lang ls
+nlg lang add D:\plugins\rust@1.0.0
+nlg --dump-plugins
+```
+
+三个约束：
+
+- **只动用户 PATH**（`HKCU\Environment`），不碰机器级 PATH，也不需要管理员；
+- **保留值的类型**：直接读写注册表项并沿用原来的 `REG_EXPAND_SZ`/`REG_SZ`，所以别人的 `%JAVA_HOME%\bin` 不会被写坏；
+- **可逆**：卸载时 `path-tool.ps1 -Action remove` 若发现我们追加的那一项仍在末尾，就**整串恢复到 `before`**；若安装后又有别的软件追加了条目，则只删除我们自己那一个 token，绝不误删带 "Nolanguage" 字样的别的目录。
+
+`setup.ps1` 加 `-NoPath` 可以跳过这一步（`nlg` 仍可用，路径是 `<安装目录>\nlg.cmd`）。
 
 **重新构建**：
 
@@ -35,7 +64,7 @@ npm run build:setup               # → installer/Nolanguage-Setup.exe
 
 静默安装（CI / 脚本）：`Nolanguage-Setup.exe /S /D=C:\path\to\dir`（`/D` 必须是最后一个参数）。
 
-卸载：设置 → 应用 → Nolanguage，或安装目录里的 `uninstall.exe`。卸载会结束正在运行的应用、删除程序文件与快捷方式、清理注册表；安装目录里的用户数据（`.nolanguage`，含 WebView 配置与遥测数据库）会保留。
+卸载：设置 → 应用 → Nolanguage，或安装目录里的 `uninstall.exe`。卸载会**先按 receipt 还原用户 PATH**，再结束正在运行的应用、删除程序文件与快捷方式、清理注册表；用户数据（`~/.nolanguage`，含插件、WebView 配置与遥测数据库）会保留。
 
 ## 方式一：PowerShell 安装器（无需任何工具链，立即可用）
 

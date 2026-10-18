@@ -86,6 +86,10 @@ fn run_uninstall(install_dir: &Path) -> i32 {
     kill(WEBVIEW_HOST);
     thread::sleep(Duration::from_secs(2));
 
+    // Restore PATH *before* the directory goes away: the receipt-based helper
+    // lives inside it, and it knows the exact value PATH had before install.
+    restore_path(install_dir);
+
     // WebView2's shared `msedge` runtime may still hold cache files; retry so a
     // later release of the handle is picked up without failing the uninstall.
     delete_dir_retry(install_dir, 6);
@@ -118,11 +122,71 @@ fn delete_dir_retry(dir: &Path, attempts: usize) {
     }
 }
 
-/// Start Menu folder, desktop shortcut, user PATH entry and the uninstall key.
+/// Undo the PATH entry the installer added.
 ///
-/// Done through PowerShell (hidden) because the Desktop folder can be
-/// redirected (OneDrive) and the user PATH lives in a registry value whose type
-/// must be preserved — `[Environment]` handles both correctly.
+/// Preferred path: the shipped `path-tool.ps1`, which restores the exact value
+/// recorded in `%LOCALAPPDATA%\Nolanguage\install-receipt.json`. That matters
+/// when other installers appended entries after us — replaying our `before`
+/// would silently drop them, so the helper only restores verbatim when the tail
+/// still matches and otherwise removes just our token.
+///
+/// Fallback (installs made by older builds, or a missing helper): remove the
+/// install directory as a *path token*. Never match substrings — a directory
+/// called `Nolanguage-notes` belongs to somebody else.
+fn restore_path(install_dir: &Path) {
+    let helper = install_dir.join("path-tool.ps1");
+    if helper.exists() {
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&helper)
+        .args(["-Action", "remove", "-InstallDir"])
+        .arg(install_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        hide(&mut cmd);
+        if cmd.status().map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$dir = $env:NL_UNINSTALL_DIR
+if (-not $dir) { exit 0 }
+$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+if ($k) {
+  try { $kind = $k.GetValueKind('Path') } catch { $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString }
+  $raw = [string]$k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  $kept = @($raw -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ine $dir.TrimEnd('\')) })
+  $k.SetValue('Path', ($kept -join ';'), $kind)
+  $k.Close()
+}
+Remove-Item -Force (Join-Path $env:LOCALAPPDATA 'Nolanguage\install-receipt.json')
+"#;
+
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ])
+    .env("NL_UNINSTALL_DIR", install_dir)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    hide(&mut cmd);
+    let _ = cmd.status();
+}
+
+/// Start Menu folder, desktop shortcut and the uninstall key.
 fn cleanup_links_path_registry() {
     let script = r#"
 $ErrorActionPreference = 'SilentlyContinue'
@@ -130,11 +194,6 @@ $sm = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Nolanguage'
 if (Test-Path $sm) { Remove-Item -Recurse -Force $sm }
 $dl = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Nolanguage.lnk'
 if (Test-Path $dl) { Remove-Item -Force $dl }
-$up = [Environment]::GetEnvironmentVariable('Path','User')
-if ($up -and ($up -like '*Nolanguage*')) {
-  $n = ($up -split ';' | Where-Object { $_ -and ($_ -notmatch 'Nolanguage') }) -join ';'
-  [Environment]::SetEnvironmentVariable('Path',$n,'User')
-}
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nolanguage'
 if (Test-Path $key) { Remove-Item -Recurse -Force $key }
 "#;
