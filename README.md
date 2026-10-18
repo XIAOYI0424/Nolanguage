@@ -29,6 +29,8 @@ npm run ide              # 前台运行面板服务（Ctrl+C 结束）
 
 Python 语言插件已随包内置（`builtin/python@1.0.0`），装完即可新建 `.py` 运行；Go / JavaScript / Markdown 同理。
 
+编辑器内置 **CodeMirror 5.65.21**（vendor 在 `src/panel/vendor/codemirror/`，随页面内联，不走 CDN，也不是 npm 依赖）：语法高亮、括号匹配、自动闭合、当前行、行号、补全弹窗。没有布局引擎的环境（jsdom 测试）会自动回退到原来的 `<textarea>` + 高亮层，所以同一份页面在浏览器 / Edge 窗口 / 测试里都能跑。
+
 ## 插件
 
 引擎零硬编码：一门语言由 `manifest.json` 描述，插件装好即生效。内置 `python` / `go` / `javascript` / `markdown` 在 `builtin/<id>@1.0.0/`，第三方插件装进插件主目录：
@@ -130,7 +132,7 @@ Nolanguage.exe --dump-plugins
 ## 验证
 
 ```bash
-npm run verify           # 29 套件 / 1332 条断言（真进程，含打包 exe smoke）
+npm run verify           # 29 套件 / 1360 条断言（真进程，含打包 exe smoke）
 npm test                 # vitest 单测（9 用例）
 npm run typecheck        # tsc --noEmit，0 错误
 npm run verify:sidecar   # 校验 dist 与 Tauri sidecar 的 sha256 一致
@@ -163,6 +165,7 @@ npm run tauri -- build --bundles nsis            # → src-tauri/target/release/
 ```
 
 - **语言零硬编码**：`builtin/<id>@<ver>/manifest.json` 决定扩展名、语法高亮、运行方式、LSP、调试、剖析；新增一门语言不改引擎代码。
+- **编辑器**：CodeMirror 5 以 vendor 形式内置（`src/panel/vendor/codemirror/`），语言 id 经 `cmModeFor()` 映射到 CM mode；无布局环境自动回退 textarea。
 - **Rust 只做管道**：`src-tauri` 起 sidecar、按行转发 JSON，不解析 `kind`。
 - **可观测性内建**：命令/事件/服务天然埋点，日志与性能进 SQLite 温层，支持 baseline 对比。
 
@@ -175,7 +178,7 @@ npm run tauri -- build --bundles nsis            # → src-tauri/target/release/
 
 ## 依赖
 
-运行时依赖 1 个（`@tauri-apps/plugin-dialog`）；开发依赖 5 个（tauri-cli、types、tsx、typescript、vitest）。构建工具（esbuild / postject / jsdom）按需临时安装，不写入 `package.json`。
+运行时依赖 1 个（`@tauri-apps/plugin-dialog`）；开发依赖 5 个（tauri-cli、types、tsx、typescript、vitest）。构建工具（esbuild / postject / jsdom）按需临时安装，不写入 `package.json`。CodeMirror 5 以 vendor 形式内置（`src/panel/vendor/codemirror/`），同样不进入 `package.json`。
 
 ## License
 

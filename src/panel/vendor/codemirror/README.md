@@ -1,74 +1,74 @@
 # CodeMirror 5 — vendored editor assets
 
-This directory is the drop point for the **CodeMirror 5** distribution that the
-editor plugin inlines. Nothing here is downloaded at runtime: the app is a
-self-contained exe, so the files are imported statically (`?raw`) and bundled —
-exactly like `../vue.global.prod.js`.
+Vendored from **`codemirror@5.65.21`** (MIT). These files are inlined into the
+self-contained page: nothing is fetched at runtime, and CodeMirror is **not** an
+npm dependency. The packaged exe carries them exactly like the vendored Vue
+runtime.
 
 ## Why CodeMirror 5 (and not 6)
 
 CM5 is a single `codemirror.js` + `codemirror.css` with per-language mode files.
 That is the only shape that can be vendored with **zero build tooling and zero
-network**. CM6 is dozens of ESM packages and needs a bundler; the project has
-neither esbuild-in-the-build nor network access.
+network**. CM6 is dozens of ESM packages and needs a bundler.
 
-## Required files (drop them here, keep these exact paths)
-
-```
-codemirror.js                      <- lib/codemirror.js
-codemirror.css                     <- lib/codemirror.css
-mode/python/python.js
-mode/go/go.js
-mode/javascript/javascript.js
-mode/markdown/markdown.js
-mode/xml/xml.js                    <- markdown mode depends on it
-addon/hint/show-hint.js
-addon/hint/show-hint.css
-```
-
-## Recommended addons (same paths, optional but used if present)
+## Files
 
 ```
+codemirror.js / codemirror.css     core
+mode/{python,go,javascript,markdown,xml,css,yaml,sql,shell,toml,htmlmixed}/
+addon/hint/show-hint.js + .css     completion UI (loaded; the shell uses its own popup)
 addon/edit/matchbrackets.js
 addon/edit/closebrackets.js
 addon/selection/active-line.js
-addon/comment/comment.js
-addon/fold/foldcode.js
-addon/fold/foldgutter.js
-addon/fold/brace-fold.js
-addon/fold/indent-fold.js
-addon/fold/markdown-fold.js
+LICENSE
 ```
 
-## How to obtain them (on a machine with network)
+`xml` is loaded before `markdown` / `htmlmixed` because those resolve
+`text/xml` / `text/html` when a mode instance is created.
 
-```bash
-npm pack codemirror@5.65.16
-tar -xzf codemirror-5.65.16.tgz
-# copy package/lib/*, package/mode/*, package/addon/* into this directory,
-# preserving the sub-paths shown above.
-```
+## How it is wired
 
-`codemirror@5.65.16` is the last CM5 release (MIT). Keep `LICENSE` alongside if
-you copy the whole package.
+- `src/panel/ui/codemirror-assets.ts` imports every file with `?raw` and exports
+  `CODEMIRROR_CSS` / `CODEMIRROR_JS` (load order: core → modes → addons →
+  show-hint) plus a theme bridge that maps CM token classes onto the shell's
+  `--syn-*` variables (Light / Darcula).
+- `src/panel/pycharm-ui.ts` emits the CSS inside `<style>` and the JS inside a
+  `<script>` block **before** the client script.
+- `src/panel/ui/pycharm-client.ts`:
+  - creates `#cmHost` and `CodeMirror(host, {...})` when `window.CodeMirror`
+    exists and the UA is not jsdom;
+  - wraps the instance in a **textarea-compatible adapter** (`value`,
+    `selectionStart/End`, `setSelectionRange`, `scrollTop/Left`, `readOnly`,
+    `focus`, `addEventListener`, `getBoundingClientRect`), then reassigns `ta`
+    to it — the rest of the client keeps working unchanged;
+  - hides `#ta`, `#hl`, the custom `#gutter` and `#curline`;
+  - positions the completion popup with `cm.cursorCoords`, hover with
+    `coordsChar`, undo/redo with `cm.undo/redo`;
+  - sets `allowDropFileTypes: []` so a dropped file is never read into the
+    buffer (native-shell hardening).
+- jsdom (the verification harness) has no layout, so the client detects its UA
+  and stays on the textarea. `verify-pycharm` therefore tests the fallback, and
+  a static assertion checks that the page ships CodeMirror.
 
-## Verify the drop
+## Adding a language mode
+
+1. Copy `mode/<lang>/<lang>.js` here.
+2. Import it in `codemirror-assets.ts` (before `htmlmixed` if it depends on it).
+3. Map the plugin id to the mode name in `cmModeFor()` in `pycharm-client.ts`.
+4. A language without a vendored mode still works — CM shows it as plain text,
+   and the textarea fallback keeps using the manifest's `grammar.rules`.
+
+## Upgrading
+
+Replace the files with a newer CM5 release, then run:
 
 ```bash
 node --experimental-transform-types --no-warnings \
   --experimental-loader ./resolve-loader.mjs scripts/verify-editor-assets.ts
+npm run verify:ui        # verify-pycharm (181 checks)
+npm run build:exe && npm run build:setup
 ```
 
-It prints a per-file checklist and exits non-zero if anything required is
-missing. Once it is green, the editor plugin can be wired (static `?raw`
-imports in `src/panel/ui/codemirror-assets.ts`, CM init in
-`ui/pycharm-client.ts`, LSP completion mapped to `showHint`).
-
-## Integration contract (what the code will expect)
-
-- `window.CodeMirror` is defined by `codemirror.js`.
-- Modes are registered as `CodeMirror.modes.python` / `.go` / `.javascript` /
-  `.markdown` after their files run.
-- `CodeMirror.hint.auto` / `showHint` come from `addon/hint/show-hint.js`.
-- The editor mounts into `#editorHost` (the existing `#ta` stays as the
-  fallback when these files are absent).
+`verify-editor-assets.ts` prints a per-file checklist and validates the two
+entry points (`codemirror.js` defines `CodeMirror`, `codemirror.css` targets
+`.CodeMirror`).
