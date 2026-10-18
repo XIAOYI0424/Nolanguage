@@ -170,6 +170,9 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\nlg.cmd"
   Delete "$INSTDIR\path-tool.ps1"
+  ; The helper removes its own receipt; delete it here as well so a receipt can
+  ; never survive the uninstall that was supposed to consume it.
+  Delete "$LOCALAPPDATA\Nolanguage\install-receipt.json"
 
   DetailPrint "正在删除快捷方式…"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"

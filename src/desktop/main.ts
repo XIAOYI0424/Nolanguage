@@ -35,7 +35,6 @@ process.env.PANEL_NO_DEMO ??= '1';
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { main as startServer } from '../panel/server.js';
 import { openSystemBrowser, openWebView, type WebViewHandle } from './WebViewHost.js';
 
 /**
@@ -81,6 +80,9 @@ if (process.argv.includes('--extension-host')) {
 } else if (process.argv.includes('--dump-plugins')) {
   runDumpPlugins();
 } else {
+  // `main()` opens the window and prints the banner; it loads the server graph
+  // lazily, because that graph pulls `node:sqlite` and a CLI invocation must not
+  // pay for it (see `main`).
   main().catch((err: unknown) => {
     console.error('Nolanguage desktop failed to start:', err);
     process.exit(1);
@@ -120,6 +122,7 @@ function runDumpPlugins(): void {
  * (an empty stdin handler would otherwise let it exit when nothing else does).
  */
 async function runEngineStdio(): Promise<void> {
+  const { main: startServer } = await import('../panel/server.js');
   await startServer({ transport: 'stdio' });
   // Nothing to open and nothing to print: stdout is the protocol channel.
   process.stdin.resume();
@@ -167,6 +170,7 @@ const noWindow =
     process.argv.some((a) => a === '--no-browser' || a === '--no-open'));
 
 async function main(): Promise<void> {
+  const { main: startServer } = await import('../panel/server.js');
   const { base } = await startServer();
 
   // The window is a *managed* child: it is opened after the server is

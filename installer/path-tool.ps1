@@ -104,17 +104,23 @@ function Test-ContainsToken([string]$pathValue, [string]$token) {
   return $false
 }
 
+# Append without touching what is already there. `TrimEnd(';')` would eat a
+# legitimate empty segment (`...;%VAR%;;...` is a real world PATH, and it is what
+# our own receipt compares against), so the prefix is preserved verbatim.
 function Add-Token([string]$pathValue, [string]$token) {
   if (-not $pathValue) { return $token }
-  return ($pathValue.TrimEnd(';') + ';' + $token)
+  return ($pathValue + ';' + $token)
 }
 
+# Remove exactly one path token, keeping every other segment including empty
+# ones. Dropping the empties here would make the "did anything else change?"
+# comparison below fail on any PATH that contains `;;`, and the receipt's
+# verbatim restore would silently degrade to a lossy rewrite.
 function Remove-Token([string]$pathValue, [string]$token) {
   if (-not $pathValue) { return '' }
   $kept = @()
   foreach ($part in ($pathValue -split ';')) {
-    if (-not $part) { continue }
-    if ($part.TrimEnd('\') -ieq $token.TrimEnd('\')) { continue }
+    if ($part -and ($part.TrimEnd('\') -ieq $token.TrimEnd('\'))) { continue }
     $kept += $part
   }
   return ($kept -join ';')
