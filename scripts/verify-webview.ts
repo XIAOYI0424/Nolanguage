@@ -13,7 +13,7 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-webview.ts
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -95,9 +95,61 @@ if (process.env.VERIFY_WEBVIEW_LAUNCH === '1') {
 }
 
 // ---- switch hygiene ----
-for (const sw of ['--app=', '--user-data-dir=', '--no-first-run', '--no-default-browser-check']) {
+for (const sw of [
+  '--app=',
+  '--user-data-dir=',
+  '--no-first-run',
+  '--no-default-browser-check',
+  // Without these the window outlives the server and Chromium offers the
+  // "restore pages?" bubble on the next launch — the two extra-popup reports.
+  '--disable-background-mode',
+  '--disable-session-crashed-bubble',
+  '--hide-crash-restore-bubble',
+]) {
   check(`the window is launched with ${sw}`, source.includes(`'${sw}`) || source.includes(sw));
 }
+
+// ---- lifetime contract ----
+// The window is detached, so nothing on Windows ties it to this process. These
+// three pieces are the only reason closing the window stops the server (and
+// stopping the server closes the window).
+check('the launcher reports a window the user closed', /onClosed/.test(source));
+check('teardown kills the window process tree, not just the launcher', /killTree\(/.test(source));
+check('the window pid is recorded for the next launch', /patchSession\(/.test(source));
+
+// ---- session bookkeeping ----
+const sessionProbe = join(here, '..', '.tmp', 'session-probe');
+process.env.NOLANGUAGE_DATA = sessionProbe;
+const session = await import('../src/desktop/session.js');
+session.patchSession({ serverPid: process.pid, browserPid: 999999, profile: 'probe', port: 7310 });
+const recorded = session.readSession();
+check('the session round-trips through disk', recorded?.serverPid === process.pid && recorded.profile === 'probe');
+check('isAlive() sees this process', session.isAlive(process.pid));
+check('isAlive() rejects a dead pid', !session.isAlive(999999));
+session.patchSession({ browserPid: undefined });
+check('patching with undefined forgets the field', session.readSession()?.browserPid === undefined);
+session.clearSession();
+check('clearSession() removes the record', session.readSession() === undefined);
+session.logDesktop('probe-event', { ok: true });
+const logFile = join(sessionProbe, 'desktop.log');
+check(
+  'logDesktop() appends a readable line',
+  existsSync(logFile) && /probe-event \{"ok":true\}/.test(readFileSync(logFile, 'utf8')),
+);
+rmSync(sessionProbe, { recursive: true, force: true });
+
+// ---- delegation guard ----
+// Chromium hands an `--app` URL to a browser that already owns the profile and
+// exits at once. Treating that exit as "the user closed the window" stops the
+// server while the window is still on screen — the page then reloads into a
+// dead port. These three pieces keep that from happening.
+const mainSource = readFileSync(join(here, '..', 'src', 'desktop', 'main.ts'), 'utf8');
+// `msedge --app` can hand the profile to a relaunched browser and exit in
+// ~100 ms, so the window pid has to be *discovered*, never assumed from the
+// spawn result.
+check('the window pid is discovered, not assumed', /discoverWindow\(/.test(mainSource));
+check('the client count can stop a server whose window is gone', /clientCount\(\)/.test(mainSource));
+check('the launch leaves a trace in desktop.log', /logDesktop\('launch'/.test(mainSource));
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

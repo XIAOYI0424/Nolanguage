@@ -18,6 +18,8 @@ dist\Nolanguage.exe      # 打开工作台（默认 127.0.0.1:7310）
 | `Nolanguage.exe --open-browser` | 自带服务 + 系统默认浏览器 |
 | `Nolanguage.exe --no-open` | 只起 HTTP/WebSocket 服务（脚本 / CI / 无头） |
 
+桌面窗口就是应用的生命周期：**关掉窗口即结束后台服务**（语言服务器、worker、SQLite 落盘一并收尾），不会留下无声运行的后台进程。同一端口已有实例时，再双击不会起第二套服务、也不会多开一个窗口；上次崩溃遗留的孤儿窗口会在下次启动时被清掉。
+
 源码模式（开发用）：
 
 ```bash

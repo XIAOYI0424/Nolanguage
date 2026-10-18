@@ -35,7 +35,15 @@ process.env.PANEL_NO_DEMO ??= '1';
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { openSystemBrowser, openWebView, type WebViewHandle } from './WebViewHost.js';
+import { openSystemBrowser, openWebView, webViewProfileDir, type WebViewHandle } from './WebViewHost.js';
+import {
+  clearSession,
+  closeRecordedWindow,
+  findWindowProcesses,
+  killTree,
+  logDesktop,
+  patchSession,
+} from './session.js';
 
 /**
  * Modes that share this executable:
@@ -169,19 +177,80 @@ const noWindow =
   (process.env.NOLANGUAGE_NO_BROWSER === '1' ||
     process.argv.some((a) => a === '--no-browser' || a === '--no-open'));
 
+/**
+ * Port the server will bind — the same default `server.ts` uses.
+ *
+ * A function, not a module-level `const`, because the entry dispatch above runs
+ * *before* the bottom of this module is evaluated: `main()` reaches the probe
+ * synchronously, and a `const` declared further down is either in its temporal
+ * dead zone (a `ReferenceError`) or — once bundled, where it becomes `var` —
+ * silently `undefined`, which produced requests to `127.0.0.1:undefined`.
+ */
+function serverPort(): number {
+  return Number(process.env.PANEL_PORT ?? 7310);
+}
+
+/**
+ * The address of an already-running instance, or `undefined`.
+ *
+ * The bound port *is* the single-instance lock: it cannot be taken twice, and
+ * `/health` proves the listener is this app rather than some unrelated service
+ * that happens to sit on 7310. Without this probe a second double-click dies
+ * with `EADDRINUSE` — or, when the leftover window still holds the profile,
+ * adds one more window to it, which is exactly the "several windows every
+ * time" report.
+ */
+async function runningInstance(): Promise<string | undefined> {
+  const base = `http://127.0.0.1:${serverPort()}`;
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1200) });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { status?: string };
+    return body?.status === 'ok' ? base : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
+  const running = await runningInstance();
+  if (running) {
+    // Nothing to open: the user already has this workspace. Saying so is all a
+    // GUI build can do without native window-focus APIs.
+    process.stdout.write(`\n  Nolanguage is already running -> ${running}/\n\n`);
+    return;
+  }
+
+  patchSession({ serverPid: process.pid, port: serverPort() });
+
   const { main: startServer } = await import('../panel/server.js');
-  const { base } = await startServer();
+  const server = await startServer();
+  const base = server.base;
 
   // The window is a *managed* child: it is opened after the server is
-  // listening, and torn down when this process exits, so closing the console
-  // window never leaves an orphaned UI pointing at a dead port.
+  // listening, and torn down when this process exits.
   let view: WebViewHandle | undefined;
+  /** Profile of the window we opened; the watchdog sweeps it when clients vanish. */
+  let windowProfile: string | undefined;
+  /** The process that actually hosts the window — not necessarily the one we spawned. */
+  let windowPid: number | undefined;
+
   if (openBrowser) {
     openSystemBrowser(`${base}/`);
   } else if (!noWindow) {
+    const profile = webViewProfileDir();
+    windowProfile = profile;
+    logDesktop('launch', { port: serverPort(), profile, pid: process.pid });
+    // A browser left over from a crashed session holds the profile; the window
+    // would show up in *that* process and this launch would own nothing.
+    const killed = await closeRecordedWindow(profile);
+    logDesktop('previous-window', { pid: killed ?? null });
+    if (killed) {
+      process.stdout.write(`  Closed the window left by the previous session (pid ${killed})\n`);
+    }
     view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
     if (view.engine === 'none') openSystemBrowser(`${base}/`);
+    else windowPid = await discoverWindow(profile);
   }
 
   // Same resolution the store itself uses, so the banner never advertises a
@@ -202,18 +271,110 @@ async function main(): Promise<void> {
       `\n` +
       `  ${describeWindow(view)}\n` +
       `\n` +
-      `  Close this window (or press Ctrl+C) to stop the server.\n\n`,
+      `  ${openBrowser || noWindow ? 'Press Ctrl+C to stop the server.' : 'Close the app window to stop the server.'}\n\n`,
   );
 
-  // Keep the profile owning a live process: killing the engine with the server
-  // avoids a window that renders a dead address until it is manually closed.
-  const shutdown = (): void => {
+  /**
+   * Find the process that actually hosts the window.
+   *
+   * `msedge.exe --app=…` does **not** reliably stay the browser process: on this
+   * Edge version the process we spawn hands the profile over to a relaunched
+   * browser and exits with code 0 within ~100 ms, so the window belongs to a
+   * pid we never saw. Treating "the spawned pid exited" as "the user closed the
+   * window" therefore shuts the server down under a perfectly healthy window —
+   * the "窗口显示连不上" report — so the pid is discovered instead, by asking
+   * which process is holding our profile.
+   */
+  async function discoverWindow(profile: string): Promise<number | undefined> {
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const pids = await findWindowProcesses(profile);
+      if (pids.length > 0) {
+        logDesktop('window-discovered', { pid: pids[0], pids });
+        patchSession({ browserPid: pids[0], profile });
+        return pids[0];
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    logDesktop('window-missing', { profile });
+    // A window that never appears is worse than a browser tab: give the user
+    // something to click.
+    openSystemBrowser(`${base}/`);
+    return undefined;
+  }
+
+  /**
+   * Liveness. With the window living in a process we do not own, the WebSocket
+   * hub is the only proof that a UI is still showing the app.
+   *
+   * Deliberately slow and confirmatory: a reload, a lock screen or a suspended
+   * laptop all drop the socket for a while, and killing the server on the first
+   * quiet second would turn "the UI blinked" into "连不上". Only after 10 quiet
+   * seconds **and** a profile sweep that finds no window at all does this
+   * conclude the user is gone.
+   */
+  let shuttingDown = false;
+  if (view && view.engine !== 'none') {
+    let everConnected = false;
+    let quietSeconds = 0;
+    setInterval(() => {
+      if (shuttingDown) return;
+      if (server.clientCount() > 0) {
+        everConnected = true;
+        quietSeconds = 0;
+        return;
+      }
+      if (!everConnected) return;
+      if (++quietSeconds < 10) return;
+      quietSeconds = 0;
+      void (async () => {
+        const alive = windowProfile ? await findWindowProcesses(windowProfile) : [];
+        logDesktop('watchdog-check', { windowsAlive: alive.length, pids: alive });
+        if (alive.length === 0) shutdown('no-window');
+      })();
+    }, 1000).unref?.();
+  }
+
+  /**
+   * Stop everything, in the order that leaves nothing behind.
+   *
+   * The window goes first (it must never outlive the server it points at), then
+   * `server.close()` runs the real teardown — sandbox workers, LSP children,
+   * the SQLite flush — and exits. The previous revision called
+   * `process.exit(0)` directly, which skipped all of that and is why language
+   * servers and the telemetry database outlived the app.
+   *
+   * Declared as a function so the `onClosed` handler can be wired before this
+   * point; both paths (user closes window, SIGINT/SIGTERM) converge here and
+   * only the first one runs.
+   */
+  function shutdown(reason: string): void {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logDesktop('shutdown', { reason, port: serverPort(), windowPid: windowPid ?? null });
+    // `windowPid` is the process that really hosts the window; `view.close()`
+    // only reaches the launcher we spawned (usually already gone).
+    killTree(windowPid);
     view?.close();
-    process.exit(0);
-  };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
-  process.once('exit', () => view?.close());
+    clearSession();
+    void server.close().catch(() => process.exit(0));
+  }
+
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  // `*Monitor` instead of a plain listener on purpose: it records the failure
+  // without swallowing Node's own crash handling (a plain `uncaughtException`
+  // handler would keep a broken process alive).
+  process.on('uncaughtExceptionMonitor', (err) => {
+    logDesktop('uncaught', { name: err?.name, message: err?.message });
+  });
+  // Last resort for an abnormal exit (an unhandled rejection, a crash): the
+  // window and the session record must not survive it.
+  process.once('exit', () => {
+    killTree(windowPid);
+    view?.close();
+    clearSession();
+  });
 }
 
 /** Human-readable line describing how (or whether) the window was opened. */

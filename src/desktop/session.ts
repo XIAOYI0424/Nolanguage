@@ -1,0 +1,240 @@
+/**
+ * Desktop session bookkeeping: which process owns the window, and how to end it.
+ *
+ * ## Why a pid file at all
+ *
+ * The desktop build is a Node SEA with **no native window** — the UI is an Edge
+ * app window spawned as a *detached* child. Windows therefore has no parent /
+ * child lifetime link to lean on:
+ *
+ *   - closing the window does not stop the server (nothing observes the window);
+ *   - stopping the server does not close the window (`child.kill()` terminates
+ *     the launcher only when it is still the browser root, never the tree);
+ *   - a crashed session leaves a browser process holding the profile, and the
+ *     next launch hands its `--app` URL to that *old* process, which opens one
+ *     more window on top of the stale ones — the "several windows every time"
+ *     report.
+ *
+ * So the session is recorded on disk: the server pid, the browser root pid it
+ * spawned, and the profile that ties the two together. A later launch reads it
+ * and can clean up exactly what its predecessor left behind, instead of
+ * guessing with `tasklist`.
+ *
+ * The file lives next to the telemetry database (`appDataDir()`), never in the
+ * install directory — see `src/util/appData.ts` for why.
+ */
+import { spawn } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appDataPath } from '../util/appData.js';
+
+/**
+ * Append one line to `%LOCALAPPDATA%\Nolanguage\desktop.log`.
+ *
+ * The GUI build has no console, so when a user reports "窗口说连不上" there is
+ * otherwise *nothing* to look at: the kernel log lives in SQLite and stops at
+ * whatever was flushed. These lines cover the gap between "process started" and
+ * "process vanished" — who spawned the window, whether a previous window was
+ * collected, and which event asked for shutdown.
+ *
+ * Never throws: diagnostics must not be able to break a launch.
+ */
+export function logDesktop(event: string, detail?: Record<string, unknown>): void {
+  try {
+    const file = appDataPath('desktop.log');
+    mkdirSync(appDataPath(), { recursive: true });
+    // Bounded: one file, ~256 KiB, then start over. Nobody rotates logs by hand.
+    if (existsSync(file) && statSync(file).size > 256 * 1024) rmSync(file, { force: true });
+    const line = `${new Date().toISOString()} ${event}${detail ? ' ' + JSON.stringify(detail) : ''}\n`;
+    appendFileSync(file, line, 'utf8');
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Everything a launch needs to know about the session that came before it. */
+export interface SessionState {
+  /** The Node process serving the workspace. */
+  serverPid?: number;
+  /** The Edge browser *root* process that hosts the app window. */
+  browserPid?: number;
+  /** `--user-data-dir` the window was started with. */
+  profile?: string;
+  /** Port the server bound, for the "already running" probe. */
+  port?: number;
+}
+
+function sessionFile(): string {
+  return appDataPath('desktop-session.json');
+}
+
+/** Recorded session, or `undefined` when there is none or it is unreadable. */
+export function readSession(): SessionState | undefined {
+  try {
+    const raw = readFileSync(sessionFile(), 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    return parsed as SessionState;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Merge a partial update into the recorded session. Never throws. */
+export function patchSession(patch: Partial<SessionState>): void {
+  try {
+    const file = sessionFile();
+    mkdirSync(appDataPath(), { recursive: true });
+    const merged = { ...(readSession() ?? {}), ...patch };
+    // Undefined fields would serialise away, which is what "forget this pid"
+    // means, so drop them explicitly rather than writing `null`.
+    for (const key of Object.keys(merged) as Array<keyof SessionState>) {
+      if (merged[key] === undefined) delete merged[key];
+    }
+    writeFileSync(file, JSON.stringify(merged, null, 2), 'utf8');
+  } catch {
+    /* bookkeeping must never block a launch */
+  }
+}
+
+/** Drop the record. Called on a clean exit; a stale one is harmless. */
+export function clearSession(): void {
+  try {
+    const file = sessionFile();
+    if (existsSync(file)) rmSync(file, { force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** True when *pid* names a live process (signal 0 is a pure existence probe). */
+export function isAlive(pid: number | undefined): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Kill a process **and its children**.
+ *
+ * `child.kill()` on Windows is `TerminateProcess` on one pid: Edge keeps its
+ * renderer/GPU/crashpad processes alive, so a killed launcher leaves a window's
+ * worth of processes behind and the profile stays locked. `taskkill /T /F` walks
+ * the tree instead. Fire-and-forget on purpose — the caller is usually on the
+ * exit path and has nothing left to do with the result.
+ */
+export function killTree(pid: number | undefined): void {
+  if (!isAlive(pid)) return;
+  try {
+    if (process.platform === 'win32') {
+      const child = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.on('error', () => undefined);
+      child.unref();
+    } else {
+      process.kill(pid!, 'SIGKILL');
+    }
+  } catch {
+    /* already gone, or not ours to kill */
+  }
+}
+
+/**
+ * End the window recorded by the previous session, without querying anything.
+ *
+ * The common case after a crash is "the pid we wrote down is still there", and
+ * killing it needs no PowerShell — which matters: a fresh unsigned binary that
+ * spawns `powershell -Command` at every launch is exactly what behaviour
+ * blockers (Kaspersky and friends) flag. The expensive sweep in
+ * `closeStaleWindows` is reserved for the rare case where the recorded pid is
+ * not the window after all.
+ */
+export async function closeRecordedWindow(profile: string): Promise<number | undefined> {
+  const recorded = readSession();
+  if (!recorded?.browserPid || recorded.profile !== profile) return undefined;
+  if (!isAlive(recorded.browserPid)) return undefined;
+  const pid = recorded.browserPid;
+  killTree(pid);
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && isAlive(pid)) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return pid;
+}
+
+/**
+ * Pids of Edge processes that render *our* window for *profile*.
+ *
+ * Only `--app=` + our exact `--user-data-dir` qualify, so the user's own Edge
+ * session is never touched. Uses CIM because `tasklist` cannot show a command
+ * line; one short-lived PowerShell costs a few hundred milliseconds and only
+ * runs when a previous window may still be around.
+ */
+export async function findWindowProcesses(profile: string): Promise<number[]> {
+  if (process.platform !== 'win32') return [];
+  const quoted = profile.replace(/'/g, "''");
+  const script = [
+    `$p = '${quoted}';`,
+    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |`,
+    `  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) -and $_.CommandLine.Contains('--app=') } |`,
+    '  ForEach-Object { $_.ProcessId }',
+  ].join(' ');
+  return await new Promise<number[]>((resolve) => {
+    let out = '';
+    let child;
+    try {
+      child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      resolve([]);
+      return;
+    }
+    child.stdout?.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+    });
+    child.on('error', () => resolve([]));
+    child.on('close', () => {
+      resolve(
+        out
+          .split(/\r?\n/)
+          .map((line) => Number(line.trim()))
+          .filter((pid) => Number.isFinite(pid) && pid > 0),
+      );
+    });
+    // A hung PowerShell must not hang the launch.
+    setTimeout(() => {
+      try {
+        child?.kill();
+      } catch {
+        /* ignore */
+      }
+      resolve([]);
+    }, 4000).unref?.();
+  });
+}
+
+/**
+ * Remove windows left behind by a previous session for *profile* and wait until
+ * their processes are gone.
+ *
+ * This has to happen **before** spawning: Chromium resolves `--user-data-dir`
+ * against an already-running browser and delegates to it, which would (a) put a
+ * second window on screen and (b) make the freshly spawned process exit at once,
+ * so the window would look closed while it is not.
+ */
+export async function closeStaleWindows(profile: string): Promise<number[]> {
+  const pids = await findWindowProcesses(profile);
+  for (const pid of pids) killTree(pid);
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && pids.some((pid) => isAlive(pid))) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return pids;
+}

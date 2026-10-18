@@ -222,7 +222,9 @@ export interface MainOptions {  /**
   transport?: 'ws' | 'stdio';
 }
 
-export async function main(opts: MainOptions = {}): Promise<{ base: string; close: () => Promise<void> }> {
+export async function main(
+  opts: MainOptions = {},
+): Promise<{ base: string; close: () => Promise<void>; clientCount: () => number }> {
   const port = Number(process.env.PANEL_PORT ?? 7310);
   const host = process.env.PANEL_HOST ?? '127.0.0.1';
   const stdio =
@@ -824,7 +826,10 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
     );
   }
 
-  return { base, close: shutdown };
+  // `clientCount` is how the desktop entry tells "the window is still there"
+  // from "the window is gone": a chromeless app has no other liveness signal
+  // once the Edge process it spawned is no longer the one holding the profile.
+  return { base, close: shutdown, clientCount: () => hub.clientCount() };
 }
 
 /**

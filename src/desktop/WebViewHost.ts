@@ -40,6 +40,23 @@
  *
  * Everything is best-effort and non-fatal: if no engine is found, or the spawn
  * fails, the console still prints the address and the server keeps serving.
+ *
+ * ## Lifetime
+ *
+ * The window is a *detached* child, so Windows gives it no lifetime tie to this
+ * process: without help, closing the window leaves the server listening and
+ * killing the server leaves the window open (rendering a dead address) — the
+ * "后台没关干净" report. Two things fix that here:
+ *
+ *   - `onClosed` fires when the browser **root** process exits, which is what
+ *     "the user closed the window" looks like from this side;
+ *   - `close()` ends the whole process *tree* (`taskkill /T`), because Chromium
+ *     keeps renderer/GPU children alive when only the launcher is killed.
+ *
+ * The root only reports accurately when no *older* browser holds the profile,
+ * otherwise Chromium delegates to that one and our newly spawned process exits
+ * immediately. `session.ts#closeStaleWindows` clears such leftovers before the
+ * launch; `main.ts` calls it first.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
@@ -47,6 +64,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { appDataPath } from '../util/appData.js';
 import { isPackaged } from './embeddedAssets.js';
+import { killTree, logDesktop, patchSession } from './session.js';
 
 /** Where the WebView engine binaries typically live on Windows. */
 const WEBVIEW2_CANDIDATES = [
@@ -173,6 +191,19 @@ export interface WebViewOptions {
   size?: string;
   /** Suppress the engine's own console noise. */
   quiet?: boolean;
+  /**
+   * Called once when the window goes away **without** `close()` having been
+   * called — i.e. the user closed it. This is the only "the UI is gone" signal
+   * a detached Edge window gives us, and it is what stops the server.
+   *
+   * `elapsedMs` is how long the browser root we spawned lived. A root that dies
+   * in the first couple of seconds never owned a window: Chromium handed the
+   * `--app` URL to an already-running browser on the same profile and exited.
+   * Callers must not treat that as "the user closed the window" — that mistake
+   * stops the server while a window is still on screen, which is exactly the
+   * "窗口一直显示连不上" report.
+   */
+  onClosed?: (info: { elapsedMs: number; code: number | null }) => void;
 }
 
 export interface WebViewHandle {
@@ -205,6 +236,18 @@ function appSwitches(url: string, profile: string, size?: string): string[] {
     '--no-default-browser-check',
     '--no-service-autorun',
     '--disable-sync',
+    // A window that outlives `Nolanguage.exe` is the "后台没关干净" complaint, so
+    // the browser must not keep running once its last window is gone. Without
+    // this Edge keeps a background process (`--no-service-autorun` is not
+    // enough), the profile stays locked, and the next launch delegates to it
+    // instead of owning a window it can watch.
+    '--disable-background-mode',
+    // This profile is force-closed on every exit, which Chromium records as an
+    // unclean shutdown. Left alone it offers "restore pages?" — one of the
+    // several extra bubbles reported at launch — and may restore old windows on
+    // top of the new one.
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
     // Strip the surfaces that make an app window feel like a browser, and kill
     // the "translate this page?" bubble: the shell is written in English
     // (`<html lang="en">`), so on a Chinese Windows install Chromium offers to
@@ -246,16 +289,46 @@ export function openWebView(opts: WebViewOptions): WebViewHandle {
     // A detached child that cannot start reports through `error`, asynchronously.
     child.on('error', () => undefined);
     child.unref();
+
+    // Recorded before the window can be closed: the pid is the only handle a
+    // later launch (or a crash report from the user) has on this window.
+    let closed = false;
+    const startedAt = Date.now();
+    if (child.pid) patchSession({ browserPid: child.pid, profile });
+    logDesktop('window-spawned', { pid: child.pid, profile, engine });
+
+    // The browser root lives as long as the window does, so its exit *is* the
+    // user closing the window — unless it dies early, which means Chromium
+    // delegated the URL to another browser instead of opening a window here.
+    // `close()` sets `closed` first, which is what keeps a programmatic
+    // teardown from being reported as a user action (that would re-enter
+    // shutdown).
+    child.on('exit', (code) => {
+      if (closed) return;
+      closed = true;
+      const elapsedMs = Date.now() - startedAt;
+      patchSession({ browserPid: undefined });
+      logDesktop('window-process-exit', { pid: child.pid, code, elapsedMs });
+      opts.onClosed?.({ elapsedMs, code });
+    });
+
     return {
       engine,
       webview2Version: wv2,
       binary: edge,
       close: () => {
+        if (closed) return;
+        closed = true;
+        // The tree, not the launcher: Chromium's renderer/GPU children would
+        // survive a plain `kill()` and keep the profile locked, so the next
+        // launch would delegate to a window that is no longer on screen.
+        killTree(child.pid);
         try {
           child.kill();
         } catch {
           /* already gone */
         }
+        patchSession({ browserPid: undefined });
       },
     };
   } catch {
