@@ -311,6 +311,26 @@ async function testBoot(): Promise<void> {
     mergedText.indexOf('calendar') !== -1 && mergedText.indexOf('calculate_total') !== -1,
     mergedText.slice(0, 90));
 
+  // The prefix filter must be case-insensitive, the same rule L1 uses: an LSP
+  // that returns `Calendar` for a typed `cal` would otherwise be dropped.
+  socket.deliver({ kind: 'completion', language: 'python', requestId: compL1?.requestId,
+    items: [{ label: 'Calendar', kind: 9, detail: 'module' }] });
+  await settle(w);
+  const casedText = q(w, '#cmp').textContent || '';
+  check('L1 + L2: the prefix match is case-insensitive (Calendar for cal)',
+    casedText.indexOf('Calendar') !== -1, casedText.slice(0, 90));
+
+  // Esc is a real dismissal: a late LSP answer for the same request must not
+  // yank the popup back open.
+  fire(w, ed, 'keydown', { key: 'Escape' });
+  await settle(w);
+  check('L2: Esc closes the popup', q(w, '#cmp').className.indexOf('open') === -1, q(w, '#cmp').className);
+  socket.deliver({ kind: 'completion', language: 'python', requestId: compL1?.requestId,
+    items: [{ label: 'calendar_late', kind: 9 }] });
+  await settle(w);
+  check('L2: a late answer does not reopen a dismissed popup',
+    q(w, '#cmp').className.indexOf('open') === -1, q(w, '#cmp').className);
+
   // A manifest that says `contributes.completion.lexical.enabled: false`
   // (Markdown) turns the source off; the catalogue is the only channel for it.
   socket.deliver({ kind: 'workspace', languages: [{ id: 'python', displayName: 'Python', lexical: false, supportsRun: true, hasLsp: true }] });

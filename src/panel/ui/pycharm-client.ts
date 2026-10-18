@@ -652,14 +652,17 @@ export function pyCharmClientScript(d: PanelClientData): string {
 
   // lex holds the L1 candidates of the current prefix, so an LSP answer can be
   // merged with them instead of replacing the popup the user is already reading.
-  var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [] };
+  // The dismissed flag records that the user closed the popup on purpose (Esc, accept,
+  // blur). A late LSP answer for the same request must not yank it back open;
+  // only fresh input / an explicit Ctrl+Space clears the flag.
+  var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [], dismissed: false };
   var HOV = { timer: 0, reqId: 0, cx: 0, cy: 0 };
 
   ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); });
   ta.addEventListener('scroll', syncScroll);
   ta.addEventListener('keyup', updateCaret);
   ta.addEventListener('click', updateCaret);
-  ta.addEventListener('blur', function () { cmpClose(); });
+  ta.addEventListener('blur', function () { CMP.dismissed = true; cmpClose(); });
   ta.addEventListener('mousemove', onCodeMouseMove);
   ta.addEventListener('mouseleave', function () { clearTimeout(HOV.timer); var t = $('hoverTip'); if (t) t.classList.remove('open'); });
   ta.addEventListener('keydown', onCodeKeyDown);
@@ -773,12 +776,12 @@ export function pyCharmClientScript(d: PanelClientData): string {
       if (e.key === 'ArrowDown') { e.preventDefault(); cmpMove(1); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); cmpMove(-1); return; }
       if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); cmpAccept(); return; }
-      if (e.key === 'Escape') { e.preventDefault(); cmpClose(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); CMP.dismissed = true; cmpClose(); return; }
     }
     if (e.ctrlKey && (e.key === ' ' || e.key === 'Spacebar')) { e.preventDefault(); requestComplete(); return; }
     if (e.key === 'Tab') { e.preventDefault(); insertText('    '); scheduleComplete(); return; }
     if (e.key === 'Enter') { e.preventDefault(); autoIndentEnter(); scheduleComplete(); return; }
-    if (e.key === 'Escape') { cmpClose(); return; }
+    if (e.key === 'Escape') { CMP.dismissed = true; cmpClose(); return; }
     var close = CLOSERS[e.key];
     if (close) { e.preventDefault(); autoPair(e.key, close); scheduleComplete(); return; }
   }
@@ -882,6 +885,9 @@ export function pyCharmClientScript(d: PanelClientData): string {
     if (ta.readOnly) { cmpClose(); return; }
     var pref = wordPrefix();
     if (pref.length < 1) { cmpClose(); return; }
+    // Fresh input / an explicit request re-opens the popup even if the user had
+    // dismissed the previous one.
+    CMP.dismissed = false;
     // L1 first: it is local and instant, so the popup is on screen before the
     // LSP round-trip answers — or when it never answers at all.
     CMP.lex = LEXICAL[currentLang] === false ? [] : lexicalItems(pref);
@@ -897,9 +903,14 @@ export function pyCharmClientScript(d: PanelClientData): string {
   }
   function onCompletion(m) {
     if (m.requestId !== CMP.reqId) return;
+    // The user closed it (Esc / accept / blur): a late answer must not reopen.
+    if (CMP.dismissed) return;
     var pref = wordPrefix();
+    // Match the prefix the same way L1 does (case-insensitive), otherwise an LSP
+    // that returns Calculate for a typed cal would be silently dropped.
+    var lowerPref = pref.toLowerCase();
     var lsp = (m.items || []).filter(function (it) {
-      return it && it.label && it.label.length > pref.length && it.label.slice(0, pref.length) === pref;
+      return it && it.label && it.label.length > pref.length && it.label.slice(0, pref.length).toLowerCase() === lowerPref;
     });
     // Nothing from L2: keep what L1 already put on screen.
     if (!lsp.length) return;
@@ -935,7 +946,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
   function cmpMove(d) { if (!CMP.open || !CMP.items.length) return; CMP.sel = (CMP.sel + d + CMP.items.length) % CMP.items.length; renderCmp(); }
   function cmpAccept() {
     if (!CMP.open) return;
-    var it = CMP.items[CMP.sel]; cmpClose();
+    var it = CMP.items[CMP.sel]; CMP.dismissed = true; cmpClose();
     if (!it) return;
     var pos = ta.selectionStart, pref = wordPrefix(), start = pos - pref.length;
     ta.value = ta.value.slice(0, start) + it.label + ta.value.slice(pos);
