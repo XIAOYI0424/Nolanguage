@@ -29,7 +29,9 @@ build-to-exe.bat
 tmp/
 .tmpdiag/
 .test-run.*
-.verify-run.*
+.verify-run*
+.stdio-*
+.build-exe.*
 tests/phase1.test.ts
 .workbuddy-ai/memory/2026-10-15.md
 .workbuddy-ai/memory/2026-10-17.md

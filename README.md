@@ -27,6 +27,102 @@ npm run ide              # 前台运行面板服务（Ctrl+C 结束）
 
 Python 语言插件已随包内置（`builtin/python@1.0.0`），装完即可新建 `.py` 运行；Go / JavaScript / Markdown 同理。
 
+## 插件
+
+引擎零硬编码：一门语言由 `manifest.json` 描述，插件装好即生效。内置 `python` / `go` / `javascript` / `markdown` 在 `builtin/<id>@1.0.0/`，第三方插件装进插件主目录：
+
+| 位置 | 内容 |
+|---|---|
+| `~/.nolanguage/languages/<id>@<ver>/` | 插件本体（`manifest.json` + 语法 / 运行器 / 查询文件） |
+| `~/.nolanguage/data/<id>/` | 插件数据（会话、运行配置），卸载默认保留 |
+
+主目录可用 `NOLANGUAGE_HOME` 或 `--home <dir>` 改写；`LANG_DIR`（`:`/`;` 分隔）可追加只读插件根。
+
+### 语言插件命令
+
+两个入口，同一实现（`src/cli/lang.ts`）：安装即校验、迁移先于覆盖、`data/<id>/` 不被复制覆盖。
+
+```bash
+Nolanguage.exe lang ls              # 安装包里直接可用：exe 是 Node SEA，自带运行时
+nlg lang ls                         # 源码树里用 nlg（Windows: nlg.cmd），命令完全相同
+```
+
+安装包用户不需要 Node、不需要源码树：`Nolanguage.exe` 内建了 `lang` 子命令，覆盖下面的全部动词；用 Setup 安装时还会把安装目录写进用户 PATH（并留 receipt，卸载精确还原），新开终端即可直接敲 `nlg`。源码模式额外保留 `npm run lang-install -- …` 这个旧入口。
+
+| 命令 | 行为 |
+|---|---|
+| `lang ls` | 列出已安装插件（id / 版本 / kind / 启用 / 运行模式 / 扩展名） |
+| `lang add <目录\|zip\|tar.gz\|url\|git\|id>` | 安装并启用；`--strict` 在运行时依赖缺失时拒绝安装；裸 id 从插件索引解析 |
+| `lang search [query]` | 从插件索引检索（`--source <url>` 追加索引） |
+| `lang on <id>` / `off <id>` | 启用 / 禁用 |
+| `lang info <id>` | 单个插件全量信息 |
+| `lang deps [id]` | 运行时依赖是否满足 |
+| `lang up <id> [source]` | 按记录的来源重装 |
+| `lang rm <id> [--drop-data]` | 卸载（默认保留 data，`--drop-data` 一并删除） |
+
+```bash
+Nolanguage.exe lang add ./examples/cpp@1.0.0
+Nolanguage.exe lang add https://example.org/cpp.zip
+Nolanguage.exe lang add https://github.com/someone/nolang-rust.git
+Nolanguage.exe lang search lsp
+Nolanguage.exe lang ls
+```
+
+旧的 `lang-install` 脚本仍然可用，与上表共享同一套保证：
+
+```bash
+npm run lang-install -- install ./examples/cpp@1.0.0
+npm run lang-install -- list
+npm run lang-install -- enable python
+npm run lang-install -- uninstall cpp
+```
+
+装完也可在 `/plugins`（=`/languages`）页查看，并用输入框按目录安装、点按钮启用/禁用/卸载；运行中的 IDE 持有自己的视图，命令行装完需重启或在页面刷新。
+
+#### `--dump-plugins`：看清插件从哪来
+
+```bash
+Nolanguage.exe --dump-plugins
+```
+
+按层打印，每项给出插件目录与 run/LSP 模式。同一个 id 出现在多个层时，落选的那份标 `(未选中)`，并在「遮蔽」段单列胜出者。规则与 `LanguageRegistry.scan()` 完全一致：**版本高者胜；同版本按扫描顺序（project → builtin → user → cli → system）先到先得**。该命令不启动服务、不写配置，可放心用于排障与 CI。
+
+#### 层（layer）：插件从哪来
+
+| 层 | 目录 | 可卸载 |
+|---|---|---|
+| `project` | `<当前工作区>/.nolanguage/languages` | 是 |
+| `builtin` | `<home>/builtin`、仓库或内嵌的 `builtin/` | 否（只能禁用） |
+| `user` | `~/.nolanguage/languages` | 是 |
+| `cli` | `LANG_DIR` | 否（只能禁用） |
+| `system` | `%PROGRAMDATA%\Nolanguage\languages` | 是 |
+
+「同版本先扫描的层胜」是刻意的：官方插件不应被一份同版本的旧副本顶掉。要强制改某条配置，用下面的覆盖层，而不是靠层级打架。
+
+层在三个地方可见：`--dump-plugins` 按层分组、`lang ls` 的 `LAYER` 列、以及面板 `/plugins` 每张卡片上的层徽章（`project` 层高亮）。
+
+#### 覆盖层：改配置，不改插件本体
+
+`<home>/overrides/<id>.json` —— 每个插件一个文件，在 manifest 读取后合并：
+
+```json
+{
+  "lsp": { "command": ["rust-analyzer", "--log-file", "D:\\tmp\\ra.log"] },
+  "run": { "timeoutMs": 30000 }
+}
+```
+
+- 对象递归合并，数组**整体替换**（不做下标合并），`null` 表示删掉该键、交还给 manifest 默认值；
+- `id` / `version` 不可覆盖（否则会与 `data/<id>/` 失联）；
+- 合并结果若校验失败，该覆盖被忽略并在 `--dump-plugins` / `lang info` 里报出来 —— 一个笔误不该让语言消失；
+- 对内置插件同样生效：**本体只读，配置可覆盖**，升级时覆盖文件不受影响；
+- `--dump-plugins` 的「覆盖层」段列出实际改动的字段；文件里写了 manifest 已不存在的键，会标成「过期键」；
+- 面板 `/plugins` 里该插件带 `override` 徽章，卡片下列出被覆盖的字段与过期键，被拒绝的覆盖写进右侧事件流；同 id 的落选副本在右侧 `Shadowed copies` 里单独列出（胜出层 / 版本 / 路径）。
+
+### 扩展插件
+
+`extension.json` 形式的 JS 扩展由宿主子进程加载：`EXT_DIR`（`:`/`;` 分隔）追加扫描目录，另外自动扫描随包示例与工作目录下的 `extensions/`；打包版从可执行文件内解包到临时目录。`/extensions` 页可看激活与崩溃事件，示例见 `src/extensions/examples/{hello,faulty}`。
+
 ## 验证
 
 ```bash
