@@ -29,11 +29,30 @@ import {
   type PluginSource,
 } from './manifest.js';
 import type { RuntimeRegistry } from '../runtimes/RuntimeRegistry.js';
+import { defaultLayers, layersFromRoots, type LayerId, type PluginLayer } from './layers.js';
+import { applyOverride, readOverride } from './overrides.js';
 
 export interface RegistryRoot {
   dir: string;
   kind: 'builtin' | 'user';
   removable: boolean;
+}
+
+/** One id found in more than one layer; the loser is kept for `--dump-plugins`. */
+export interface ScanConflict {
+  id: string;
+  winner: { dir: string; version: string; layer: LayerId };
+  losers: Array<{ dir: string; version: string; layer: LayerId }>;
+}
+
+/** What `overrides/<id>.json` did to one plugin. */
+export interface OverrideStatus {
+  id: string;
+  file: string;
+  /** Leaf paths the override changed, e.g. `lsp.command`. */
+  changed: string[];
+  /** Leaf paths the override names but the manifest no longer has. */
+  stale: string[];
 }
 
 export interface InstalledPlugin {
@@ -50,12 +69,24 @@ export interface RegistryChange {
 }
 
 export interface RegistryOptions {
-  /** Where `builtin/`, `languages/`, `data/` and `config.json` live. */
+  /** Where `builtin/`, `languages/`, `data/`, `overrides/` and `config.json` live. */
   home?: string;
-  /** Explicit roots (tests use this); defaults to `builtin/` + `languages/` under `home`. */
+  /** Explicit roots (tests use this); defaults to the layered set below. */
   roots?: RegistryRoot[];
   /** Extra roots appended after the defaults. */
   extraRoots?: RegistryRoot[];
+  /**
+   * Explicit tiers, in scan order (see `langs/layers.ts`). Takes precedence
+   * over `roots`/`extraRoots`; hosts that want the project/system tiers pass
+   * `defaultLayers(home)`.
+   */
+  layers?: PluginLayer[];
+  /**
+   * Workspace directory the `project` tier is resolved against. Defaults to
+   * `process.cwd()`, which is right for the CLI but wrong for a panel that was
+   * pointed at a folder with `PANEL_EXPLORER_ROOT` / `openFolder`.
+   */
+  projectDir?: string;
   /**
    * The host's runtime catalogue, used to check `run.requires`. When absent the
    * default set is imported lazily on first use.
@@ -114,20 +145,53 @@ export class LanguageRegistry {
   /** Injected runtime catalogue (host-provided) or lazily imported default. */
   private runtimes?: RuntimeRegistry;
   private lazyRuntimes?: RuntimeRegistry;
-  private roots: RegistryRoot[] = [];
+  private layers: PluginLayer[] = [];
   private plugins = new Map<string, InstalledPlugin>();
   private disabled = new Set<string>();
   private listeners = new Set<(e: RegistryChange) => void>();
   private scanned = false;
+  /** Same id in several layers, resolved; only the losers are kept (for dumps). */
+  private conflictList: ScanConflict[] = [];
+  /** Which tier supplied the body that won, keyed by plugin id. */
+  private layerById = new Map<string, PluginLayer>();
+  /** What `overrides/<id>.json` changed, keyed by plugin id. */
+  private overridesUsed = new Map<string, OverrideStatus>();
+  /** Override files that were rejected (bad JSON, invalid result, …). */
+  private overrideProblems: string[] = [];
 
   constructor(private opts: RegistryOptions = {}) {
     this.home = resolve(opts.home ?? process.env.NOLANGUAGE_HOME ?? join(homedir(), '.nolanguage'));
     this.runtimes = opts.runtimes;
-    const base: RegistryRoot[] = opts.roots ?? [
-      { dir: join(this.home, 'builtin'), kind: 'builtin', removable: false },
-      { dir: join(this.home, 'languages'), kind: 'user', removable: true },
-    ];
-    this.roots = [...base, ...(opts.extraRoots ?? [])];
+    this.layers = this.resolveLayers();
+  }
+
+  /**
+   * Turn the caller's roots into ordered layers.
+   *
+   * `layers` wins when given. Otherwise the default tiers are used and the
+   * caller's `extraRoots` are appended after them (deduplicated by directory),
+   * which keeps every pre-layering caller behaving exactly as before.
+   */
+  private resolveLayers(): PluginLayer[] {
+    if (this.opts.layers) return [...this.opts.layers].sort((a, b) => a.order - b.order);
+    if (this.opts.roots) return layersFromRoots(this.opts.roots);
+    const base = defaultLayers(this.home, { cwd: this.opts.projectDir });
+    const extra = layersFromRoots(this.opts.extraRoots ?? []).map((l, i) => ({
+      ...l,
+      order: 10_000 + i,
+    }));
+    const seen = new Set<string>();
+    return [...base, ...extra].filter((l) => {
+      const key = l.dir.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  /** The tiers this registry scans, in scan order. */
+  pluginLayers(): PluginLayer[] {
+    return [...this.layers];
   }
 
   // ---------------- paths ----------------
@@ -188,37 +252,69 @@ export class LanguageRegistry {
   async scan(): Promise<void> {
     await this.loadConfig();
     const found = new Map<string, InstalledPlugin>();
+    const winnerLayer = new Map<string, PluginLayer>();
+    const conflicts = new Map<string, ScanConflict>();
+    this.layerById = new Map();
+    this.overridesUsed = new Map();
+    this.overrideProblems = [];
 
-    for (const root of this.roots) {
-      if (!existsSync(root.dir)) continue;
+    for (const layer of this.layers) {
+      if (!existsSync(layer.dir)) continue;
       let entries: string[];
       try {
-        entries = await readdir(root.dir);
+        entries = await readdir(layer.dir);
       } catch {
         continue;
       }
       for (const entry of entries.sort()) {
-        const dir = join(root.dir, entry);
+        const dir = join(layer.dir, entry);
         const manifestPath = join(dir, 'manifest.json');
         if (!existsSync(manifestPath)) continue;
         try {
           const raw: unknown = JSON.parse(await readFile(manifestPath, 'utf8'));
           const validation = validateManifest(raw);
-          const manifest = raw as LanguageManifest;
-          if (!validation.ok || !manifest.id) continue;
-          const id = manifest.id;
+          const base = raw as LanguageManifest;
+          if (!validation.ok || !base.id) continue;
+          const id = base.id;
+          // Overrides are applied per id, before anything compares versions:
+          // they cannot change `id`/`version`, but they do change what the rest
+          // of the system sees (LSP command, timeouts, extensions, …).
+          const { manifest, applied, problem } = await this.withOverride(base);
+          if (problem) this.overrideProblems.push(problem);
+          if (applied) this.overridesUsed.set(id, applied);
           const candidate: InstalledPlugin = {
             manifest,
-            source: { kind: root.kind, dir, removable: root.removable },
+            source: { kind: layer.kind, dir, removable: layer.removable },
             validation,
             enabled: !this.disabled.has(id),
           };
           const prev = found.get(id);
-          // Higher version wins; on a tie the earlier root wins (builtin before
-          // user), which keeps an official plugin from being shadowed by a
-          // stale copy of itself.
-          if (!prev || versionKey(candidate.manifest.version) > versionKey(prev.manifest.version)) {
+          if (!prev) {
             found.set(id, candidate);
+            winnerLayer.set(id, layer);
+            continue;
+          }
+          // Higher version wins; on a tie the earlier layer wins (project
+          // before builtin before user), which keeps an official plugin from
+          // being shadowed by a stale copy of itself.
+          const prevLayer = winnerLayer.get(id) ?? layer;
+          const candidateWins = versionKey(candidate.manifest.version) > versionKey(prev.manifest.version);
+          const winner = candidateWins ? candidate : prev;
+          const winnerL = candidateWins ? layer : prevLayer;
+          const loser = candidateWins ? prev : candidate;
+          const loserL = candidateWins ? prevLayer : layer;
+          const prior = conflicts.get(id);
+          conflicts.set(id, {
+            id,
+            winner: { dir: winner.source.dir, version: winner.manifest.version, layer: winnerL.id },
+            losers: [
+              ...(prior?.losers ?? []),
+              { dir: loser.source.dir, version: loser.manifest.version, layer: loserL.id },
+            ],
+          });
+          if (candidateWins) {
+            found.set(id, candidate);
+            winnerLayer.set(id, layer);
           }
         } catch {
           // A malformed manifest is skipped, not fatal: one bad plugin must not
@@ -228,8 +324,51 @@ export class LanguageRegistry {
     }
 
     this.plugins = found;
+    this.layerById = winnerLayer;
+    this.conflictList = [...conflicts.values()].sort((a, b) => a.id.localeCompare(b.id));
     this.scanned = true;
     this.emit({ type: 'rescan', id: '*' });
+  }
+
+  /** Merge `overrides/<id>.json` onto one manifest, reporting instead of throwing. */
+  private async withOverride(base: LanguageManifest): Promise<{
+    manifest: LanguageManifest;
+    applied?: OverrideStatus;
+    problem?: string;
+  }> {
+    const override = await readOverride(this.home, base.id);
+    if (override.problem) return { manifest: base, problem: `${override.file}: ${override.problem}` };
+    if (!override.patch) return { manifest: base };
+    const merged = applyOverride(base, override.patch);
+    if (merged.problem) return { manifest: base, problem: `${override.file}: ${merged.problem}` };
+    return {
+      manifest: merged.manifest,
+      applied: { id: base.id, file: override.file, changed: merged.changed, stale: merged.stale },
+    };
+  }
+
+  /** Same id in several layers — the winners are already in `describe()`. */
+  conflicts(): ScanConflict[] {
+    this.ensureScanned();
+    return [...this.conflictList];
+  }
+
+  /** Which override files actually changed something. */
+  overrides(): OverrideStatus[] {
+    this.ensureScanned();
+    return [...this.overridesUsed.values()].sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /** Override files that were rejected; surfaced by the dump and `/plugins`. */
+  overrideIssues(): string[] {
+    this.ensureScanned();
+    return [...this.overrideProblems];
+  }
+
+  /** The tier a plugin's winning body came from. */
+  layerOf(id: string): PluginLayer | undefined {
+    this.ensureScanned();
+    return this.layerById.get(id);
   }
 
   private ensureScanned(): void {

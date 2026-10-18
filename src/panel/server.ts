@@ -40,6 +40,7 @@ import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
 import { bufferName, normaliseExtensions } from '../langs/manifest.js';
 import type { RegistryRoot } from '../langs/Registry.js';
+import { officialRoots } from '../langs/pluginRoots.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
@@ -119,10 +120,15 @@ function pluginPayload(workspace: WorkspaceService): Record<string, unknown> {
   const budget = workspace.resourceSummary();
   const budgetOf = new Map(budget.profiles.map((p) => [p.languageId, p]));
   const slots = new Map(workspace.status().languages.map((l) => [l.id, l]));
-  const plugins = (registry.isScanned() ? registry.installed() : []).map((p) => {
+  // Layer, override and shadow data only exist after a scan; asking the
+  // registry before that throws, and the page must still render.
+  const scanned = registry.isScanned();
+  const overrideOf = new Map((scanned ? registry.overrides() : []).map((o) => [o.id, o]));
+  const plugins = (scanned ? registry.installed() : []).map((p) => {
     const m = p.manifest;
     const res = budgetOf.get(m.id);
     const slot = slots.get(m.id);
+    const override = overrideOf.get(m.id);
     return {
       id: m.id,
       displayName: m.displayName,
@@ -146,6 +152,14 @@ function pluginPayload(workspace: WorkspaceService): Record<string, unknown> {
       validation: p.validation.issues,
       validationOk: p.validation.ok,
       dir: p.source.dir,
+      // Which tier supplied this body, and what `overrides/<id>.json` changed.
+      // The page's job is to make "why is this plugin here / why is its LSP
+      // command different" answerable without a terminal.
+      layer: (scanned ? registry.layerOf(m.id)?.id : undefined) ?? p.source.kind,
+      readOnly: (scanned ? registry.layerOf(m.id)?.readOnly : undefined) ?? !p.source.removable,
+      overrides: override
+        ? { file: override.file, changed: override.changed, stale: override.stale }
+        : undefined,
     };
   });
   return {
@@ -153,6 +167,11 @@ function pluginPayload(workspace: WorkspaceService): Record<string, unknown> {
     plugins,
     resource: budget,
     runtimes: workspace.runtimes.list(),
+    // Same id in several tiers: the losers are not installed, but seeing them is
+    // the only way to understand a plugin that "should" be a different version.
+    conflicts: scanned ? registry.conflicts() : [],
+    overrideProblems: scanned ? registry.overrideIssues() : [],
+    home: registry.home,
   };
 }
 
@@ -185,22 +204,8 @@ function extensionDirs(): string[] {
  * `LANG_DIR` (`:`/`;` separated) lets a host or a test point at its own tree.
  */
 function languageRoots(): RegistryRoot[] {
-  const fromEnv = (process.env.LANG_DIR ?? '')
-    .split(/[:;]/)
-    .filter(Boolean)
-    .map((p) => ({ dir: resolve(p), kind: 'builtin' as const, removable: false }));
-  const repo = [join(__dirname, '..', '..', 'builtin'), join(process.cwd(), 'builtin')]
-    .filter((d) => existsSync(d))
-    .map((d) => ({ dir: d, kind: 'builtin' as const, removable: false }));
-  const unpacked = materializeAssets('builtin');
-  const embedded: RegistryRoot[] = unpacked ? [{ dir: unpacked, kind: 'builtin', removable: false }] : [];
-  const seen = new Set<string>();
-  return [...fromEnv, ...repo, ...embedded].filter((r) => {
-    const key = r.dir.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // Shared with the CLI and `--dump-plugins` so the three cannot drift apart.
+  return officialRoots();
 }
 
 export interface MainOptions {  /**
@@ -278,6 +283,9 @@ export async function main(opts: MainOptions = {}): Promise<{ base: string; clos
     // Official plugins ship beside the source (and inside the executable);
     // user-installed ones live under `NOLANGUAGE_HOME`.
     pluginRoots: languageRoots(),
+    // `<workspace>/.nolanguage/languages` is the `project` tier: it must follow
+    // the folder the panel was opened on, not the process launch directory.
+    projectDir: process.env.PANEL_EXPLORER_ROOT ?? process.cwd(),
   });
   // A workspace that cannot materialise its buffers must not take the whole
   // server down: the panel, the extension host and every read-only view still

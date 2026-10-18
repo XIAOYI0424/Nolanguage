@@ -12,6 +12,13 @@
  *   - what is installed (and what is only *declared*, i.e. a disabled plugin),
  *   - what it costs (the Phase 4 budget),
  *   - what happened (the event log, so a failed install explains itself).
+ *
+ * Since the layer/override work landed, each card also answers two questions the
+ * manifest on disk cannot: which tier supplied the body (`project` / `builtin` /
+ * `user` / `cli` / `system`), and whether `overrides/<id>.json` rewrote any of
+ * its fields. Shadowed copies — the same id found in a losing tier — get their
+ * own list on the right, because "the newer copy I just dropped in" is the most
+ * common reason a plugin seems to ignore an edit.
  */
 export function renderPluginsHtml(): string {
   return `<!doctype html>
@@ -63,6 +70,12 @@ export function renderPluginsHtml(): string {
   #events .err { color:var(--err); }
   #events .ev { color:var(--accent); }
   .issues { color:var(--err); font-size:11.5px; margin-top:6px; }
+  /* Override details sit under the card, monospace: they are file paths and
+     field names, not prose. The accent bar says "this came from your override
+     file", not from the plugin body. */
+  .ovr { margin-top:6px; padding:4px 0 4px 8px; border-left:2px solid var(--accent); font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; color:var(--sub); }
+  .ovr .k { color:var(--accent); }
+  .ovr .stale { color:var(--warn); }
 </style>
 </head>
 <body>
@@ -86,6 +99,8 @@ export function renderPluginsHtml(): string {
       <div id="budget" class="budget"></div>
       <div class="head" style="margin:14px -14px 0; border-top:1px solid var(--border)">Runtimes</div>
       <div class="scroll" id="runtimes" style="max-height:180px"></div>
+      <div class="head" style="margin:14px -14px 0; border-top:1px solid var(--border)">Shadowed copies</div>
+      <div class="scroll" id="shadowed" style="max-height:150px"></div>
       <div class="head" style="margin:14px -14px 0; border-top:1px solid var(--border)">Events</div>
       <div class="scroll" id="events" style="max-height:240px"></div>
     </div>
@@ -97,6 +112,7 @@ export function renderPluginsHtml(): string {
   var dot = document.getElementById('dot'), connTxt = document.getElementById('connTxt');
   var list = document.getElementById('list'), events = document.getElementById('events');
   var budget = document.getElementById('budget'), runtimes = document.getElementById('runtimes');
+  var shadowed = document.getElementById('shadowed');
   var reqId = 0;
   function setConn(on){ dot.className = 'dot' + (on ? ' on' : ''); connTxt.textContent = on ? 'connected' : 'disconnected'; }
   ws.onopen = function () { setConn(true); send({ kind: 'listPlugins' }); };
@@ -139,14 +155,33 @@ export function renderPluginsHtml(): string {
     });
   }
 
-  function render(plugins, res, runtimesList) {
+  function render(plugins, res, runtimesList, conflicts, home) {
     list.innerHTML = '';
-    if (!plugins || !plugins.length) { list.innerHTML = '<div class="meta">no plugins found</div>'; return; }
+    if (home) {
+      var line = document.createElement('div');
+      line.className = 'meta';
+      line.style.marginBottom = '8px';
+      line.textContent = 'home ' + home;
+      list.appendChild(line);
+    }
+    if (!plugins || !plugins.length) {
+      var empty = document.createElement('div');
+      empty.className = 'meta';
+      empty.textContent = 'no plugins found';
+      list.appendChild(empty);
+      renderBudget(res);
+      renderRuntimes(runtimesList);
+      renderShadowed(conflicts);
+      return;
+    }
     plugins.forEach(function (p) {
       var div = document.createElement('div');
       div.className = 'card' + (p.enabled ? '' : ' off');
       var html = '';
       html += '<span class="pill ' + (p.enabled ? 'ok' : 'warn') + '">' + (p.enabled ? 'enabled' : 'disabled') + '</span>';
+      // The tier is the answer to "why is this here?" — project plugins are
+      // local to the workspace, builtin ones ship with the app.
+      html += '<span class="pill' + (p.layer === 'project' ? ' acc' : '') + '">' + esc(p.layer) + '</span>';
       html += '<span class="pill">' + esc(p.kind) + '</span>';
       if (!p.validationOk) html += '<span class="pill err">invalid</span>';
       if (p.needsRunner && !p.runnerError) html += '<span class="pill acc">run: ' + esc(p.runMode || '-') + '</span>';
@@ -154,6 +189,7 @@ export function renderPluginsHtml(): string {
       if (p.lspServerName) html += '<span class="pill">lsp: ' + esc(p.lspServerName) + '</span>';
       if (p.debugAdapter) html += '<span class="pill">debug: ' + esc(p.debugAdapter) + '</span>';
       if (p.profilerAdapter) html += '<span class="pill">profile: ' + esc(p.profilerAdapter) + '</span>';
+      if (p.overrides) html += '<span class="pill acc">override</span>';
       html += '<div class="name">' + esc(p.displayName) + ' <span class="meta">' + esc(p.id) + ' v' + esc(p.version) + '</span></div>';
       html += '<div class="meta">' + (p.extensions || []).map(function (e) { return '.' + esc(e); }).join(' ') +
         (p.fileName ? ' · ' + esc(p.fileName) : '') + '</div>';
@@ -161,6 +197,16 @@ export function renderPluginsHtml(): string {
       if (p.memoryBytes) html += '<div class="meta">' + mb(p.memoryBytes) + ' attributed' + (p.memoryRunning ? ' (server running)' : '') + '</div>';
       if (p.validation && p.validation.length) {
         html += '<div class="issues">' + p.validation.map(function (i) { return esc(i.field || '?') + ': ' + esc(i.message); }).join('<br />') + '</div>';
+      }
+      if (p.overrides) {
+        // Field paths, not prose: this block exists so a user can see that the
+        // manifest on disk is not what the engine is running.
+        html += '<div class="ovr"><div class="k">' + esc(p.overrides.file) + '</div>';
+        (p.overrides.changed || []).forEach(function (f) { html += '<div>' + esc(f) + '</div>'; });
+        (p.overrides.stale || []).forEach(function (f) {
+          html += '<div class="stale">! ' + esc(f) + ' (not in manifest)</div>';
+        });
+        html += '</div>';
       }
       html += '<div class="actions"></div>';
       div.innerHTML = html;
@@ -181,6 +227,32 @@ export function renderPluginsHtml(): string {
     });
     renderBudget(res);
     renderRuntimes(runtimesList);
+    renderShadowed(conflicts);
+  }
+
+  /*
+    Same id in two tiers: only the winner is installed, but a user who copied a
+    newer plugin next to an older one needs to see that the older one lost.
+    Ordered by the registry (winners first), one small card per conflict.
+  */
+  function renderShadowed(conflicts) {
+    shadowed.innerHTML = '';
+    if (!conflicts || !conflicts.length) {
+      shadowed.innerHTML = '<div class="meta">none — every plugin id resolved to one copy</div>';
+      return;
+    }
+    conflicts.forEach(function (c) {
+      var d = document.createElement('div');
+      d.className = 'card';
+      var html = '<div class="name">' + esc(c.id) + ' <span class="meta">winner · ' + esc(c.winner.layer) + ' v' + esc(c.winner.version) + '</span></div>';
+      html += '<div class="meta">' + esc(c.winner.dir) + '</div>';
+      (c.losers || []).forEach(function (l) {
+        html += '<div class="meta">shadowed · ' + esc(l.layer) + ' v' + esc(l.version) + '</div>';
+        html += '<div class="meta">' + esc(l.dir) + '</div>';
+      });
+      d.innerHTML = html;
+      shadowed.appendChild(d);
+    });
   }
 
   function btn(label, fn, danger, disabled) {
@@ -205,7 +277,11 @@ export function renderPluginsHtml(): string {
 
   ws.onmessage = function (ev) {
     var m = JSON.parse(ev.data);
-    if (m.kind === 'plugins') { render(m.plugins, m.resource, m.runtimes); }
+    if (m.kind === 'plugins') {
+      render(m.plugins, m.resource, m.runtimes, m.conflicts, m.home);
+      // A rejected override keeps the plugin working but must not be silent.
+      (m.overrideProblems || []).forEach(function (p) { log('err', 'override: ' + p); });
+    }
     else if (m.kind === 'pluginOp') {
       log(m.ok ? 'ok' : 'err', (m.op || '') + ' ' + (m.id || '') + (m.ok ? '' : ' — ' + m.error));
       if (m.ok) send({ kind: 'listPlugins' });

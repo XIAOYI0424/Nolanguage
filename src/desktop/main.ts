@@ -39,13 +39,21 @@ import { main as startServer } from '../panel/server.js';
 import { openSystemBrowser, openWebView, type WebViewHandle } from './WebViewHost.js';
 
 /**
- * Two modes share this executable:
+ * Modes that share this executable:
  *
  *   Nolanguage.exe                              boot the workspace + open a window
  *   Nolanguage.exe --extension-host --manifest <m> --extension <e>
  *                                              run one extension in isolation
  *   Nolanguage.exe --panel-stdio                speak the panel protocol on
  *                                              stdin/stdout (the Tauri sidecar)
+ *   Nolanguage.exe --dump-plugins               print where every language
+ *                                              plugin was found, then exit
+ *   Nolanguage.exe lang <verb> …                install/manage language plugins
+ *                                              (same verbs as `nlg lang …`)
+ *
+ * The two CLI modes exist because the exe is a Node SEA: it already carries a
+ * runtime, so a user who installed via `Setup.exe` can manage plugins without
+ * installing Node or keeping a source checkout — `nlg` alone could not.
  *
  * The extension host re-uses the same binary so a packaged build needs no
  * second executable and no external `node` on PATH. The dispatch is inside an
@@ -68,9 +76,39 @@ if (process.argv.includes('--extension-host')) {
     process.stderr.write(`engine (stdio) failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
+} else if (process.argv[2] === 'lang') {
+  runLangCli(process.argv.slice(3));
+} else if (process.argv.includes('--dump-plugins')) {
+  runDumpPlugins();
 } else {
   main().catch((err: unknown) => {
     console.error('Nolanguage desktop failed to start:', err);
+    process.exit(1);
+  });
+}
+
+/**
+ * `Nolanguage.exe lang …`. Loaded lazily: a normal boot must not pay for the
+ * plugin catalogue/crypto-free CLI path, and the import would otherwise pull
+ * the whole registry in before the window exists.
+ */
+function runLangCli(args: string[]): void {
+  void (async () => {
+    const { runLang } = await import('../cli/lang.js');
+    process.exitCode = await runLang(args);
+  })().catch((err: unknown) => {
+    process.stderr.write(`lang failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+}
+
+/** `Nolanguage.exe --dump-plugins` — a report, so it never starts the server. */
+function runDumpPlugins(): void {
+  void (async () => {
+    const { dumpPlugins } = await import('../cli/dump.js');
+    process.exitCode = await dumpPlugins();
+  })().catch((err: unknown) => {
+    process.stderr.write(`--dump-plugins failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
 }

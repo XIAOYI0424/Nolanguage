@@ -79,6 +79,13 @@ export interface WorkspaceServiceOptions {
   home?: string;
   /** Extra plugin roots (the repo's `builtin/` during development). */
   pluginRoots?: RegistryRoot[];
+  /**
+   * Directory the `project` plugin tier resolves against
+   * (`<dir>/.nolanguage/languages`). Defaults to the process cwd, which is the
+   * launch directory — pass the workspace root when the panel was opened on a
+   * folder.
+   */
+  projectDir?: string;
   /** Inject a prepared registry (tests, and hosts that own the scan). */
   registry?: LanguageRegistry;
 }
@@ -276,7 +283,11 @@ export class WorkspaceService {
     this.opts = opts;
     this.registry =
       opts.registry ??
-      new LanguageRegistry({ home: opts.home, extraRoots: opts.pluginRoots ?? defaultPluginRoots() });
+      new LanguageRegistry({
+      home: opts.home,
+      projectDir: opts.projectDir,
+      extraRoots: opts.pluginRoots ?? defaultPluginRoots(),
+    });
     this.factory = new RunnerFactory(defaultRuntimeRegistry());
     this.resources = new ProfileManager({
       budgetBytes: opts.memoryBudgetBytes,
