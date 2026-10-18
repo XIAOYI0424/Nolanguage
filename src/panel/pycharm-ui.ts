@@ -14,6 +14,7 @@
 import { PYCHARM_CSS } from './ui/pycharm-css.js';
 import { PYCHARM_SHELL } from './ui/pycharm-shell.js';
 import { pyCharmClientScript } from './ui/pycharm-client.js';
+import { CODEMIRROR_CSS, CODEMIRROR_JS } from './ui/codemirror-assets.js';
 
 /**
  * PyCharm New UI shell (design: 复刻 PyCharm 2024.1+ New UI).
@@ -107,9 +108,13 @@ export function renderPyCharmHtml(_port: number): string {
 <title>Nolanguage · PyCharm UI</title>
 <style>
 ${PYCHARM_CSS}
+${CODEMIRROR_CSS}
 </style>
 </head>
 ${PYCHARM_SHELL}
+<script>
+${CODEMIRROR_JS}
+</script>
 <script>
 ${pyCharmClientScript({ iconsJson, patternJson, mainJson, utilsJson, jsJson, readmeJson })}
 </script>

@@ -119,7 +119,14 @@ check('hardening: no <form> element', !/<form[\s>]/i.test(html));
 check('hardening: no anchor navigation', !/<a\s[^>]*href=/i.test(html));
 check('hardening: no file input', !/<input[^>]+type=["']file/i.test(html));
 check('hardening: no blob URLs', !/createObjectURL/.test(html));
-check('hardening: no drag-drop file reads', !/dataTransfer\.files/.test(html));
+// The vendored CodeMirror bundle contains its own drag-drop handler; the app
+// disables file drops through `allowDropFileTypes: []`. Test the app's own
+// script, not the third-party block, or the vendor's string trips a false
+// positive.
+const appScriptHtml = html.replace(/<script>[\s\S]*?CodeMirror[\s\S]*?<\/script>/, '');
+check('hardening: no drag-drop file reads', !/dataTransfer\.files/.test(appScriptHtml));
+check('editor: CodeMirror refuses dropped files', /allowDropFileTypes:\s*\[\s*\]/.test(html));
+check('editor: ships the vendored CodeMirror', /CodeMirror\.defineMode/.test(html));
 check('hardening: script dialogs replaced', /window\.alert\s*=/.test(html) && /window\.confirm\s*=/.test(html));
 check('hardening: CSS disables selection outside inputs', /user-select:\s*none/.test(html));
 check('hardening: CSS keeps the page from scrolling', /overflow:\s*hidden/.test(html));

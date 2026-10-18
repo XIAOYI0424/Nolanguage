@@ -378,6 +378,111 @@ export function pyCharmClientScript(d: PanelClientData): string {
   var BREAKPOINTS = { 9: true }; // 1-based line numbers with a breakpoint
   var folded = {}; // line -> collapsed
 
+  // ---------- CodeMirror (vendored, optional) ----------
+  // When the vendored CodeMirror is present the textarea becomes a thin adapter
+  // over a real CM instance. The adapter mirrors the textarea API, so the rest
+  // of this file, written against a textarea, keeps working unchanged. jsdom
+  // has no layout, so the test harness stays on the textarea.
+  var CMEDITOR = null;
+  function cmModeFor(lang) {
+    switch (lang) {
+      case 'python': return 'python';
+      case 'go': return 'go';
+      case 'javascript': case 'typescript': return 'javascript';
+      case 'markdown': return 'markdown';
+      case 'json': return { name: 'javascript', json: true };
+      case 'html': return 'htmlmixed';
+      case 'xml': return 'xml';
+      case 'css': return 'css';
+      case 'yaml': return 'yaml';
+      case 'sql': return 'sql';
+      case 'shell': return 'shell';
+      case 'toml': return 'toml';
+      default: return null;
+    }
+  }
+  function makeCmAdapter(cm) {
+    var skip = 0;
+    var api = {
+      isCM: true,
+      cm: cm,
+      get value() { return cm.getValue(); },
+      set value(v) { skip++; cm.setValue(String(v == null ? '' : v)); },
+      get selectionStart() { return cm.indexFromPos(cm.getCursor('from')); },
+      set selectionStart(p) { cm.setSelection(cm.posFromIndex(p), cm.getCursor('to')); },
+      get selectionEnd() { return cm.indexFromPos(cm.getCursor('to')); },
+      set selectionEnd(p) { cm.setSelection(cm.getCursor('from'), cm.posFromIndex(p)); },
+      setSelectionRange: function (a, b) { cm.setSelection(cm.posFromIndex(a), cm.posFromIndex(b)); },
+      get scrollTop() { return cm.getScrollInfo().top; },
+      set scrollTop(v) { cm.scrollTo(null, v); },
+      get scrollLeft() { return cm.getScrollInfo().left; },
+      set scrollLeft(v) { cm.scrollTo(v, null); },
+      get readOnly() { return !!cm.getOption('readOnly'); },
+      set readOnly(v) { cm.setOption('readOnly', !!v); },
+      focus: function () { cm.focus(); },
+      getBoundingClientRect: function () { return cm.getWrapperElement().getBoundingClientRect(); },
+      addEventListener: function (type, fn) {
+        if (type === 'input') {
+          cm.on('change', function () { if (skip > 0) { skip--; return; } fn({ target: api }); });
+        } else if (type === 'scroll') {
+          cm.on('scroll', function () { fn({ target: api }); });
+        } else if (type === 'keyup') {
+          cm.on('keyup', function () { fn({ target: api }); });
+        } else if (type === 'click') {
+          cm.on('cursorActivity', function () { fn({ target: api }); });
+        } else if (type === 'blur') {
+          cm.on('blur', function () { fn({ target: api }); });
+        } else if (type === 'keydown') {
+          // Capture on the wrapper: Tab/Enter/Escape must be interceptable
+          // before CM's own keymap sees them.
+          cm.getWrapperElement().addEventListener('keydown', function (e) {
+            fn(e);
+            if (e.defaultPrevented) e.stopPropagation();
+          }, true);
+        } else {
+          cm.getWrapperElement().addEventListener(type, fn);
+        }
+      },
+    };
+    return api;
+  }
+  (function initCodeMirror() {
+    if (!window.CodeMirror) return;
+    if (/jsdom/i.test((navigator && navigator.userAgent) || '')) return;
+    var host = null;
+    try {
+      host = document.createElement('div');
+      host.id = 'cmHost';
+      ta.parentNode.insertBefore(host, ta);
+      var cm = window.CodeMirror(host, {
+        value: ta.value,
+        mode: cmModeFor(currentLang),
+        lineNumbers: true,
+        lineWrapping: false,
+        matchBrackets: true,
+        autoCloseBrackets: true,
+        styleActiveLine: true,
+        // CM reads dropped files into the buffer by default. The app is a
+        // native shell that must not read local files from a drag; an empty
+        // allow-list makes every file drop a no-op.
+        allowDropFileTypes: [],
+        indentUnit: 4,
+        tabSize: 4,
+        indentWithTabs: false,
+        viewportMargin: 40,
+      });
+      ta.style.display = 'none';
+      if (hl) hl.style.display = 'none';
+      var cl0 = $('curline'); if (cl0) cl0.style.display = 'none';
+      var g0 = $('gutter'); if (g0) g0.style.display = 'none';
+      CMEDITOR = makeCmAdapter(cm);
+      ta = CMEDITOR;
+    } catch (e) {
+      if (host && host.parentNode) host.parentNode.removeChild(host);
+      CMEDITOR = null;
+    }
+  })();
+
   // ---------- multi-language tokeniser (dependency-free) ----------
   // Newline / tab / backtick / angle brackets are built from char codes so this
   // block needs no backslash escapes (the whole script is a template literal).
@@ -628,6 +733,11 @@ export function pyCharmClientScript(d: PanelClientData): string {
   }
 
   function renderEditor() {
+    if (CMEDITOR) {
+      // CM renders itself; keep its language in step with the tab's language.
+      CMEDITOR.cm.setOption('mode', cmModeFor(currentLang));
+      return;
+    }
     var code = ta.value;
     var vis = visibleLines(code);
     hlCode.innerHTML = highlight(vis.join('\\n')) + '\\n';
@@ -684,6 +794,10 @@ export function pyCharmClientScript(d: PanelClientData): string {
   // that is denied too, instead of silently doing nothing.
   var CAN_EDIT = function () { return !!(currentFile && BUFFERS[currentFile] && BUFFERS[currentFile].editable); };
   function docCmd(name) {
+    if (CMEDITOR && (name === 'undo' || name === 'redo')) {
+      CMEDITOR.cm[name]();
+      return;
+    }
     ta.focus();
     if (typeof document.execCommand === 'function') {
       try { document.execCommand(name); } catch (e) { /* clipboard policy denied it */ }
@@ -935,10 +1049,21 @@ export function pyCharmClientScript(d: PanelClientData): string {
     el.querySelectorAll('.row').forEach(function (row) {
       row.addEventListener('mousedown', function (ev) { ev.preventDefault(); CMP.sel = +row.getAttribute('data-i'); cmpAccept(); });
     });
-    var lc = caretLC();
     var host = el.parentNode ? el.parentNode : document.body;
-    var left = 56 + 14 + lc.character * 7.2 - ta.scrollLeft;
-    var top = 10 + (lc.line + 1) * 20 - ta.scrollTop;
+    var left, top;
+    if (CMEDITOR) {
+      // Anchor to the real cursor: CM's gutter/padding differ from the
+      // textarea's fixed 56px/14px assumptions.
+      var co = CMEDITOR.cm.cursorCoords(true, 'local');
+      var wrapRect = CMEDITOR.cm.getWrapperElement().getBoundingClientRect();
+      var hostRect = host.getBoundingClientRect();
+      left = wrapRect.left - hostRect.left + co.left;
+      top = wrapRect.top - hostRect.top + co.bottom;
+    } else {
+      var lc = caretLC();
+      left = 56 + 14 + lc.character * 7.2 - ta.scrollLeft;
+      top = 10 + (lc.line + 1) * 20 - ta.scrollTop;
+    }
     el.style.left = Math.max(58, Math.min(left, host.clientWidth - 250)) + 'px';
     el.style.top = Math.max(2, Math.min(top, host.clientHeight - 44)) + 'px';
     el.classList.add('open');
@@ -956,6 +1081,11 @@ export function pyCharmClientScript(d: PanelClientData): string {
   function cmpClose() { CMP.open = false; var el = $('cmp'); if (el) el.classList.remove('open'); }
   function onCodeMouseMove(e) {
     clearTimeout(HOV.timer);
+    if (CMEDITOR) {
+      var p = CMEDITOR.cm.coordsChar({ left: e.clientX, top: e.clientY });
+      HOV.timer = setTimeout(function () { requestHoverAt(p.line, p.ch); }, 450);
+      return;
+    }
     var rect = ta.getBoundingClientRect();
     HOV.cx = e.clientX; HOV.cy = e.clientY;
     var x = e.clientX - rect.left, y = e.clientY - rect.top;
@@ -976,6 +1106,10 @@ export function pyCharmClientScript(d: PanelClientData): string {
     if (!lspLang()) return;
     var line = Math.floor((y - 10 + ta.scrollTop) / 20);
     var col = Math.floor((x - 14 + ta.scrollLeft) / 7.2);
+    requestHoverAt(line, col);
+  }
+  function requestHoverAt(line, col) {
+    if (!lspLang()) return;
     var lines = ta.value.split(NLc);
     if (line < 0 || line >= lines.length) { $('hoverTip').classList.remove('open'); return; }
     var w = wordAt(lines[line], col);
