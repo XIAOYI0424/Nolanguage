@@ -8,11 +8,15 @@
 # and creates two Start Menu shortcuts:
 #   Nolanguage (Web)     -> Nolanguage.exe --open-browser   (default browser)
 #   Nolanguage (Desktop) -> Nolanguage.exe                  (native WebView window)
-# plus a Desktop shortcut and an Uninstall entry. Optionally adds the install
-# directory to the user PATH.
+# plus a Desktop shortcut and an Uninstall entry.
+#
+# If `uninstaller.exe` sits next to this script it is installed as
+# `<installDir>\uninstall.exe` and the registry points at it — a normal Windows
+# uninstaller. Without it, a PowerShell `uninstall.ps1` is generated as a
+# fallback so nothing regresses.
 #
 # To build a self-contained distribution folder, copy this script together with
-# the rebuilt Nolanguage.exe into one folder and ship that folder.
+# the rebuilt Nolanguage.exe (and, ideally, uninstaller.exe) into one folder.
 # ===========================================================================
 
 [CmdletBinding()]
@@ -24,6 +28,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $SourceExe = Join-Path $ScriptDir 'Nolanguage.exe'
+$SourceUninst = Join-Path $ScriptDir 'uninstaller.exe'
+if (-not (Test-Path $SourceUninst)) {
+  $alt = Join-Path $ScriptDir 'payload\uninstaller.exe'
+  if (Test-Path $alt) { $SourceUninst = $alt }
+}
 
 if (-not (Test-Path $SourceExe)) {
   Write-Error "Nolanguage.exe not found next to this script ($SourceExe).`nRebuild it with 'npm run build:exe' (or run installer\build-nsis.bat) and copy dist\Nolanguage.exe next to setup.ps1 first."
@@ -37,9 +46,9 @@ Copy-Item -Force $SourceExe (Join-Path $InstallDir 'Nolanguage.exe')
 $appExe = Join-Path $InstallDir 'Nolanguage.exe'
 $ws = New-Object -ComObject WScript.Shell
 
-function New-Shortcut($path, $args_) {
+function New-Shortcut($path, $args_, $target = $appExe) {
   $sc = $ws.CreateShortcut($path)
-  $sc.TargetPath = $appExe
+  $sc.TargetPath = $target
   $sc.Arguments = $args_
   $sc.WorkingDirectory = $InstallDir
   $sc.Description = 'Nolanguage — unified multi-language workspace'
@@ -55,11 +64,35 @@ New-Shortcut (Join-Path $sm 'Nolanguage (Desktop).lnk') ''
 # --- Desktop shortcut (Desktop = native window) ---
 New-Shortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Nolanguage.lnk') ''
 
-# --- Uninstaller (generated next to the app) ---
-$uninst = Join-Path $InstallDir 'uninstall.ps1'
-$uninstContent = @'
+# --- Uninstaller: native exe when available, PowerShell fallback otherwise ---
+$hasNative = Test-Path $SourceUninst
+if ($hasNative) {
+  $uninstExe = Join-Path $InstallDir 'uninstall.exe'
+  Copy-Item -Force $SourceUninst $uninstExe
+  $uninstCmd = '"' + $uninstExe + '"'
+  $unsc = $ws.CreateShortcut((Join-Path $sm 'Uninstall Nolanguage.lnk'))
+  $unsc.TargetPath = $uninstExe
+  $unsc.WorkingDirectory = $InstallDir
+  $unsc.Save()
+} else {
+  $uninst = Join-Path $InstallDir 'uninstall.ps1'
+  $uninstContent = @'
+$proc = Get-Process -Name 'Nolanguage' -ErrorAction SilentlyContinue
+if ($proc) {
+  & taskkill.exe /IM 'Nolanguage.exe' /F /T | Out-Null
+  & taskkill.exe /IM 'msedgewebview2.exe' /F | Out-Null
+  Start-Sleep -Seconds 3
+}
 $InstallDir = '{{INSTALLDIR}}'
-if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
+$attempt = 0
+while ((Test-Path $InstallDir) -and ($attempt -lt 5)) {
+  Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
+  if (Test-Path $InstallDir) { Start-Sleep -Seconds 1 }
+  $attempt++
+}
+if (Test-Path $InstallDir) {
+  Write-Host "note: some files under $InstallDir are still held by the WebView2 runtime; they will be removed when it releases them (or on next restart). Uninstall is otherwise complete."
+}
 $sm = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Nolanguage'
 if (Test-Path $sm) { Remove-Item -Recurse -Force $sm }
 $desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Nolanguage.lnk'
@@ -69,34 +102,30 @@ if ($userPath -like "*{{INSTALLDIR}}*") {
   $new = ($userPath -split ';' | Where-Object { $_ -and $_ -ne '{{INSTALLDIR}}' }) -join ';'
   [Environment]::SetEnvironmentVariable('Path', $new, 'User')
 }
+$uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nolanguage'
+if (Test-Path $uninstKey) { Remove-Item -Recurse -Force $uninstKey }
 Write-Host 'Nolanguage uninstalled.'
 '@
-$uninstContent = $uninstContent.Replace('{{INSTALLDIR}}', $InstallDir)
-Set-Content -Path $uninst -Value $uninstContent -Encoding UTF8
-
-$unsc = $ws.CreateShortcut((Join-Path $sm 'Uninstall Nolanguage.lnk'))
-$unsc.TargetPath = 'powershell.exe'
-$unsc.Arguments = "-ExecutionPolicy Bypass -File `"$uninst`""
-$unsc.WorkingDirectory = $InstallDir
-$unsc.Save()
-
-# --- PATH (user) ---
-if (-not $NoPath) {
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  if ($userPath -notlike "*$InstallDir*") {
-    $new = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-    [Environment]::SetEnvironmentVariable('Path', $new, 'User')
-    Write-Host "Added $InstallDir to the user PATH (restart terminals to pick it up)."
-  }
+  $uninstContent = $uninstContent.Replace('{{INSTALLDIR}}', $InstallDir)
+  Set-Content -Path $uninst -Value $uninstContent -Encoding UTF8
+  $uninstCmd = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$uninst`""
+  $unsc = $ws.CreateShortcut((Join-Path $sm 'Uninstall Nolanguage.lnk'))
+  $unsc.TargetPath = 'powershell.exe'
+  $unsc.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$uninst`""
+  $unsc.WorkingDirectory = $InstallDir
+  $unsc.Save()
 }
 
 # --- Registry uninstall entry ---
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nolanguage'
 New-Item -Force -Path $key | Out-Null
 Set-ItemProperty -Path $key -Name 'DisplayName' -Value 'Nolanguage'
-Set-ItemProperty -Path $key -Name 'UninstallString' -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninst`""
+Set-ItemProperty -Path $key -Name 'UninstallString' -Value $uninstCmd
+Set-ItemProperty -Path $key -Name 'QuietUninstallString' -Value $uninstCmd
+Set-ItemProperty -Path $key -Name 'DisplayIcon' -Value ('"' + $appExe + '"')
 Set-ItemProperty -Path $key -Name 'DisplayVersion' -Value '0.6.0'
 Set-ItemProperty -Path $key -Name 'Publisher' -Value 'Nolanguage'
 Set-ItemProperty -Path $key -Name 'InstallLocation' -Value $InstallDir
+Set-ItemProperty -Path $key -Name 'EstimatedSize' -Value 90000
 
 Write-Host "Done. Launch from the Start Menu: 'Nolanguage (Web)' or 'Nolanguage (Desktop)'."

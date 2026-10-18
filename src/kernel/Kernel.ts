@@ -84,11 +84,12 @@ export interface KernelOptions {
   devMode?: boolean;
   /**
    * SQLite warm tier (spec 十三 / 二十). Accepts a ready-made `SqliteStore`,
-   * `true` to open the default database, or `false` to keep everything in
-   * memory. Defaults to **false** so tests stay isolated; hosts that want
-   * persistence (the panel server, the demo) opt in explicitly.
+   * `true` to open the default database, a **database path**, or `false` to
+   * keep everything in memory. Defaults to **false** so tests stay isolated;
+   * hosts that want persistence (the panel server, the demo) opt in explicitly
+   * — `process.env.NOLANGUAGE_DB` is exactly that "path or true" case.
    */
-  store?: SqliteStore | boolean;
+  store?: SqliteStore | boolean | string;
   /** Path for the auto-created store; defaults to `<cwd>/.nolanguage/telemetry.db`. */
   dbPath?: string;
   /** Warm-tier flush cadence in ms (spec 20.2: 5 s). */

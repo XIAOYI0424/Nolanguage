@@ -1,6 +1,6 @@
 import { ulid } from '../util/ulid.js';
 import { performance } from 'node:perf_hooks';
-import type { IKernel } from '../kernel/types.js';
+import type { Kernel } from '../kernel/types.js';
 import { CommandBusImpl } from '../kernel/CommandBus.js';
 import { EventBusImpl } from '../kernel/EventBus.js';
 import { ServiceRegistryImpl } from '../kernel/ServiceRegistry.js';
@@ -34,7 +34,7 @@ export class PerfSpine {
   private slowSpans: Span[] = [];
   private env?: PerfEnvironment;
   private correlation?: CorrelationBus;
-  private kernel?: IKernel;
+  private kernel?: Kernel;
   /** Live taps: every accepted PerfRecord, used by the warm-tier sink. */
   private taps: ((record: PerfRecord) => void)[] = [];
 
@@ -69,7 +69,7 @@ export class PerfSpine {
     }
   }
 
-  install(kernel: IKernel): void {
+  install(kernel: Kernel): void {
     this.kernel = kernel;
 
     kernel.commands.use(async (ctx, next) => {

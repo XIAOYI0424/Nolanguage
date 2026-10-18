@@ -6,7 +6,7 @@
  * and a command that hard-crashes the process must be detected, counted
  * (`crash.count`) and recovered on the next use.
  */
-import type { ExtensionContext } from '../api.js';
+import type { ExtensionContext } from '../../api.js';
 
 export function activate(ctx: ExtensionContext): void {
   ctx.log.info('faulty extension activated', { pid: ctx.host.pid });

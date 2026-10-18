@@ -9,7 +9,7 @@
  *
  * Run it with:  npm run demo:extensions
  */
-import type { ExtensionContext } from '../api.js';
+import type { ExtensionContext } from '../../api.js';
 
 /**
  * Set by `activate`. Kept module-local (not on `ctx`) so the demo shows the

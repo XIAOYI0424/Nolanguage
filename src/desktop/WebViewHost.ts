@@ -209,8 +209,12 @@ function appSwitches(url: string, profile: string, size?: string): string[] {
     '--no-default-browser-check',
     '--no-service-autorun',
     '--disable-sync',
-    // Strip the surfaces that make an app window feel like a browser.
-    '--disable-features=msEdgeSidebarV2,msEdgeShoppingAssistant,msEdgeCollections,msEdgeWorkspaces,msEdgeCopilot',
+    // Strip the surfaces that make an app window feel like a browser, and kill
+    // the "translate this page?" bubble: the shell is written in English
+    // (`<html lang="en">`), so on a Chinese Windows install Chromium offers to
+    // translate it on every launch. `Translate` is the browser feature and
+    // `TranslateUI` its bubble; both are needed to stop the prompt.
+    '--disable-features=msEdgeSidebarV2,msEdgeShoppingAssistant,msEdgeCollections,msEdgeWorkspaces,msEdgeCopilot,Translate,TranslateUI',
   ];
   if (size) args.push(`--window-size=${size}`);
   return args;

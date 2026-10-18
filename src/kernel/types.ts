@@ -27,7 +27,17 @@ export type CommandMiddleware = (
 ) => Promise<unknown>;
 
 export interface CommandBus {
-  register(id: string, handler: CommandHandler, meta?: Partial<CommandMeta>): Disposable;
+  /**
+   * Register a handler. `A` is the handler's parameter tuple: a typed handler
+   * such as `(languageId: SandboxLanguage, sessionId?: string) => Promise<…>`
+   * is assignable even though the bus stores it as a loose `CommandHandler`
+   * (the bus cannot know a command's signature at the call site).
+   */
+  register<A extends unknown[] = unknown[], R = unknown>(
+    id: string,
+    handler: (...args: A) => R | Promise<R>,
+    meta?: Partial<CommandMeta>,
+  ): Disposable;
   execute<T = unknown>(id: string, ...args: unknown[]): Promise<T>;
   use(mw: CommandMiddleware): Disposable;
   has(id: string): boolean;

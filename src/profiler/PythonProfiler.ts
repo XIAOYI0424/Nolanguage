@@ -25,6 +25,17 @@ interface RawRow {
   cumtimeMs: number;
 }
 
+/** One node of the call tree the bootstrap writes under `flame`. */
+interface RawFrame {
+  name: string;
+  file: string;
+  line: number;
+  selfMs: number;
+  totalMs: number;
+  calls: number;
+  children: RawFrame[];
+}
+
 const WRAPPER = new Map<string, string>();
 
 async function wrapperPath(): Promise<string> {
@@ -95,7 +106,16 @@ export class PythonProfiler {
     });
     clearTimeout(timer);
 
-    let parsed: { wallMs: number; ok: boolean; error: string | null; stdout: string; stderr: string; rows: RawRow[] } | null = null;
+    let parsed: {
+      wallMs: number;
+      ok: boolean;
+      error: string | null;
+      stdout: string;
+      stderr: string;
+      rows: RawRow[];
+      /** Call tree for the flamegraph; absent when pstats had no callers. */
+      flame?: RawFrame[];
+    } | null = null;
     try {
       parsed = JSON.parse(await readFile(outPath, 'utf8'));
     } catch {
@@ -151,16 +171,8 @@ function round(n: number): number {
 }
 
 /** Recursively round the timings in a call-tree frame. */
-function roundFrame(f: {
-  name: string;
-  file: string;
-  line: number;
-  selfMs: number;
-  totalMs: number;
-  calls: number;
-  children: unknown[];
-}): import('./types.js').ProfileFrame {
-  const kids = (f.children as unknown[]).map((c) => roundFrame(c as Parameters<typeof roundFrame>[0]));
+function roundFrame(f: RawFrame): import('./types.js').ProfileFrame {
+  const kids = f.children.map((c) => roundFrame(c));
   return {
     name: f.name,
     file: f.file,

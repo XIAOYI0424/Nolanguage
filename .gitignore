@@ -26,6 +26,10 @@ build-to-exe.bat
 # Scratch space for the verification suites (packaged-exe sandbox, explorer
 # workspace, ad-hoc probes). Never committed.
 .tmp/
+tmp/
+.tmpdiag/
+.test-run.*
+.verify-run.*
 tests/phase1.test.ts
 .workbuddy-ai/memory/2026-10-15.md
 .workbuddy-ai/memory/2026-10-17.md
@@ -44,3 +48,6 @@ docs/添加新语言指南.md
 installer/build-nsis.bat
 .gitignore
 installer/payload/Nolanguage.exe
+installer/payload/uninstaller.exe
+installer/uninstaller/target/
+installer/.build/

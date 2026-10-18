@@ -1,4 +1,4 @@
-import type { IKernel } from './types.js';
+import type { Kernel } from '../kernel/types.js';
 import { LogPipeline } from './LogPipeline.js';
 import { LogFactory } from './LogFactory.js';
 import { LogSampler } from './LogSampler.js';
@@ -32,7 +32,7 @@ export class LogSpine {
     this.opts = opts;
   }
 
-  install(kernel: IKernel): void {
+  install(kernel: Kernel): void {
     this.pipeline = new LogPipeline({ minLevel: this.opts.level ?? LogLevel.TRACE });
     if (!this.opts.silent) {
       this.pipeline.addTransport(new ConsoleTransport({ pretty: this.opts.pretty ?? true }));
@@ -57,7 +57,7 @@ export class LogSpine {
 
 /** Built-in collector: wraps every command with a span and logs start/done/error. */
 class KernelLogCollector {
-  install(kernel: IKernel): void {
+  install(kernel: Kernel): void {
     kernel.commands.use(async (ctx, next) => {
       const span = kernel.tracer.startSpan('command', { attributes: { name: ctx.id } });
       const log: Logger = kernel.logger.forComponent('kernel.command-bus').span(span);

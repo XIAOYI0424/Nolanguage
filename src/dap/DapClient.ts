@@ -193,11 +193,14 @@ export class DapClient {
   }
 
   /** Server-initiated traffic: events, plus the odd reverse request. */
-  private onInbound(msg: { method?: string; id?: number; params?: unknown }): void {
+  private onInbound(msg: { method?: string; id?: number | string; params?: unknown }): void {
     if (msg.id !== undefined && msg.method) {
       // A reverse request (runInTerminal, startDebugging). Answer so the adapter
-      // is not left hanging on a promise it will never get.
-      this.conn?.respondError(msg.id, -32601, `reverse request not supported: ${msg.method}`);
+      // is not left hanging on a promise it will never get. DAP ids are numeric;
+      // a string id cannot be answered through `respondError`, so it is skipped.
+      if (typeof msg.id === 'number') {
+        this.conn?.respondError(msg.id, -32601, `reverse request not supported: ${msg.method}`);
+      }
       return;
     }
     if (!msg.method) return;

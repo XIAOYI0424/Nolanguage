@@ -13,11 +13,12 @@
  * The hub is transport-agnostic: it only knows how to `send(payload)` to a
  * sink. The WebSocket server (panel/server.ts) registers a sink per socket.
  */
-import { LogLevel, LOG_LEVEL_NAMES } from '../log/LogLevel.js';
+import { LogLevel, LOG_LEVEL_NAMES, LOG_LEVEL_VALUES } from '../log/LogLevel.js';
 import type { LogRecord } from '../log/types.js';
 import type { MetricSummary } from '../perf/LiveMetrics.js';
 import type { PerfRecord } from '../perf/types.js';
 import type { Kernel } from '../kernel/Kernel.js';
+import type { Disposable } from '../kernel/types.js';
 import type { ExtensionPanelInfo } from '../extensions/ExtensionManager.js';
 import type { FsEntry, FsFile } from './FsService.js';
 
@@ -200,7 +201,9 @@ export class PanelHub {
   private logCursor = 0;
   private slowBuffer: SlowEntry[] = [];
   private opts: Required<PanelHubOptions>;
-  private unsubscribe: (() => void)[] = [];
+  // Two shapes come back from the kernel: `EventBus.on` returns a `Disposable`
+  // object, `Kernel.onLogRecord` returns a bare unsubscribe function.
+  private unsubscribe: Array<Disposable | (() => void)> = [];
 
   constructor(
     private kernel: Kernel,
@@ -229,7 +232,7 @@ export class PanelHub {
       os: this.kernel.env.os,
       arch: this.kernel.env.arch,
       pushIntervalMs: this.opts.pushIntervalMs,
-      levels: LOG_LEVEL_NAMES,
+      levels: LOG_LEVEL_VALUES,
       commands: this.kernel.commands.list().map((c) => ({ id: c.id, title: c.title })),
     });
     // Immediate snapshot so the UI is never blank.
@@ -308,7 +311,10 @@ export class PanelHub {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    for (const off of this.unsubscribe) off();
+    for (const off of this.unsubscribe) {
+      if (typeof off === 'function') off();
+      else off.dispose();
+    }
     this.unsubscribe = [];
   }
 

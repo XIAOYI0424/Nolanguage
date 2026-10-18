@@ -110,6 +110,23 @@ check('self-contained: no CDN host', !/(unpkg|jsdelivr|cdnjs|googleapis)/i.test(
 check('self-contained: no absolute http(s) reference', !/(src|href)=["']https?:/i.test(html));
 check('theme: ships Darcula as the default', /data-theme="darcula"/.test(html));
 check('theme: ships a Light variant', /\[data-theme="light"\]/.test(html));
+
+// ---- native-app hardening: the browser must not leak native UI -----------
+// The Rust shell disables context menus / DevTools / zoom / script dialogs at
+// the WebView2 level; these assert the *page* half of the same contract, which
+// is what protects the browser-hosted form.
+check('hardening: no <form> element', !/<form[\s>]/i.test(html));
+check('hardening: no anchor navigation', !/<a\s[^>]*href=/i.test(html));
+check('hardening: no file input', !/<input[^>]+type=["']file/i.test(html));
+check('hardening: no blob URLs', !/createObjectURL/.test(html));
+check('hardening: no drag-drop file reads', !/dataTransfer\.files/.test(html));
+check('hardening: script dialogs replaced', /window\.alert\s*=/.test(html) && /window\.confirm\s*=/.test(html));
+check('hardening: CSS disables selection outside inputs', /user-select:\s*none/.test(html));
+check('hardening: CSS keeps the page from scrolling', /overflow:\s*hidden/.test(html));
+check('hardening: Ctrl+wheel zoom blocked', /e\.ctrlKey/.test(html));
+// Revealing the hidden window is the Rust shell's job (`on_page_load`); the
+// page must not add a second IPC command for it.
+check('hardening: page never calls window|show', !/plugin:window\|show/.test(html));
 // The code background must be a pure colour: the indent-guide gradient overlay
 // was removed on purpose (user request), so it must NOT be present.
 check('editor: code background is solid (no indent-guide gradient)',

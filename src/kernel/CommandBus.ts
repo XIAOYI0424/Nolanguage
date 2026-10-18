@@ -10,11 +10,17 @@ export class CommandBusImpl implements CommandBus {
   private handlers = new Map<string, { handler: CommandHandler; meta: CommandMeta }>();
   private middlewares: CommandMiddleware[] = [];
 
-  register(id: string, handler: CommandHandler, meta?: Partial<CommandMeta>): Disposable {
+  register<A extends unknown[] = unknown[], R = unknown>(
+    id: string,
+    handler: (...args: A) => R | Promise<R>,
+    meta?: Partial<CommandMeta>,
+  ): Disposable {
     if (this.handlers.has(id)) {
       throw new Error(`Command already registered: ${id}`);
     }
-    this.handlers.set(id, { handler, meta: { id, ...meta } });
+    // The bus dispatches positionally, so a typed handler is safe to store as
+    // the loose shape; `execute` is the only caller.
+    this.handlers.set(id, { handler: handler as unknown as CommandHandler, meta: { id, ...meta } });
     return { dispose: () => { this.handlers.delete(id); } };
   }
 

@@ -28,7 +28,7 @@ export class EventBusImpl implements EventBus {
   once<T = unknown>(event: string, handler: EventHandler<T>): Disposable {
     const wrap: EventHandler = (p) => {
       this.off(event, wrap);
-      return handler(p);
+      return handler(p as T);
     };
     return this.on(event, wrap);
   }

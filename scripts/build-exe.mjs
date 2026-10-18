@@ -213,12 +213,45 @@ function inject(blob) {
   );
 }
 
+// ------------------------------------------------------- 5. no console window
+
+/**
+ * Rewrite the PE `Subsystem` field to GUI (2).
+ *
+ * A Node SEA is a *console* image copied from node.exe, so Windows allocates a
+ * console window for it on every launch — a black box that sits in front of the
+ * app and prints kernel logs. There is no runtime API to opt out of a console
+ * the loader already created, so the header is patched at build time; the image
+ * is otherwise unchanged and Node runs normally (its stdio handles are simply
+ * invalid, which is the same situation as `node --no-warnings` under a service).
+ *
+ * Both layouts put `Subsystem` at optional-header + 68.
+ */
+function setGuiSubsystem(exePath) {
+  const image = readFileSync(exePath);
+  const peOffset = image.readUInt32LE(0x3c);
+  if (image.readUInt32LE(peOffset) !== 0x00004550) {
+    fail(`${exePath} is not a PE image (missing PE\0\0)`);
+  }
+  const optionalHeader = peOffset + 24;
+  const subsystemOffset = optionalHeader + 68;
+  const was = image.readUInt16LE(subsystemOffset);
+  if (was === 2) {
+    log('PE subsystem already GUI');
+    return;
+  }
+  image.writeUInt16LE(2, subsystemOffset);
+  writeFileSync(exePath, image);
+  log(`PE subsystem ${was} (console) -> 2 (GUI): no console window on launch`);
+}
+
 // -------------------------------------------------------------------- main
 
 rmSync(BUILD, { recursive: true, force: true });
 const entry = await bundle();
 const blob = seaBlob(entry);
 inject(blob);
+setGuiSubsystem(EXE);
 
 // Files that must live next to the exe rather than inside the blob.
 const readme = join(ROOT, 'README.md');

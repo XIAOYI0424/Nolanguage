@@ -517,7 +517,9 @@ const INSERT_PERF_SQL =
   `VALUES (${PERF_COLUMNS.map(() => '?').join(', ')})`;
 
 function toPerfParams(r: PerfRecord, now = Date.now()): SqlValue[] {
-  const any = r as Record<string, unknown>;
+  // `PerfRecord` carries a closed metric shape (`PerfMetric`) with no index
+  // signature, so the widening has to go through `unknown`.
+  const any = r as unknown as Record<string, unknown>;
   return [
     r.id,
     r.timestamp ?? now,

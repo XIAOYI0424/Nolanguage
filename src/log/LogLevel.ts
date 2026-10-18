@@ -20,6 +20,18 @@ export const LOG_LEVEL_NAMES: Record<LogLevel, string> = {
   [LogLevel.METRIC]: 'METRIC',
 };
 
+/**
+ * Reverse of `LOG_LEVEL_NAMES`: level **name → numeric severity**.
+ *
+ * This is the shape the panel wire protocol uses (`hello.levels`), because the
+ * browser side needs to map a filter name back to a comparable number.
+ * `LOG_LEVEL_NAMES` is the other direction (number → name) and must not be sent
+ * as-is.
+ */
+export const LOG_LEVEL_VALUES: Record<string, number> = Object.fromEntries(
+  Object.entries(LOG_LEVEL_NAMES).map(([value, name]) => [name, Number(value)]),
+);
+
 /** Case-insensitive name → numeric level. Returns INFO for unknown names. */
 export function levelFromName(name: string): LogLevel {
   const upper = name.trim().toUpperCase();

@@ -17,19 +17,23 @@
 //! newline-delimited JSON. It never inspects a `kind`, which keeps every
 //! semantic decision (and therefore every bug) on the TypeScript side.
 //!
-//! The sidecar is the same `Nolanguage.exe` the desktop entry uses, started with
+//! The sidecar is `NolanguageEngine.exe` — the same executable `npm run build:exe`
+//! produces (`dist/Nolanguage.exe`, renamed by the bundle step) — started with
 //! `--panel-stdio`. See `src/panel/Transport.ts` for the engine half of this
 //! contract and `scripts/verify-transport.ts` for the proof that the two
 //! transports are interchangeable.
 //!
 //! # Status
 //!
-//! This file has **not** been compiled: the machine it was written on has no
-//! Rust toolchain (`cargo` is absent), so it is reviewed-by-eye code. The API
-//! surface it uses (`tauri::AppHandle::shell`, `CommandEvent`, `CommandChild`)
-//! is Tauri v2's; run `cargo check` in `src-tauri/` before trusting it, and fix
-//! whatever the compiler says — it is ~120 lines, and the intent is the part
-//! that matters.
+//! Verified end to end: `cargo check` and `tauri build` succeed, and the
+//! packaged NSIS installer starts `NolanguageEngine.exe` beside the shell
+//! (recorded in `逻辑文档/20261018_安装与语言支持方案现状.md`). The API surface
+//! used here — `tauri::AppHandle::shell`, `CommandEvent`, `CommandChild` — is
+//! Tauri v2's, matching the pinned 2.12.x.
+//!
+//! History: the first revision of this header said the file had been written
+//! without a Rust toolchain present and therefore reviewed by eye only. That
+//! caveat is obsolete; it is kept here as history rather than as a warning.
 
 use std::sync::Mutex;
 
@@ -59,30 +63,44 @@ pub struct Engine {
 /// computed and checked here, before anything is spawned.
 fn sidecar_path() -> Result<std::path::PathBuf, String> {
     let triple = option_env!("TAURI_ENV_TARGET_TRIPLE").unwrap_or("x86_64-pc-windows-msvc");
-    let file = if cfg!(windows) {
-        format!("Nolanguage-{triple}.exe")
+    // Deliberately *not* `Nolanguage-<triple>`: on a case-insensitive
+    // filesystem that base name collides with the app's own `nolanguage.exe`
+    // in the installer (`File /oname=Nolanguage.exe`), so the sidecar would
+    // overwrite the shell. `NolanguageEngine` is a distinct component.
+    //
+    // A bundled installer strips the target triple (`NolanguageEngine.exe`),
+    // while a raw `tauri dev` / `cargo build` tree keeps it. Accept either.
+    let names: Vec<String> = if cfg!(windows) {
+        vec![
+            "NolanguageEngine.exe".to_string(),
+            format!("NolanguageEngine-{triple}.exe"),
+        ]
     } else {
-        format!("Nolanguage-{triple}")
+        vec!["NolanguageEngine".to_string(), format!("NolanguageEngine-{triple}")]
     };
     let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
     let dir = exe.parent().ok_or_else(|| "executable has no parent directory".to_string())?;
-    let candidate = dir.join(&file);
-    if !candidate.is_file() {
-        return Err(format!(
-            "engine sidecar not found at {} — build it (npm run build:exe) and place it next to the app; \
-             `tauri dev` / `tauri build` do this for you",
-            candidate.display()
-        ));
-    }
     let self_path = exe.canonicalize().map_err(|e| e.to_string())?;
-    let resolved = candidate.canonicalize().map_err(|e| e.to_string())?;
-    if resolved == self_path {
-        return Err(format!(
-            "{} resolves to this executable — refusing to spawn it (that would fork the app)",
-            candidate.display()
-        ));
+    for name in &names {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        let resolved = candidate.canonicalize().map_err(|e| e.to_string())?;
+        if resolved == self_path {
+            return Err(format!(
+                "{} resolves to this executable — refusing to spawn it (that would fork the app)",
+                candidate.display()
+            ));
+        }
+        return Ok(candidate);
     }
-    Ok(candidate)
+    Err(format!(
+        "engine sidecar not found next to {} (looked for: {}) — build it with `npm run build:exe` \
+         and place it there; `tauri dev` / `tauri build` do this for you",
+        dir.display(),
+        names.join(", ")
+    ))
 }
 
 /// Spawn the sidecar and start pumping its stdout into webview events.

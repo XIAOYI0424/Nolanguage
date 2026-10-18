@@ -60,7 +60,7 @@ npm run tauri build        # → target/release/bundle/msi/*.msi + bundle/nsis/*
 To run the release binary by hand (no installer):
 
 ```bash
-cp dist/Nolanguage.exe target/release/Nolanguage-x86_64-pc-windows-msvc.exe
+cp dist/Nolanguage.exe target/release/NolanguageEngine-x86_64-pc-windows-msvc.exe
 ./target/release/nolanguage.exe
 ```
 
@@ -75,15 +75,17 @@ npm run build:frontend          # → frontend/dist/index.html
 
 # 2. the engine sidecar, named the way Tauri's externalBin requires
 npm run build:exe               # → dist/Nolanguage.exe
-cp dist/Nolanguage.exe binaries/Nolanguage-x86_64-pc-windows-msvc.exe
+cp dist/Nolanguage.exe binaries/NolanguageEngine-x86_64-pc-windows-msvc.exe
 
 # 3. the shell
 npm run tauri build             # → target/release/bundle/
 ```
 
-`externalBin` names `binaries/Nolanguage`; Tauri appends the target triple
+`externalBin` names `binaries/NolanguageEngine`; Tauri appends the target triple
 itself, so the file on disk must carry it
-(`Nolanguage-x86_64-pc-windows-msvc.exe`).
+(`NolanguageEngine-x86_64-pc-windows-msvc.exe`). The bundled installer strips the
+triple, so `engine.rs` accepts either name at runtime
+(`NolanguageEngine.exe` or `NolanguageEngine-<triple>.exe`).
 
 ### Running a bare `cargo build` output
 
@@ -92,7 +94,7 @@ embed `frontendDist`, it loads `devUrl`, and it expects the sidecar next to the
 exe. So to run `target/debug/nolanguage.exe` directly:
 
 ```bash
-cp dist/Nolanguage.exe target/debug/Nolanguage-x86_64-pc-windows-msvc.exe
+cp dist/Nolanguage.exe target/debug/NolanguageEngine-x86_64-pc-windows-msvc.exe
 node scripts/serve-dist.mjs &          # the devUrl server
 ./target/debug/nolanguage.exe
 ```

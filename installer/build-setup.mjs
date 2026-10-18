@@ -1,125 +1,99 @@
 /**
- * Build a standalone Windows installer (Nolanguage-Setup.exe) as a Node Single
- * Executable Application, using the same isolated toolchain as build-exe.mjs.
+ * Build the Nolanguage installer — `installer/Nolanguage-Setup.exe`.
  *
  *   node installer/build-setup.mjs
  *
- * Produces installer/Nolanguage-Setup.exe. The installer reads the application
- * executable from a sibling payload/Nolanguage.exe at runtime, so no third-party
- * packager (NSIS / WiX / makensis) is required.
+ * The installer is built with NSIS from `installer/Nolanguage.nsi`, which is a
+ * normal Windows wizard: 欢迎页 → 选择安装目录 → 实时进度 → 完成页.
+ *
+ * # Why not the old Node SEA installer
+ *
+ * It used to be a Node Single Executable Application that unpacked the app on
+ * launch. An SEA inherits Node's *console* subsystem, so double-clicking it
+ * always flashed a black console window, and it had no way to draw a UI — no
+ * directory picker, no progress. NSIS is a GUI-subsystem executable: no console
+ * window, real pages, and a progress bar that advances as files are written.
+ *
+ * # Toolchain
+ *
+ * `makensis` is taken from (in order):
+ *   1. `%NSIS_MAKENSIS%`
+ *   2. the copy the Tauri CLI downloads (`%LOCALAPPDATA%\tauri\NSIS`)
+ *   3. `makensis` on `PATH`
+ *   4. `C:\Program Files (x86)\NSIS`
+ *
+ * The app image (`dist/Nolanguage.exe`) is rebuilt only when it is missing —
+ * run `npm run build:exe` yourself when `src/` changed.
  */
-import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdirSync, copyFileSync, existsSync, rmSync, statSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { createRequire } from 'node:module';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const INSTALLER = join(ROOT, 'installer');
-const DIST = join(INSTALLER, 'Nolanguage-Setup.exe');
-const BUILD = join(INSTALLER, '.build');
-const NODE = process.execPath;
-const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
+// `NOLANGUAGE_APP_EXE` lets `installer\build-nsis.bat <exe>` package another build.
+const APP_EXE = process.env.NOLANGUAGE_APP_EXE
+  ? resolve(process.env.NOLANGUAGE_APP_EXE)
+  : join(ROOT, 'dist', 'Nolanguage.exe');
+const SCRIPT = join(ROOT, 'installer', 'Nolanguage.nsi');
+const SETUP = join(ROOT, 'installer', 'Nolanguage-Setup.exe');
 
 const log = (...a) => console.log('[build-setup]', ...a);
-
-const projectRequire = createRequire(join(ROOT, 'package.json'));
-function toolRequire(name) {
-  try {
-    return createRequire(join(TOOLS, 'package.json'))(name);
-  } catch {
-    return projectRequire(name);
-  }
-}
-let esbuild;
-try {
-  esbuild = toolRequire('esbuild');
-} catch {
-  log('esbuild not found — run: npm i --no-save esbuild');
+const fail = (m) => {
+  console.error(`[build-setup] ${m}`);
   process.exit(1);
-}
-let postjectCli = '';
-try {
-  postjectCli = createRequire(join(TOOLS, 'package.json')).resolve('postject/dist/cli.js');
-} catch {
-  try {
-    postjectCli = projectRequire.resolve('postject/dist/cli.js');
-  } catch {
-    postjectCli = '';
-  }
-}
-if (!postjectCli || !existsSync(postjectCli)) {
-  log('postject not found — run: npm i --no-save postject');
-  process.exit(1);
-}
-
-const resolveExtPlugin = {
-  name: 'nolanguage-resolve',
-  setup(build) {
-    build.onResolve({ filter: /^\.[^?]*$/ }, (args) => {
-      const abs = resolve(args.resolveDir, args.path);
-      if (abs.endsWith('.js') && !existsSync(abs) && existsSync(`${abs.slice(0, -3)}.ts`)) {
-        return { path: `${abs.slice(0, -3)}.ts` };
-      }
-      return null;
-    });
-  },
 };
 
-async function bundle() {
-  mkdirSync(BUILD, { recursive: true });
-  const target = join(BUILD, 'setup.embedded.cjs');
-  await esbuild.build({
-    entryPoints: [join(INSTALLER, 'setup-entry.ts')],
-    bundle: true,
-    platform: 'node',
-    target: 'node22',
-    format: 'cjs',
-    outfile: target,
-    logLevel: 'warning',
-    sourcemap: 'inline',
-    external: ['node:*'],
-    plugins: [resolveExtPlugin],
+/** First existing `makensis.exe` among the known locations, or undefined. */
+function findMakensis() {
+  const local = process.env.LOCALAPPDATA ?? '';
+  const candidates = [
+    process.env.NSIS_MAKENSIS,
+    local && join(local, 'tauri', 'NSIS', 'makensis.exe'),
+    'C:\\Program Files (x86)\\NSIS\\makensis.exe',
+    'C:\\Program Files\\NSIS\\makensis.exe',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  const which = spawnSync('where', ['makensis'], { encoding: 'utf8', windowsHide: true });
+  const found = (which.stdout ?? '').split(/\r?\n/).find((line) => line.trim().length > 0);
+  return found ? found.trim() : undefined;
+}
+
+if (!existsSync(APP_EXE)) {
+  log('dist/Nolanguage.exe missing — building it first');
+  execFileSync(process.execPath, [join(ROOT, 'scripts', 'build-exe.mjs')], {
+    cwd: ROOT,
+    stdio: 'inherit',
   });
-  log(`bundled -> ${target} (${statSync(target).size / 1024} KiB)`);
-  return target;
 }
+if (!existsSync(APP_EXE)) fail(`still missing: ${APP_EXE}`);
 
-function seaBlob(entry) {
-  const configPath = join(BUILD, 'sea-config.json');
-  writeFileSync(
-    configPath,
-    JSON.stringify(
-      {
-        main: entry,
-        output: join(BUILD, 'sea-prep.blob'),
-        disableExperimentalSEAWarning: true,
-        useSnapshot: false,
-        useCodeCache: true,
-      },
-      null,
-      2,
-    ),
-  );
-  log('generating SEA blob');
-  execFileSync(NODE, ['--experimental-sea-config', configPath], { cwd: ROOT, stdio: 'inherit' });
-  return join(BUILD, 'sea-prep.blob');
-}
-
-function inject(blob) {
-  mkdirSync(INSTALLER, { recursive: true });
-  copyFileSync(NODE, DIST);
-  log(`injecting NODE_SEA_BLOB into ${DIST}`);
-  execFileSync(
-    NODE,
-    [postjectCli, DIST, 'NODE_SEA_BLOB', blob, '--sentinel-fuse', 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2'],
-    { cwd: ROOT, stdio: 'inherit' },
+const makensis = findMakensis();
+if (!makensis) {
+  fail(
+    'makensis not found. Install NSIS (https://nsis.sourceforge.io) or run ' +
+      '`npx tauri build` once (the Tauri CLI downloads it), or set NSIS_MAKENSIS.',
   );
 }
 
-rmSync(BUILD, { recursive: true, force: true });
-const entry = await bundle();
-const blob = seaBlob(entry);
-inject(blob);
-log(`done -> ${DIST} (${(statSync(DIST).size / 1024 / 1024).toFixed(1)} MiB)`);
-log('to ship: place Nolanguage.exe in installer/payload/ next to this setup.');
+log(`makensis  : ${makensis}`);
+log(`app image : ${APP_EXE} (${(statSync(APP_EXE).size / 1024 / 1024).toFixed(1)} MiB)`);
+
+// `-INPUTCHARSET UTF8`: the script is UTF-8 (Chinese UI strings). NSIS would
+// otherwise read it as the ANSI code page and garble every label.
+const args = [
+  '-INPUTCHARSET',
+  'UTF8',
+  `/DAPP_EXE=${APP_EXE}`,
+  `/DOUTFILE=${SETUP}`,
+  SCRIPT,
+];
+log('running makensis…');
+const r = spawnSync(makensis, args, { cwd: ROOT, stdio: 'inherit', windowsHide: true });
+if (r.status !== 0) fail(`makensis failed (exit ${r.status})`);
+if (!existsSync(SETUP)) fail(`no output at ${SETUP}`);
+
+log(`done -> ${SETUP} (${(statSync(SETUP).size / 1024 / 1024).toFixed(1)} MiB)`);
+log('double-click to install: 选择目录 → 实时进度 → 完成。');

@@ -7,7 +7,7 @@
     "frontendDist": "../frontend/dist",
     "devUrl": "http://127.0.0.1:1420",
     "beforeDevCommand": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types ./scripts/build-frontend.mjs && node ./scripts/serve-dist.mjs",
-    "beforeBuildCommand": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types ./scripts/build-frontend.mjs"
+    "beforeBuildCommand": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types ./scripts/build-frontend.mjs && node ./scripts/sync-sidecar.mjs"
   },
   "app": {
     "withGlobalTauri": true,
@@ -20,7 +20,12 @@
         "minHeight": 600,
         "dragDropEnabled": true,
         "decorations": false,
-        "center": true
+        "center": true,
+        "visible": false,
+        "devtools": false,
+        "zoomHotkeysEnabled": false,
+        "backgroundColor": "#1E1F22",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,TranslateUI"
       }
     ],
     "security": {
@@ -30,7 +35,7 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
-    "externalBin": ["binaries/Nolanguage"],
+    "externalBin": ["binaries/NolanguageEngine"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

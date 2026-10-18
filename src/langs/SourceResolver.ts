@@ -188,11 +188,11 @@ async function safeRm(path: string): Promise<void> {
 async function finish(dir: string, origin: string, kind: SourceKind): Promise<ResolvedSource> {
   const root = join(dir, 'manifest.json');
   if (existsSync(root)) return { dir, temp: true, origin, kind };
-  let entries;
+  let entries: Array<import('node:fs').Dirent> = [];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    entries = [];
+    // Unreadable directory: fall through to the "no manifest" error below.
   }
   const folders = entries.filter((e) => e.isDirectory());
   for (const folder of folders) {

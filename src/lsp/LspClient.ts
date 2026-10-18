@@ -367,7 +367,8 @@ export class LspClient extends EventEmitter {
       span?.setAttribute('items', items.length).end();
       return items;
     } catch (err) {
-      span?.recordException(err as Error).end();
+      span?.recordException(err as Error);
+      span?.end();
       log?.error('Completion failed', { file: uri }, err as Error);
       throw err;
     }

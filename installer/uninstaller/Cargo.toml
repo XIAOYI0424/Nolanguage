@@ -1,0 +1,18 @@
+[package]
+name = "nolanguage-uninstaller"
+version = "1.0.0"
+edition = "2021"
+description = "Nolanguage native uninstaller — zero third-party dependencies"
+
+[[bin]]
+name = "uninstaller"
+path = "src/main.rs"
+
+# Small, self-contained binary: no third-party crates, so `cargo build` works
+# offline and the result is a few hundred KB rather than a Node SEA (~50 MB).
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

@@ -9,7 +9,16 @@
 import type { Kernel } from '../kernel/Kernel.js';
 import type { LanguageManifest } from '../langs/manifest.js';
 import { discoverBinary } from '../langs/discover.js';
-import { DapClient, type DapLaunch, type DapHandlers, type DapSession } from './DapClient.js';
+import {
+  DapClient,
+  type DapCapabilities,
+  type DapHandlers,
+  type DapLaunch,
+  type DapScope,
+  type DapSession,
+  type DapStackFrame,
+  type DapVariable,
+} from './DapClient.js';
 
 export interface ResolvedDebugAdapter {
   adapter: string;

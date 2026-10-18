@@ -4,7 +4,6 @@ import type { Logger } from './log/Logger.js';
 import { SqliteStore } from './store/SqliteStore.js';
 import { runLogQuery, aggregateLogs } from './store/LogQuery.js';
 import { BaselineStore } from './perf/BaselineStore.js';
-import type { SqliteStore } from './store/SqliteStore.js';
 
 /**
  * Stage-1 demonstration: three buses + performance spine (auto-instrumentation)

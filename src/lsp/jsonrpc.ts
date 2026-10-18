@@ -62,7 +62,10 @@ interface Pending {
 export class JsonRpcConnection extends EventEmitter {
   private nextId = 1;
   private pending = new Map<number, Pending>();
-  private stdoutBuf = Buffer.alloc(0);
+  // Explicitly `Buffer` (== `Buffer<ArrayBufferLike>`): `chunk` and
+  // `subarray()` both widen to `ArrayBufferLike`, and inferring the narrow
+  // `Buffer<ArrayBuffer>` from `alloc(0)` rejects them.
+  private stdoutBuf: Buffer = Buffer.alloc(0);
   private closed = false;
   private opts: Required<Pick<RpcClientOptions, 'timeoutMs'>> & RpcClientOptions;
 

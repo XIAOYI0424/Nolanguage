@@ -22,8 +22,10 @@ export type {
   EventHandler, EventBus,
   ServiceLifecycle, ServiceOptions, ServiceContext, ServiceFactory, ServiceRegistry,
   LogResourceScope, LogCorrelation,
-  ViewContribution, ViewRegistry,
-  LanguageContribution, LanguageRegistry,
+  // Aliased: the extension host exports its own `ViewContribution` /
+  // `LanguageContribution` (manifest shapes) further down this file.
+  ViewContribution as KernelViewContribution, ViewRegistry,
+  LanguageContribution as KernelLanguageContribution, LanguageRegistry,
   ConfigScope, Configuration,
   LoggerFactory,
 } from './kernel/types.js';
