@@ -64,7 +64,16 @@ npm run build:setup               # → installer/Nolanguage-Setup.exe
 
 静默安装（CI / 脚本）：`Nolanguage-Setup.exe /S /D=C:\path\to\dir`（`/D` 必须是最后一个参数）。
 
-卸载：设置 → 应用 → Nolanguage，或安装目录里的 `uninstall.exe`。卸载会**先按 receipt 还原用户 PATH**，再结束正在运行的应用、删除程序文件与快捷方式、清理注册表；用户数据（`~/.nolanguage`，含插件、WebView 配置与遥测数据库）会保留。
+卸载：设置 → 应用 → Nolanguage，或安装目录里的 `uninstall.exe`。卸载会**先按 receipt 还原用户 PATH**，再结束正在运行的应用、删除程序文件与快捷方式、清理注册表。
+
+数据位置（都不在安装目录里，因此卸载能干净删掉程序目录）：
+
+| 路径 | 内容 | 卸载时 |
+|---|---|---|
+| `%LOCALAPPDATA%\Nolanguage\` | 遥测数据库 `telemetry.db`、WebView2 配置 `webview\`、`install-receipt.json` | 保留数据；receipt 删除 |
+| `~\.nolanguage\` | 语言插件（`builtin\`、`languages\`、`overrides\`、`data\`）、`config.json` | 保留 |
+
+> 0.6 之前 WebView 配置与遥测数据库写在 `<安装目录>\.nolanguage`，WebView2 会锁住其中文件，卸载后目录残留。现在两者都改到 `%LOCALAPPDATA%\Nolanguage`（可用 `NOLANGUAGE_DATA` 覆盖根目录）。
 
 ## 方式一：PowerShell 安装器（无需任何工具链，立即可用）
 

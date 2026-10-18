@@ -6,6 +6,7 @@ import { LogLevel } from '../log/LogLevel.js';
 import type { LogRecord } from '../log/types.js';
 import type { PerfRecord } from '../perf/types.js';
 import type { BaselineRecord } from '../perf/BaselineStore.js';
+import { appDataPath } from '../util/appData.js';
 
 /**
  * SQLite warm tier (Stage 6 · 基线系统, spec 20.3 / 20.4 / 十三).
@@ -193,7 +194,7 @@ export class SqliteStore {
   private readonly cache = new Map<string, ReturnType<DatabaseSync['prepare']>>();
 
   constructor(opts: SqliteStoreOptions = {}) {
-    this.path = opts.path ?? defaultDbPath();
+    this.path = opts.path ?? telemetryDbPath();
     if (this.path !== ':memory:') mkdirSync(dirname(this.path), { recursive: true });
     this.db = new DatabaseSync(this.path);
     this.retentionDays = opts.retentionDays ?? 30;
@@ -605,13 +606,17 @@ function hostId(): string {
   return cachedHostId;
 }
 
-function defaultDbPath(): string {
+/**
+ * The telemetry database used when the caller asks for "the default store".
+ *
+ * Packaged builds write to `%LOCALAPPDATA%\Nolanguage` rather than beside the
+ * executable: the install directory is removed wholesale on uninstall, and the
+ * SQLite WAL files are exactly the kind of thing that is still held by a dying
+ * process. Dev runs keep the historical `<cwd>/.nolanguage`.
+ */
+export function telemetryDbPath(): string {
   if (process.env.NOLANGUAGE_DB) return process.env.NOLANGUAGE_DB;
-  // Packaged build: keep telemetry next to the executable instead of whatever
-  // directory Explorer happened to open from.
-  if (process.env.NOLANGUAGE_PACKAGED === '1') {
-    return join(dirname(process.execPath), '.nolanguage', 'telemetry.db');
-  }
+  if (process.env.NOLANGUAGE_PACKAGED === '1') return appDataPath('telemetry.db');
   return join(process.cwd(), '.nolanguage', 'telemetry.db');
 }
 

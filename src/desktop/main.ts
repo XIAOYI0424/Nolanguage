@@ -184,8 +184,10 @@ async function main(): Promise<void> {
     if (view.engine === 'none') openSystemBrowser(`${base}/`);
   }
 
-  const store = process.env.NOLANGUAGE_DB
-    ?? join(dirname(process.execPath), '.nolanguage', 'telemetry.db');
+  // Same resolution the store itself uses, so the banner never advertises a
+  // path the database does not actually occupy.
+  const { telemetryDbPath } = await import('../store/SqliteStore.js');
+  const store = telemetryDbPath();
 
   process.stdout.write(
     `\n` +

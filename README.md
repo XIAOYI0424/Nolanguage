@@ -38,6 +38,8 @@ Python 语言插件已随包内置（`builtin/python@1.0.0`），装完即可新
 
 主目录可用 `NOLANGUAGE_HOME` 或 `--home <dir>` 改写；`LANG_DIR`（`:`/`;` 分隔）可追加只读插件根。
 
+应用自身状态（遥测数据库、WebView2 配置）不在上面这两个目录里，而在 `%LOCALAPPDATA%\Nolanguage`（可用 `NOLANGUAGE_DATA` 覆盖），这样卸载删程序目录时不会被 WebView 锁住的缓存拖住。
+
 ### 语言插件命令
 
 两个入口，同一实现（`src/cli/lang.ts`）：安装即校验、迁移先于覆盖、`data/<id>/` 不被复制覆盖。

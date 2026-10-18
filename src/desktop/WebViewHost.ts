@@ -45,6 +45,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { appDataPath } from '../util/appData.js';
 import { isPackaged } from './embeddedAssets.js';
 
 /** Where the WebView engine binaries typically live on Windows. */
@@ -140,22 +141,17 @@ function compareVersions(a: number[], b: number[]): number {
  *
  * Location preference:
  *   - `NOLANGUAGE_WEBVIEW_PROFILE` when the operator wants to pin it;
- *   - `<exe dir>/.nolanguage/webview` in a packaged build — beside the
- *     telemetry database, so an unzip-and-run deployment stays self-contained;
- *   - `%LOCALAPPDATA%/Nolanguage/webview` in dev, falling back to temp when
- *     LOCALAPPDATA is not set.
+ *   - `%LOCALAPPDATA%/Nolanguage/webview` — the app data root, the same one the
+ *     telemetry database uses. It used to live beside the executable in a
+ *     packaged build, which left a locked profile behind in the install
+ *     directory on every uninstall;
+ *   - temp, when the app data root cannot be created.
  */
 export function webViewProfileDir(): string {
   const override = process.env.NOLANGUAGE_WEBVIEW_PROFILE;
   if (override) return override;
 
-  let base: string;
-  if (isPackaged()) {
-    base = join(dirname(process.execPath), '.nolanguage', 'webview');
-  } else {
-    const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    base = join(local, 'Nolanguage', 'webview');
-  }
+  let base = appDataPath('webview');
   try {
     mkdirSync(base, { recursive: true });
     return base;

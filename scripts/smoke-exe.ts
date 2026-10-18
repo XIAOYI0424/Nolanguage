@@ -126,7 +126,12 @@ async function main(): Promise<void> {
   const workspaceDir = join(sandbox, 'ide');
   await mkdir(join(workspaceDir, 'python'), { recursive: true });
   await mkdir(join(workspaceDir, 'go'), { recursive: true });
-  await mkdir(join(sandbox, '.nolanguage'), { recursive: true });
+  // App state (telemetry database, WebView profile) goes to `%LOCALAPPDATA%`
+  // by default now, which is outside the sandbox. NOLANGUAGE_DATA pins it back
+  // inside, so the check below still proves where the bytes landed without
+  // touching the developer's real profile.
+  const appDataDir = join(sandbox, 'appdata');
+  await mkdir(appDataDir, { recursive: true });
 
   // Start the exe, retrying on a different port if that one is taken. A stale
   // server holding the preferred port must not look like a broken build.
@@ -148,6 +153,7 @@ async function main(): Promise<void> {
         ...process.env,
         PANEL_PORT: String(PORT),
         PANEL_WORKSPACE: workspaceDir,
+        NOLANGUAGE_DATA: appDataDir,
         NOLANGUAGE_QUIET: '0',
         NOLANGUAGE_NO_BROWSER: '1',
       },
@@ -277,9 +283,9 @@ async function main(): Promise<void> {
         JSON.stringify(run?.stdout ?? ''),
       );
 
-      // ---- 5. warm tier persisted next to the exe ---------------------------
+      // ---- 5. warm tier persisted in the app data root ----------------------
       await delay(600);
-      const dbPath = join(sandbox, '.nolanguage', 'telemetry.db');
+      const dbPath = join(appDataDir, 'telemetry.db');
       try {
         const s = await stat(dbPath);
         check(s.size > 0, 'sqlite warm tier persisted', `${s.size} bytes`);
