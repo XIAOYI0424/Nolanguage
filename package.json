@@ -24,6 +24,7 @@
     "verify:baseline": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-baseline.ts",
     "verify:extensions": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-extensions.ts",
     "build:exe": "node scripts/build-exe.mjs",
+    "build:setup": "node installer/build-setup.mjs",
     "build:frontend": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/build-frontend.mjs",
     "serve:dist": "node scripts/serve-dist.mjs",
     "build:tauri-icons": "node scripts/make-tauri-icons.mjs",

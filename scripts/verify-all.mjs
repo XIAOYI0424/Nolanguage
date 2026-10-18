@@ -53,6 +53,18 @@ const stages = [
   // (scan/order/enable/install/uninstall + data separation), all five runtime
   // extensions against real processes, and RunnerFactory's single path.
   { name: 'Plugins · language substrate (registry + 5 runtimes)', script: 'scripts/verify-langplugins.ts' },
+  // `nlg lang add` accepts five source shapes; this is the resolver underneath:
+  // zip/tar parsing by hand, the wrapper-folder descent, and — most importantly —
+  // that no archive entry can escape the destination.
+  { name: 'Plugins · source resolution (dir/zip/tar/git/url)', script: 'scripts/verify-langsource.ts' },
+  // `run.requires` is checked at install time, not only at Run: an unmet
+  // requirement is reported (and refuses the install under --strict, before the
+  // body is copied). Those are host runtimes, so the message must not promise
+  // an installable fix.
+  { name: 'Plugins · dependency resolution (requires + strict)', script: 'scripts/verify-langdeps.ts' },
+  // `nlg lang search` / `add <id>`: a static JSON index (file or https), multiple
+  // sources merged by highest version, query filtering, and graceful offline.
+  { name: 'Plugins · catalog / online index (search + resolve)', script: 'scripts/verify-langcatalog.ts' },
   // Phase 3 + 4: install/uninstall/enable/disable applied live, the memory
   // budget (LRU + idle + the eager exemption), and upgrade migration scripts.
   { name: 'Plugins · lifecycle, budget + migrations', script: 'scripts/verify-plugins.ts' },
@@ -72,6 +84,8 @@ const stages = [
   // Needs `npm run build:exe` (or build-to-exe.bat) first; skipped when the
   // packaged binary is absent, so a fresh clone still verifies.
   { name: 'Package · packaged exe smoke test', script: 'scripts/smoke-exe.ts', requiresExe: true },
+  // `nlg web` / `nlg desktop` entry points boot the workspace server.
+  { name: 'CLI · nlg web / nlg desktop launch', script: 'scripts/verify-cli-launch.ts' },
 ];
 
 function run(script, env = {}) {

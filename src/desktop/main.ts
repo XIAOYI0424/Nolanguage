@@ -112,11 +112,21 @@ async function runExtensionHost(): Promise<void> {
 }
 
 /**
- * `--no-browser` (or NOLANGUAGE_NO_BROWSER=1) runs the server only: nothing
- * is opened, the addresses are just printed.
+ * How the UI is surfaced — the "web" vs "desktop" question:
+ *
+ *   Nolanguage.exe                  desktop — native WebView window (no chrome)
+ *   Nolanguage.exe --open-browser   web     — the system's default browser
+ *   --no-browser / --no-open        server only (CI, `nlg web --no-open`)
+ *
+ * The installer's "Nolanguage (Web)" shortcut passes `--open-browser`; the
+ * default (no flag) is the desktop window. `openWebView` degrades to the system
+ * browser when no WebView engine exists, so the UI stays reachable regardless.
  */
-const noBrowser =
-  process.env.NOLANGUAGE_NO_BROWSER === '1' || process.argv.some((a) => a === '--no-browser');
+const openBrowser = process.argv.includes('--open-browser');
+const noWindow =
+  !openBrowser &&
+  (process.env.NOLANGUAGE_NO_BROWSER === '1' ||
+    process.argv.some((a) => a === '--no-browser' || a === '--no-open'));
 
 async function main(): Promise<void> {
   const { base } = await startServer();
@@ -125,7 +135,9 @@ async function main(): Promise<void> {
   // listening, and torn down when this process exits, so closing the console
   // window never leaves an orphaned UI pointing at a dead port.
   let view: WebViewHandle | undefined;
-  if (!noBrowser) {
+  if (openBrowser) {
+    openSystemBrowser(`${base}/`);
+  } else if (!noWindow) {
     view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
     if (view.engine === 'none') openSystemBrowser(`${base}/`);
   }
@@ -162,7 +174,8 @@ async function main(): Promise<void> {
 
 /** Human-readable line describing how (or whether) the window was opened. */
 function describeWindow(view: WebViewHandle | undefined): string {
-  if (noBrowser) return 'Window launch disabled — open the Workspace address above.';
+  if (openBrowser) return 'Opened in the default browser — the workspace address above.';
+  if (noWindow) return 'Window launch disabled — open the Workspace address above.';
   switch (view?.engine) {
     case 'webview2':
       return `Opened as a local app window — system WebView2 ${view.webview2Version}, no browser chrome.`;

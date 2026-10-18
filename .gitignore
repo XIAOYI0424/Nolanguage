@@ -41,3 +41,6 @@ tests/phase1.test.ts
 docs/添加新语言指南.md
 项目现状报告.md
 语言插件化设计.md
+installer/build-nsis.bat
+.gitignore
+installer/payload/Nolanguage.exe
