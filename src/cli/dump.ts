@@ -141,12 +141,16 @@ export async function dumpPlugins(opts: DumpOptions = {}): Promise<number> {
   return 0;
 }
 
-/** `python@1.0.0   run repl-session   lsp pyright   <dir>` */
+/** `python@1.0.0   run repl-session   lsp pyright   lexical on   <dir>` */
 function formatCandidate(c: Candidate, won: boolean): string {
+  // Built-in completion is opt-out, so print the *default* rather than `-`:
+  // "lexical enabled" is what a plugin without a `contributes` block gets.
+  const lexical = c.manifest.contributes?.completion?.lexical?.enabled === false ? 'off' : 'on';
   const fields = [
     `${c.id}@${c.version}`.padEnd(20),
     `run ${c.manifest.run?.mode ?? '-'}`.padEnd(24),
     `lsp ${c.manifest.lsp?.serverName ?? '-'}`.padEnd(20),
+    `lexical ${lexical}`.padEnd(14),
     c.dir,
   ];
   return `${fields.join(' ')}${won ? '' : '  (未选中)'}`;

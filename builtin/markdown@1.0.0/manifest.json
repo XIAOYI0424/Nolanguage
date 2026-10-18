@@ -9,6 +9,13 @@
   "trust": {
     "sandbox": "none"
   },
+  "contributes": {
+    "completion": {
+      "lexical": {
+        "enabled": false
+      }
+    }
+  },
   "file": {
     "extensions": [
       "md",

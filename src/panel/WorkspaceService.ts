@@ -197,6 +197,12 @@ export interface LanguageDescriptorWire {
   hasLsp: boolean;
   lspServerName?: string;
   memoryHint?: string;
+  /**
+   * Built-in (word-list) completion for this language. Defaults to true and is
+   * only false when the manifest says `contributes.completion.lexical.enabled:
+   * false` — the UI treats a missing field as "on".
+   */
+  lexical: boolean;
   /** Highlighting rules straight from `manifest.grammar`. */
   grammar: Array<{ re: string; cls: string; flags?: string }>;
   /** True when the plugin came with the binary (vs. user-installed). */
@@ -716,6 +722,8 @@ export class WorkspaceService {
         hasLsp: !!m.lsp && !m.lsp.disabled,
         lspServerName: m.lsp?.serverName,
         memoryHint: m.lsp?.memoryHint,
+        // Opt-out, not opt-in: a new plugin gets completion without saying a word.
+        lexical: m.contributes?.completion?.lexical?.enabled !== false,
         grammar: m.grammar?.rules ?? [],
         builtin: source?.kind === 'builtin',
       });

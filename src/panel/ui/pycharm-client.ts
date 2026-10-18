@@ -487,6 +487,16 @@ export function pyCharmClientScript(d: PanelClientData): string {
   // if it is opened with no backend at all). Installing a language plugin must
   // never require editing this file.
   var SERVER_LANGS = { python: true, go: true, javascript: true };
+  /**
+   * Languages whose built-in (L1) completion is on.
+   *
+   * On by default — that is the whole point of L1: a language plugin never has
+   * to declare a completion engine to get one. The manifest opts *out* with
+   * contributes.completion.lexical.enabled: false, which is what Markdown
+   * does (every English word would be offered as an identifier) and what plain
+   * text would do for the same reason.
+   */
+  var LEXICAL = { python: true, go: true, javascript: true, markdown: false, text: false };
   var LANG_NAMES = {
     python: 'Python', go: 'Go', javascript: 'JavaScript', typescript: 'TypeScript',
     markdown: 'Markdown', json: 'JSON', yaml: 'YAML', toml: 'TOML',
@@ -533,6 +543,8 @@ export function pyCharmClientScript(d: PanelClientData): string {
       LANG_NAMES[l.id] = l.displayName || l.id;
       // "the backend can act on this language": run it, check it, or both.
       SERVER_LANGS[l.id] = !!(l.supportsRun || l.hasLsp);
+      // L1 is opt-out only; a manifest that says nothing keeps it.
+      LEXICAL[l.id] = l.lexical !== false;
       (l.extensions || []).forEach(function (e) { EXT_LANG[String(e).replace(/^[.]/, '').toLowerCase()] = l.id; });
       if (l.defaultExt) {
         var de = String(l.defaultExt).replace(/^[.]/, '').toLowerCase();
@@ -638,7 +650,9 @@ export function pyCharmClientScript(d: PanelClientData): string {
     if (cl) { cl.style.top = (10 + (line - 1) * 20) + 'px'; cl.style.display = 'block'; }
   }
 
-  var CMP = { open: false, items: [], sel: 0, reqId: 0 };
+  // lex holds the L1 candidates of the current prefix, so an LSP answer can be
+  // merged with them instead of replacing the popup the user is already reading.
+  var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [] };
   var HOV = { timer: 0, reqId: 0, cx: 0, cy: 0 };
 
   ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); });
@@ -806,10 +820,77 @@ export function pyCharmClientScript(d: PanelClientData): string {
     var pos = ta.selectionStart, before = ta.value.slice(0, pos);
     return { line: before.split(NLc).length - 1, character: pos - (before.lastIndexOf(NLc) + 1) };
   }
+  /* ---------- L1 · lexical completion (language-agnostic) ----------
+     No grammar, no scopes, no types: every word-shaped token in the buffer is a
+     candidate. That is enough to be useful in *any* language, which is the
+     point — L2 (the LSP) is absent, cold or slow for most of them, and this
+     source cannot fail because it never leaves the page.
+
+     Cost is one regex pass per change of the buffer text, cached by value
+     identity, so typing in a 10k-line file re-scans only when it changed. */
+  var LEX = { text: null, ids: null, kinds: null };
+  /** Dollar signs count as identifier characters in JS/Shell, and are harmless elsewhere. */
+  var LEX_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
+  var LEX_MAX = 5000;
+  /** LSP CompletionItemKind numbers, so both sources render through one table. */
+  var KIND_TEXT = {
+    2: 'fn', 3: 'fn', 4: 'fn', 5: 'va', 6: 'va', 7: 'cl', 8: 'cl', 9: 'mo',
+    10: 'va', 13: 'cl', 14: 'kw', 20: 'co', 21: 'co', 22: 'cl', 25: 'ty'
+  };
+  function lexicalIndex() {
+    if (LEX.text === ta.value) return LEX;
+    var text = ta.value, ids = Object.create(null), kinds = Object.create(null);
+    var m, n = 0;
+    LEX_RE.lastIndex = 0;
+    while ((m = LEX_RE.exec(text)) !== null) {
+      var w = m[0];
+      if (w.length < 2) continue;                 // a single letter is not worth a popup
+      if (ids[w] != null) { ids[w]++; continue; }
+      if (n >= LEX_MAX) continue;
+      ids[w] = 1; n++;
+      // Only the first occurrence is inspected: "followed by (" is a guess that
+      // survives being wrong, and it costs nothing next to a real parse.
+      var i = LEX_RE.lastIndex, ch = '';
+      while (i < text.length) {
+        ch = text.charAt(i);
+        if (ch !== ' ' && ch !== '\\t') break;
+        i++;
+      }
+      kinds[w] = ch === '(' ? 3 : (/^[A-Z][A-Z0-9_]*$/.test(w) ? 21 : (/^[A-Z]/.test(w) ? 7 : 6));
+    }
+    LEX.text = text; LEX.ids = ids; LEX.kinds = kinds;
+    return LEX;
+  }
+  function lexicalItems(prefix) {
+    var lex = lexicalIndex(), ids = lex.ids, out = [];
+    var lower = prefix.toLowerCase();
+    for (var w in ids) {
+      if (w.length <= prefix.length) continue;
+      if (w.slice(0, prefix.length).toLowerCase() !== lower) continue;
+      out.push({ label: w, kind: lex.kinds[w], detail: '', count: ids[w] });
+    }
+    // Frequent first (identifiers the file keeps using), then the shorter one:
+    // for the prefix "tot" the winner should be total, not total_price_cents.
+    out.sort(function (a, b) {
+      if (b.count !== a.count) return b.count - a.count;
+      if (a.label.length !== b.label.length) return a.label.length - b.label.length;
+      return a.label < b.label ? -1 : 1;
+    });
+    return out.slice(0, 50);
+  }
   function requestComplete() {
-    if (ta.readOnly || !lspLang()) { cmpClose(); return; }
+    if (ta.readOnly) { cmpClose(); return; }
     var pref = wordPrefix();
     if (pref.length < 1) { cmpClose(); return; }
+    // L1 first: it is local and instant, so the popup is on screen before the
+    // LSP round-trip answers — or when it never answers at all.
+    CMP.lex = LEXICAL[currentLang] === false ? [] : lexicalItems(pref);
+    if (CMP.lex.length) {
+      CMP.items = CMP.lex.slice(0, 50); CMP.sel = 0; CMP.open = true; renderCmp();
+    } else {
+      cmpClose();
+    }
+    if (!lspLang()) return;
     CMP.reqId++;
     var lc = caretLC();
     BRIDGE.send({ kind: 'complete', code: ta.value, language: lspLang(), line: lc.line, character: lc.character, requestId: CMP.reqId });
@@ -817,17 +898,27 @@ export function pyCharmClientScript(d: PanelClientData): string {
   function onCompletion(m) {
     if (m.requestId !== CMP.reqId) return;
     var pref = wordPrefix();
-    var items = (m.items || []).filter(function (it) {
+    var lsp = (m.items || []).filter(function (it) {
       return it && it.label && it.label.length > pref.length && it.label.slice(0, pref.length) === pref;
     });
-    if (!items.length) { cmpClose(); return; }
-    CMP.items = items.slice(0, 50); CMP.sel = 0; CMP.open = true;
+    // Nothing from L2: keep what L1 already put on screen.
+    if (!lsp.length) return;
+    var seen = Object.create(null), merged = [];
+    lsp.forEach(function (it) { if (!seen[it.label]) { seen[it.label] = 1; merged.push(it); } });
+    (CMP.lex || []).forEach(function (it) { if (!seen[it.label]) { seen[it.label] = 1; merged.push(it); } });
+    var keep = (CMP.open && CMP.items[CMP.sel]) ? CMP.items[CMP.sel].label : '';
+    CMP.items = merged.slice(0, 50);
+    CMP.sel = 0;
+    if (keep) {
+      for (var i = 0; i < CMP.items.length; i++) { if (CMP.items[i].label === keep) { CMP.sel = i; break; } }
+    }
+    CMP.open = true;
     renderCmp();
   }
   function renderCmp() {
     var el = $('cmp');
     el.innerHTML = CMP.items.map(function (it, i) {
-      var k = String(it.kind == null ? '' : it.kind).slice(0, 2);
+      var k = it.kind == null ? '' : (KIND_TEXT[it.kind] || String(it.kind).slice(0, 2));
       return '<div class="row' + (i === CMP.sel ? ' sel' : '') + '" data-i="' + i + '"><span class="k">' + esc(k) + '</span><span>' + esc(it.label) + '</span><span class="d">' + esc(it.detail || '') + '</span></div>';
     }).join('');
     el.querySelectorAll('.row').forEach(function (row) {

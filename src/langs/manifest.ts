@@ -151,6 +151,18 @@ export interface LanguageManifest {
   debug?: DebugSpec;
   profiler?: ProfilerSpec;
   /**
+   * Feature switches a plugin may turn **off**. Everything here is on by
+   * default: a language that says nothing gets the built-in lexical completion,
+   * so adding a language never means writing (or declaring) a completion
+   * engine. Only a plugin whose text would make word-shaped candidates noise —
+   * Markdown, where every English word looks like an identifier — declines it.
+   */
+  contributes?: {
+    completion?: {
+      lexical?: { enabled?: boolean };
+    };
+  };
+  /**
    * Data migrations, run in order when the plugin is upgraded. The plugin body
    * is replaced wholesale; this is the hook that keeps `data/<id>/` (sessions,
    * run configs, breakpoints) readable across versions.

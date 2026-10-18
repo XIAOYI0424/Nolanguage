@@ -287,6 +287,42 @@ async function testBoot(): Promise<void> {
   check('editor: completion response opens a filtered popup',
     q(w, '#cmp').className.indexOf('open') !== -1 && (q(w, '#cmp').textContent || '').indexOf('print') !== -1);
 
+  // ---- L1 · built-in lexical completion (no LSP required) ----
+  // The popup must appear from the buffer alone, before any `completion` frame
+  // is delivered: that is the whole promise of L1 — it cannot be slow, cold or
+  // absent, because it never leaves the page.
+  ed.value = 'def calculate_total(items):\n    pass\n\ntotal_price = 1\ntotal_count = 2\ncal';
+  ed.setSelectionRange(ed.value.length, ed.value.length);
+  fire(w, ed, 'input', {});
+  await settle(w, 180);
+  const l1Text = q(w, '#cmp').textContent || '';
+  const l1Open = q(w, '#cmp').className.indexOf('open') !== -1;
+  check('L1: buffer identifiers complete without an LSP answer',
+    l1Open && l1Text.indexOf('calculate_total') !== -1, l1Text.slice(0, 70));
+  check('L1: the weak classifier marks a called name as a function',
+    (qa(w, '#cmp .row .k')[0]?.textContent ?? '') === 'fn', qa(w, '#cmp .row .k')[0]?.textContent);
+
+  const compL1 = socket.lastSentOf('complete');
+  socket.deliver({ kind: 'completion', language: 'python', requestId: compL1?.requestId,
+    items: [{ label: 'calendar', kind: 9, detail: 'module' }] });
+  await settle(w);
+  const mergedText = q(w, '#cmp').textContent || '';
+  check('L1 + L2: the LSP answer is merged with, not substituted for, the buffer words',
+    mergedText.indexOf('calendar') !== -1 && mergedText.indexOf('calculate_total') !== -1,
+    mergedText.slice(0, 90));
+
+  // A manifest that says `contributes.completion.lexical.enabled: false`
+  // (Markdown) turns the source off; the catalogue is the only channel for it.
+  socket.deliver({ kind: 'workspace', languages: [{ id: 'python', displayName: 'Python', lexical: false, supportsRun: true, hasLsp: true }] });
+  await settle(w);
+  fire(w, ed, 'input', {});
+  await settle(w, 180);
+  check('L1: a language can opt out through its manifest',
+    q(w, '#cmp').className.indexOf('open') === -1,
+    q(w, '#cmp').className);
+  socket.deliver({ kind: 'workspace', languages: [{ id: 'python', displayName: 'Python', supportsRun: true, hasLsp: true }] });
+  await settle(w);
+
   // ---- hover tooltip round-trip (dwell -> request -> tooltip) ----
   ed.value = 'print'; ed.setSelectionRange(0, 0);
   fire(w, ed, 'mousemove', { clientX: 32, clientY: 20 });
