@@ -55,11 +55,6 @@ export function isPackaged(): boolean {
   return embeddedStore() !== undefined;
 }
 
-/** Every asset key that is available in this build (empty for source runs). */
-export function embeddedAssetNames(): string[] {
-  return Object.keys(embeddedStore() ?? {});
-}
-
 /**
  * Materialise every embedded asset whose key starts with `prefix` and return
  * the directory they landed in (or `undefined` outside a packaged build).

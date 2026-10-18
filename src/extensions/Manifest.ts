@@ -123,22 +123,4 @@ export function parseManifest(raw: unknown, source = 'manifest.json'): Extension
   return manifest;
 }
 
-/** True when the manifest declares `onCommand:<id>`. */
-export function activatesOnCommand(manifest: ExtensionManifest, commandId: string): boolean {
-  return manifest.activationEvents.includes(`onCommand:${commandId}`);
-}
 
-/** True when the manifest should be activated as soon as the kernel starts. */
-export function activatesOnStartup(manifest: ExtensionManifest): boolean {
-  return manifest.activationEvents.includes('onStartup');
-}
-
-/** `onLanguage:<id>` triggers the manifest wants, if any. */
-export function activatesOnLanguage(manifest: ExtensionManifest, languageId: string): boolean {
-  return manifest.activationEvents.includes(`onLanguage:${languageId}`);
-}
-
-/** Flatten the manifest's contributed command declarations. */
-export function contributedCommands(manifest: ExtensionManifest): CommandContribution[] {
-  return manifest.contributes?.commands ?? [];
-}

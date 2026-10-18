@@ -1,4 +1,4 @@
-import { LogLevel, LOG_LEVEL_NAMES, levelFromName } from '../log/LogLevel.js';
+import { LogLevel, LOG_LEVEL_NAMES } from '../log/LogLevel.js';
 import type { SqliteStore, LogRow, SqlValue } from './SqliteStore.js';
 
 /**
@@ -387,9 +387,4 @@ function parseJson<T>(text: string, fallback: T): T {
   } catch {
     return fallback;
   }
-}
-
-/** Convenience: build a query from level names instead of the enum. */
-export function levelsFromNames(names: string[]): LogLevel[] {
-  return names.map((n) => levelFromName(n));
 }

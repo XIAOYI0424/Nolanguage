@@ -20,7 +20,7 @@
  *   NL_GLOBALS_FILE  where the bootstrap may persist state
  *   NL_LANGUAGE      the plugin id (for diagnostics)
  */
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ulid } from '../util/ulid.js';
@@ -183,15 +183,5 @@ export class ReplSessionRuntime implements RuntimeExtension {
 
   createRunner(config: RunConfig, ctx: HostContext): Runner {
     return new ReplSessionRunner(config, ctx);
-  }
-}
-
-/** Read a bootstrap asset a plugin ships (used by tests and diagnostics). */
-export async function readBootstrap(ctx: HostContext, config: RunConfig): Promise<string | null> {
-  if (!config.bootstrap) return null;
-  try {
-    return await readFile(join(ctx.pluginDir, config.bootstrap), 'utf8');
-  } catch {
-    return null;
   }
 }

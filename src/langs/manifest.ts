@@ -347,8 +347,3 @@ export function primaryExtension(m: LanguageManifest): string {
   const ext = m.file.defaultExt ?? normaliseExtensions(m.file)[0] ?? '';
   return ext ? `.${ext.replace(/^\./, '')}` : '';
 }
-
-/** `trust.sandbox` defaults to `subprocess`: the safe choice for a plugin. */
-export function sandboxOf(m: LanguageManifest): TrustSandbox {
-  return m.trust?.sandbox ?? 'subprocess';
-}

@@ -15,11 +15,11 @@
  * and replaced wholesale on upgrade, `<home>/data/<id>/` is writable and
  * survives uninstall unless the user asks otherwise.
  */
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   normaliseExtensions,
   validateManifest,
@@ -569,24 +569,4 @@ export class LanguageRegistry {
       dir: p.source.dir,
     }));
   }
-}
-
-/** Directory name of a plugin folder (`rust@1.0.0`), for diagnostics. */
-export function pluginFolderName(id: string, version: string): string {
-  return `${id}@${version}`;
-}
-
-/** Is `dir` a plugin directory (has a manifest)? */
-export async function isPluginDir(dir: string): Promise<boolean> {
-  try {
-    const s = await stat(join(dir, 'manifest.json'));
-    return s.isFile();
-  } catch {
-    return false;
-  }
-}
-
-/** The last path segment, handy in log lines. */
-export function pluginDirName(dir: string): string {
-  return basename(dir);
 }

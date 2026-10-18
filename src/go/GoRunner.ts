@@ -19,7 +19,7 @@
  * different from a runtime failure in the Output tab.
  */
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -412,9 +412,4 @@ function waitExit(child: {
     child.on('error', () => resolve({ code: -1, signal: null }));
     child.on('close', (code, signal) => resolve({ code, signal: signal ?? null }));
   });
-}
-
-/** Convenience: ensure a directory exists (used by callers building workspaces). */
-export async function ensureDir(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true });
 }
