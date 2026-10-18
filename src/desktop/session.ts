@@ -61,6 +61,13 @@ export interface SessionState {
   profile?: string;
   /** Port the server bound, for the "already running" probe. */
   port?: number;
+  /**
+   * Set by `shutdown()` when the user closed the window (or Ctrl+C): the
+   * profile was released, so the next launch need not sweep it. A crash, a
+   * hard kill or the installer's `taskkill` never sets it, which is exactly
+   * when a stale Edge window is still holding the profile.
+   */
+  cleanExit?: boolean;
 }
 
 function sessionFile(): string {

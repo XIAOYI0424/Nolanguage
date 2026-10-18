@@ -128,6 +128,8 @@ check('isAlive() sees this process', session.isAlive(process.pid));
 check('isAlive() rejects a dead pid', !session.isAlive(999999));
 session.patchSession({ browserPid: undefined });
 check('patching with undefined forgets the field', session.readSession()?.browserPid === undefined);
+session.patchSession({ cleanExit: true });
+check('a clean exit round-trips through disk', session.readSession()?.cleanExit === true);
 session.clearSession();
 check('clearSession() removes the record', session.readSession() === undefined);
 session.logDesktop('probe-event', { ok: true });
@@ -150,6 +152,25 @@ const mainSource = readFileSync(join(here, '..', 'src', 'desktop', 'main.ts'), '
 check('the window pid is discovered, not assumed', /discoverWindow\(/.test(mainSource));
 check('the client count can stop a server whose window is gone', /clientCount\(\)/.test(mainSource));
 check('the launch leaves a trace in desktop.log', /logDesktop\('launch'/.test(mainSource));
+
+// ---- stale-window sweep ----
+// The installer kills `Nolanguage.exe` on upgrade but cannot reach the detached
+// Edge window, which keeps the profile. Sweeping it *before* the spawn is what
+// stops Chromium from delegating the new `--app` URL to it — the extra window
+// that appeared and closed.
+check(
+  'stale profile windows are swept before the spawn',
+  mainSource.indexOf('closeStaleWindows(') !== -1 &&
+    mainSource.indexOf('closeStaleWindows(') < mainSource.indexOf('openWebView('),
+);
+check(
+  'a clean exit is recorded for the next launch',
+  /cleanExit:\s*true/.test(mainSource) && /cleanExit\s*===\s*true/.test(mainSource),
+);
+check(
+  'an abnormal exit drops the record instead of marking it clean',
+  /if\s*\(!shuttingDown\)\s*clearSession\(\)/.test(mainSource),
+);
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

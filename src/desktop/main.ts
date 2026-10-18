@@ -39,10 +39,12 @@ import { openSystemBrowser, openWebView, webViewProfileDir, type WebViewHandle }
 import {
   clearSession,
   closeRecordedWindow,
+  closeStaleWindows,
   findWindowProcesses,
   killTree,
   logDesktop,
   patchSession,
+  readSession,
 } from './session.js';
 
 /**
@@ -241,12 +243,28 @@ async function main(): Promise<void> {
     const profile = webViewProfileDir();
     windowProfile = profile;
     logDesktop('launch', { port: serverPort(), profile, pid: process.pid });
-    // A browser left over from a crashed session holds the profile; the window
-    // would show up in *that* process and this launch would own nothing.
-    const killed = await closeRecordedWindow(profile);
-    logDesktop('previous-window', { pid: killed ?? null });
-    if (killed) {
-      process.stdout.write(`  Closed the window left by the previous session (pid ${killed})\n`);
+
+    // Sweep **every** window still holding our profile before spawning.
+    //
+    // A clean exit releases the profile, so nothing is swept and the launch
+    // stays cheap. A crash, a hard kill, or the installer's `taskkill` on
+    // upgrade leaves the detached Edge window alive: it still owns the
+    // profile, Chromium hands the new `--app` URL to that old process, one
+    // extra window flashes and the process we spawned exits at once — the
+    // "多余的弹窗弹出又自动关闭" report. Killing the stale window first makes
+    // this process the browser root, which is what lets us own and watch it.
+    const previous = readSession();
+    const wasClean = previous?.cleanExit === true;
+    // Consume the marker now: a crash before the next clean exit must not be
+    // mistaken for "nothing to clean".
+    patchSession({ cleanExit: undefined });
+
+    const recorded = await closeRecordedWindow(profile);
+    const swept = wasClean ? [] : await closeStaleWindows(profile);
+    const closed = Array.from(new Set([...(recorded ? [recorded] : []), ...swept]));
+    logDesktop('previous-window', { pid: recorded ?? null, swept });
+    if (closed.length) {
+      process.stdout.write(`  Closed the window left by the previous session (pid ${closed.join(', ')})\n`);
     }
     view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
     if (view.engine === 'none') openSystemBrowser(`${base}/`);
@@ -356,7 +374,10 @@ async function main(): Promise<void> {
     // only reaches the launcher we spawned (usually already gone).
     killTree(windowPid);
     view?.close();
-    clearSession();
+    // Record a clean exit instead of dropping the record: the profile is
+    // released, so the next launch can skip the PowerShell sweep. The marker is
+    // removed on the next launch (and by the abnormal-exit handler below).
+    patchSession({ browserPid: undefined, cleanExit: true });
     void server.close().catch(() => process.exit(0));
   }
 
@@ -373,7 +394,9 @@ async function main(): Promise<void> {
   process.once('exit', () => {
     killTree(windowPid);
     view?.close();
-    clearSession();
+    // A clean shutdown already recorded `cleanExit`; only an abnormal exit
+    // drops the record, which is what tells the next launch to sweep.
+    if (!shuttingDown) clearSession();
   });
 }
 
