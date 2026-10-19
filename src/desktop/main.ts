@@ -45,6 +45,7 @@ import {
   killTree,
   logDesktop,
   patchSession,
+  readSession,
 } from './session.js';
 
 /**
@@ -217,10 +218,36 @@ async function runningInstance(): Promise<string | undefined> {
 async function main(): Promise<void> {
   const running = await runningInstance();
   if (running) {
-    // Nothing to open: the user already has this workspace. Saying so is all a
-    // GUI build can do without native window-focus APIs.
-    process.stdout.write(`\n  Nolanguage is already running -> ${running}/\n\n`);
-    return;
+    // A server answering /health is not the same as a UI. A hung shutdown can
+    // leave the server (and a stale WebSocket) behind with no window; blindly
+    // exiting here is what produced "a process is running but nothing renders".
+    const session = readSession();
+    const windowAlive =
+      isAlive(session?.browserPid) ||
+      (session?.browserPid === undefined && (await findWindowProcesses(webViewProfileDir())).length > 0);
+    if (windowAlive) {
+      // Nothing to open: the user already has this workspace. Saying so is all
+      // a GUI build can do without native window-focus APIs.
+      process.stdout.write(`\n  Nolanguage is already running -> ${running}/\n\n`);
+      return;
+    }
+
+    // Orphan server: take the port back instead of exiting with no UI.
+    logDesktop('orphan-server', { pid: session?.serverPid ?? null, base: running });
+    if (session?.serverPid && isAlive(session.serverPid)) {
+      killTree(session.serverPid);
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        if (!(await runningInstance())) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    if (await runningInstance()) {
+      process.stdout.write(
+        `\n  Nolanguage is already running -> ${running}/ (no window; end it from Task Manager)\n\n`,
+      );
+      return;
+    }
   }
 
   patchSession({ serverPid: process.pid, port: serverPort() });
@@ -407,7 +434,17 @@ async function main(): Promise<void> {
     // window we watched was actually killed — if discovery never found it, the
     // next launch must sweep the profile instead of delegating to it.
     patchSession(windowPid ? { browserPid: undefined, cleanExit: true } : { browserPid: undefined });
-    void server.close().catch(() => process.exit(0));
+    // A hung child close must not leave the server holding the port: the next
+    // launch would see /health and exit with no window. Last resort only.
+    const force = setTimeout(() => {
+      logDesktop('shutdown-timeout', { reason });
+      process.exit(0);
+    }, 8000);
+    force.unref?.();
+    void server.close().finally(() => {
+      clearTimeout(force);
+      process.exit(0);
+    });
   }
 
   process.once('SIGINT', () => shutdown('SIGINT'));

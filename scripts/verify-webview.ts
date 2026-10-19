@@ -175,6 +175,8 @@ check('the window probe is case-insensitive', /OrdinalIgnoreCase/.test(sessionSo
 check('the window probe also matches the app URL', /--app=http:\/\/127\.0\.0\.1:/.test(sessionSource));
 check('a delegated spawn is retried once', /delegation-retry/.test(mainSource));
 check('the watchdog checks the known window pid first', /isAlive\(windowPid\)/.test(mainSource));
+check('an orphan server is taken over instead of exiting', /orphan-server/.test(mainSource));
+check('a hung shutdown force-exits', /shutdown-timeout/.test(mainSource));
 const gitProbeSource = readFileSync(join(here, '..', 'src', 'git', 'GitProbe.ts'), 'utf8');
 check(
   'the git probe never opens a console window',

@@ -802,6 +802,10 @@ export async function main(
 
   const shutdown = async (): Promise<void> => {
     kernel.logger.root().info('Server shutting down');
+    // A child that refuses to close must not keep the port bound: an orphan
+    // server makes the next launch exit with no window.
+    const force = setTimeout(() => process.exit(0), 8000);
+    force.unref?.();
     await pythonLoop?.stop();
     await workspace.close();
     // The execution plane (warm node workers) and extension hosts are not owned
