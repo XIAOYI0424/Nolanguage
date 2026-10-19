@@ -375,9 +375,10 @@ async function main(): Promise<void> {
     killTree(windowPid);
     view?.close();
     // Record a clean exit instead of dropping the record: the profile is
-    // released, so the next launch can skip the PowerShell sweep. The marker is
-    // removed on the next launch (and by the abnormal-exit handler below).
-    patchSession({ browserPid: undefined, cleanExit: true });
+    // released, so the next launch can skip the sweep. Only claim it when the
+    // window we watched was actually killed — if discovery never found it, the
+    // next launch must sweep the profile instead of delegating to it.
+    patchSession(windowPid ? { browserPid: undefined, cleanExit: true } : { browserPid: undefined });
     void server.close().catch(() => process.exit(0));
   }
 

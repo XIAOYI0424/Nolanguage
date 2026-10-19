@@ -804,6 +804,11 @@ export async function main(
     kernel.logger.root().info('Server shutting down');
     await pythonLoop?.stop();
     await workspace.close();
+    // The execution plane (warm node workers) and extension hosts are not owned
+    // by a language slot. Without these two lines they outlive the app — the
+    // "Node.js still running after close" report.
+    if (exec) await exec.close().catch(() => undefined);
+    await extManager.dispose().catch(() => undefined);
     hub.stop();
     if (ws) await ws.close();
     await kernel.stop();

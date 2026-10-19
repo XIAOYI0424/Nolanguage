@@ -242,6 +242,14 @@ function appSwitches(url: string, profile: string, size?: string): string[] {
     // enough), the profile stays locked, and the next launch delegates to it
     // instead of owning a window it can watch.
     '--disable-background-mode',
+    // The app profile is private and cannot be updated by Edge's updater, so
+    // Edge tries anyway, fails, and opens a "无法更新 Microsoft Edge" window on
+    // every launch — the "unknown popup" report. These stop the background
+    // network and component-update machinery that produces it; verified by the
+    // window title becoming the app title again.
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-default-apps',
     // This profile is force-closed on every exit, which Chromium records as an
     // unclean shutdown. Left alone it offers "restore pages?" — one of the
     // several extra bubbles reported at launch — and may restore old windows on

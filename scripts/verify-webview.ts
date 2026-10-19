@@ -103,6 +103,11 @@ for (const sw of [
   // Without these the window outlives the server and Chromium offers the
   // "restore pages?" bubble on the next launch — the two extra-popup reports.
   '--disable-background-mode',
+  // Edge's own updater cannot update a private profile; left alone it opens a
+  // "无法更新 Microsoft Edge" window on every launch.
+  '--disable-background-networking',
+  '--disable-component-update',
+  '--disable-default-apps',
   '--disable-session-crashed-bubble',
   '--hide-crash-restore-bubble',
 ]) {
@@ -152,6 +157,19 @@ const mainSource = readFileSync(join(here, '..', 'src', 'desktop', 'main.ts'), '
 check('the window pid is discovered, not assumed', /discoverWindow\(/.test(mainSource));
 check('the client count can stop a server whose window is gone', /clientCount\(\)/.test(mainSource));
 check('the launch leaves a trace in desktop.log', /logDesktop\('launch'/.test(mainSource));
+
+// ---- teardown completeness ----
+// The execution plane and extension hosts are not language slots. Leaving
+// their close out is what makes node.exe / --extension-host outlive the app.
+const serverSource = readFileSync(join(here, '..', 'src', 'panel', 'server.ts'), 'utf8');
+check('shutdown closes the execution plane', /exec\.close\(\)/.test(serverSource));
+check('shutdown disposes extension hosts', /extManager\.dispose\(\)/.test(serverSource));
+const scriptHostSource = readFileSync(join(here, '..', 'src', 'runtimes', 'script-host.ts'), 'utf8');
+check(
+  'script-host close kills live children',
+  /for \(const child of this\.children\)/.test(scriptHostSource) &&
+    /child\.kill\('SIGKILL'\)/.test(scriptHostSource),
+);
 
 // ---- stale-window sweep ----
 // The installer kills `Nolanguage.exe` on upgrade but cannot reach the detached

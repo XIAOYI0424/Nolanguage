@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ChildProcess } from 'node:child_process';
 import { ulid } from '../util/ulid.js';
 
 /**
@@ -106,6 +107,8 @@ interface Session {
 
 export class ScriptHostRunner implements Runner {
   private sessions = new Map<string, Session>();
+  /** Live runtime.js children; `close()` must kill them, not just forget them. */
+  private children = new Set<ChildProcess>();
   private readonly timeoutMs: number;
 
   constructor(
@@ -194,6 +197,9 @@ export class ScriptHostRunner implements Runner {
         done(-1, false);
         return;
       }
+
+      this.children.add(child);
+      child.on('close', () => this.children.delete(child));
 
       const timer = setTimeout(() => {
         timedOut = true;
@@ -303,6 +309,14 @@ export class ScriptHostRunner implements Runner {
   }
 
   async close(): Promise<void> {
+    for (const child of this.children) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    this.children.clear();
     this.sessions.clear();
   }
 }
