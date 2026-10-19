@@ -43,14 +43,41 @@ export interface ScaffoldSpec {
   projectFiles?: string[];
 }
 
+/**
+ * A project file that declares the toolchain version — `.python-version`,
+ * `.nvmrc`, `package.json`'s `engines.node`, `go.mod`'s `go` line, or a
+ * `pyproject.toml` key. Read-only: Nolanguage never switches versions, it only
+ * uses the declaration to pick among already-installed toolchains.
+ */
+export interface VersionFileSpec {
+  /** Project-relative path (absolute paths are also accepted). */
+  path: string;
+  /**
+   * `plain` = first non-empty line; `json` = dot-path (`engines.node`);
+   * `toml` = a single `key = "value"` line (not a full TOML parser);
+   * `regex` = capture group 1 of `pattern`.
+   */
+  format: 'plain' | 'json' | 'toml' | 'regex';
+  /** JSON dot-path or TOML key. */
+  key?: string;
+  /** Regex source for `format: 'regex'`. */
+  pattern?: string;
+}
+
 /** How to find a toolchain binary. All fields optional; the first hit wins. */
 export interface BinaryDiscoverySpec {
   /** Executable names looked up on PATH. */
   commands?: string[];
   /** Environment variables holding an explicit path. */
   envVars?: string[];
-  /** Absolute or `~`-relative paths to probe. */
+  /** Absolute or `~`-relative paths to probe; a single `*` segment is expanded. */
   knownPaths?: string[];
+  /**
+   * Version declarations read before `knownPaths`: a `.python-version` of
+   * `3.11.4` makes `~/.pyenv/versions/STAR/bin/python3` prefer the 3.11.4 entry.
+   * An explicit `envVars` path still wins over any version file.
+   */
+  versionFiles?: VersionFileSpec[];
 }
 
 /** A plugin's `manifest.run` block, validated and ready to drive a runtime. */

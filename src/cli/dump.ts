@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { LanguageRegistry } from '../langs/Registry.js';
+import { discoverBinary } from '../langs/discover.js';
 import { validateManifest, type LanguageManifest } from '../langs/manifest.js';
 import { LAYER_LABELS, type PluginLayer } from '../langs/layers.js';
 
@@ -153,5 +154,12 @@ function formatCandidate(c: Candidate, won: boolean): string {
     `lexical ${lexical}`.padEnd(14),
     c.dir,
   ];
-  return `${fields.join(' ')}${won ? '' : '  (未选中)'}`;
+  // Resolve the toolchain here too: the question this dump answers is not just
+  // "which plugin won" but "which binary will actually run it, and why".
+  const disc = discoverBinary(c.manifest.run?.discovery, { root: c.dir });
+  const tool = disc.source !== 'missing' && disc.bin
+    ? `\n    toolchain ${disc.bin} (${disc.source})` +
+      (disc.versionFile ? `  ← ${disc.versionFile} "${disc.wantedVersion}"` : '')
+    : '';
+  return `${fields.join(' ')}${won ? '' : '  (未选中)'}${tool}`;
 }

@@ -199,6 +199,52 @@ function asString(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
+/** Shared validation for every `discovery` block (`run` / `lsp` / `debug`). */
+function validateDiscovery(
+  raw: unknown,
+  field: string,
+  add: (field: string, message: string) => void,
+): void {
+  if (raw === undefined) return;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    add(field, 'must be an object');
+    return;
+  }
+  const d = raw as Record<string, unknown>;
+  for (const key of ['commands', 'envVars', 'knownPaths']) {
+    if (d[key] !== undefined && (!Array.isArray(d[key]) || (d[key] as unknown[]).some((x) => typeof x !== 'string'))) {
+      add(`${field}.${key}`, 'must be an array of strings');
+    }
+  }
+  if (d.versionFiles === undefined) return;
+  if (!Array.isArray(d.versionFiles)) {
+    add(`${field}.versionFiles`, 'must be an array of { path, format }');
+    return;
+  }
+  for (const [i, rawVf] of d.versionFiles.entries()) {
+    const vf = rawVf as Record<string, unknown>;
+    const at = `${field}.versionFiles[${i}]`;
+    if (!asString(vf.path)) add(`${at}.path`, 'is required');
+    const format = asString(vf.format);
+    if (!['plain', 'json', 'toml', 'regex'].includes(format)) {
+      add(`${at}.format`, 'must be one of plain | json | toml | regex');
+    }
+    if (format === 'json' && !asString(vf.key)) {
+      add(`${at}.key`, 'is required for format "json"');
+    }
+    if (format === 'regex') {
+      if (!asString(vf.pattern)) add(`${at}.pattern`, 'is required for format "regex"');
+      else {
+        try {
+          new RegExp(String(vf.pattern));
+        } catch (err) {
+          add(`${at}.pattern`, `does not compile: ${(err as Error).message}`);
+        }
+      }
+    }
+  }
+}
+
 /**
  * Validate a parsed `manifest.json`.
  *
@@ -282,29 +328,16 @@ export function validateManifest(raw: unknown): ManifestValidation {
     if (run.timeoutMs !== undefined && (typeof run.timeoutMs !== 'number' || run.timeoutMs <= 0)) {
       add('run.timeoutMs', 'must be a positive number');
     }
+    validateDiscovery(run.discovery, 'run.discovery', add);
   }
 
   const lsp = m.lsp as Record<string, unknown> | undefined;
-  if (lsp && lsp.discovery !== undefined) {
-    const d = lsp.discovery as Record<string, unknown>;
-    for (const key of ['commands', 'envVars', 'knownPaths']) {
-      if (d[key] !== undefined && (!Array.isArray(d[key]) || (d[key] as unknown[]).some((x) => typeof x !== 'string'))) {
-        add(`lsp.discovery.${key}`, 'must be an array of strings');
-      }
-    }
-  }
+  if (lsp) validateDiscovery(lsp.discovery, 'lsp.discovery', add);
 
   const debug = m.debug as Record<string, unknown> | undefined;
   if (debug !== undefined) {
     if (!asString(debug.adapter)) add('debug.adapter', 'is required when `debug` is present');
-    const dd = debug.discovery as Record<string, unknown> | undefined;
-    if (dd !== undefined) {
-      for (const key of ['commands', 'envVars', 'knownPaths']) {
-        if (dd[key] !== undefined && (!Array.isArray(dd[key]) || (dd[key] as unknown[]).some((x) => typeof x !== 'string'))) {
-          add(`debug.discovery.${key}`, 'must be an array of strings');
-        }
-      }
-    }
+    validateDiscovery(debug.discovery, 'debug.discovery', add);
     if (debug.command !== undefined && (!Array.isArray(debug.command) || (debug.command as unknown[]).some((x) => typeof x !== 'string'))) {
       add('debug.command', 'must be an array of strings');
     }

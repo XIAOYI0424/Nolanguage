@@ -497,6 +497,129 @@ async function testFactory(kernel: Kernel): Promise<void> {
   check('factory: an invalid run config is rejected with reasons', /Invalid run config/.test(msg3), msg3.slice(0, 70));
 }
 
+// ============================================================ discovery hints
+
+/**
+ * `versionFiles` + glob `knownPaths`: a project declaration (`.python-version`,
+ * `package.json` engines, `go.mod`, `pyproject.toml`) orders the candidates,
+ * but never *fails* a lookup — a pinned version that is not installed still
+ * resolves to the closest installed one.
+ */
+async function testDiscovery(): Promise<void> {
+  const root = await mkdtemp(join(TMP, 'disc-'));
+  try {
+    const touch = async (p: string): Promise<void> => {
+      await mkdir(join(p, '..'), { recursive: true });
+      await writeFile(p, '', 'utf8');
+    };
+
+    // plain: .python-version
+    const py = join(root, 'py');
+    await touch(join(py, 'versions', '3.10.2', 'bin', 'python3'));
+    await touch(join(py, 'versions', '3.11.4', 'bin', 'python3'));
+    await writeFile(join(py, '.python-version'), '3.11.4\n', 'utf8');
+    const plain = discoverBinary(
+      {
+        knownPaths: [join(py, 'versions', '*', 'bin', 'python3')],
+        versionFiles: [{ path: '.python-version', format: 'plain' }],
+      },
+      { root: py },
+    );
+    check(
+      'discover: a plain .python-version selects the matching version',
+      plain.source === 'known' && plain.bin.includes('3.11.4') && plain.wantedVersion === '3.11.4',
+      `${plain.bin} (${plain.source})`,
+    );
+
+    // json: package.json engines.node
+    const nd = join(root, 'node');
+    await touch(join(nd, 'v18.0.0', 'bin', 'node'));
+    await touch(join(nd, 'v20.1.0', 'bin', 'node'));
+    await writeFile(join(nd, 'package.json'), JSON.stringify({ engines: { node: '>=20' } }), 'utf8');
+    const json = discoverBinary(
+      {
+        knownPaths: [join(nd, '*', 'bin', 'node')],
+        versionFiles: [{ path: 'package.json', format: 'json', key: 'engines.node' }],
+      },
+      { root: nd },
+    );
+    check(
+      'discover: a JSON engines.node hint selects v20',
+      json.source === 'known' && json.bin.includes('v20.1.0') && json.wantedVersion === '>=20',
+      `${json.bin} (${json.source})`,
+    );
+
+    // regex: go.mod's `go 1.22` line
+    const go = join(root, 'go');
+    await touch(join(go, 'go1.21', 'bin', 'go'));
+    await touch(join(go, 'go1.22', 'bin', 'go'));
+    await writeFile(join(go, 'go.mod'), 'module example\n\ngo 1.22\n', 'utf8');
+    const goRes = discoverBinary(
+      {
+        knownPaths: [join(go, 'go*', 'bin', 'go')],
+        versionFiles: [{ path: 'go.mod', format: 'regex', pattern: '^go\\s+(\\S+)' }],
+      },
+      { root: go },
+    );
+    check(
+      'discover: a regex go.mod hint selects go1.22',
+      goRes.source === 'known' && goRes.bin.includes('go1.22') && goRes.wantedVersion === '1.22',
+      `${goRes.bin} (${goRes.source})`,
+    );
+
+    // toml: pyproject.toml requires-python
+    const tm = join(root, 'toml');
+    await touch(join(tm, '3.10', 'bin', 'python3'));
+    await touch(join(tm, '3.11', 'bin', 'python3'));
+    await writeFile(join(tm, 'pyproject.toml'), '[project]\nrequires-python = ">=3.11"\n', 'utf8');
+    const toml = discoverBinary(
+      {
+        knownPaths: [join(tm, '*', 'bin', 'python3')],
+        versionFiles: [{ path: 'pyproject.toml', format: 'toml', key: 'project.requires-python' }],
+      },
+      { root: tm },
+    );
+    check(
+      'discover: a TOML requires-python hint selects 3.11',
+      toml.source === 'known' && toml.bin.includes('3.11') && toml.wantedVersion === '>=3.11',
+      `${toml.bin} (${toml.source})`,
+    );
+
+    // a declaration that is absent is a hint, not an error
+    const none = discoverBinary(
+      { knownPaths: [join(py, 'versions', '*', 'bin', 'python3')], versionFiles: [{ path: '.missing', format: 'plain' }] },
+      { root: py },
+    );
+    check('discover: a missing version file still resolves', none.source === 'known', `${none.bin} (${none.source})`);
+
+    // validation: every bad field gets its own path
+    const bad = validateManifest({
+      id: 'x', displayName: 'X', version: '1.0.0', apiVersion: '^1.0.0',
+      file: { extensions: ['x'] },
+      run: {
+        mode: 'template',
+        steps: [{ role: 'run', cmd: 'echo' }],
+        discovery: {
+          versionFiles: [
+            { path: '', format: 'json' },
+            { path: 'a', format: 'regex', pattern: '(' },
+          ],
+        },
+      },
+    });
+    check(
+      'manifest: a bad versionFiles entry names its field',
+      !bad.ok &&
+        bad.issues.some((i) => i.field === 'run.discovery.versionFiles[0].path') &&
+        bad.issues.some((i) => i.field === 'run.discovery.versionFiles[0].key') &&
+        bad.issues.some((i) => i.field === 'run.discovery.versionFiles[1].pattern'),
+      bad.issues.map((i) => i.field).join(','),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 // ============================================================ main
 
 async function main(): Promise<void> {
@@ -510,6 +633,7 @@ async function main(): Promise<void> {
   try {
     testManifest();
     testVersions();
+    await testDiscovery();
     await testExamples();
     await testRegistry(kernel);
 

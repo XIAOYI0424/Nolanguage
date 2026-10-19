@@ -545,7 +545,9 @@ export class WorkspaceService {
   private resolveToolchain(manifest: LanguageManifest): BinaryResolution {
     const override = this.opts.toolchain?.[manifest.id];
     if (override) return { bin: override, source: 'override' };
-    return discoverBinary(manifest.run?.discovery);
+    // The project root is where `.python-version` / `.nvmrc` / `go.mod` live;
+    // discovery reads them to pick among already-installed toolchains.
+    return discoverBinary(manifest.run?.discovery, { root: this.rootDir || process.cwd() });
   }
 
   private async hostContext(manifest: LanguageManifest, toolchain: BinaryResolution): Promise<HostContext> {
@@ -611,7 +613,7 @@ export class WorkspaceService {
         return;
       }
 
-      const found = discoverBinary(spec.discovery);
+      const found = discoverBinary(spec.discovery, { root: this.rootDir || process.cwd() });
       if (found.source !== 'missing' && found.bin) {
         launch = {
           languageId: spec.languageId ?? slot.id,
