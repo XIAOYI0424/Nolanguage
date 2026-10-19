@@ -41,10 +41,10 @@ import {
   closeRecordedWindow,
   closeStaleWindows,
   findWindowProcesses,
+  isAlive,
   killTree,
   logDesktop,
   patchSession,
-  readSession,
 } from './session.js';
 
 /**
@@ -246,29 +246,43 @@ async function main(): Promise<void> {
 
     // Sweep **every** window still holding our profile before spawning.
     //
-    // A clean exit releases the profile, so nothing is swept and the launch
-    // stays cheap. A crash, a hard kill, or the installer's `taskkill` on
-    // upgrade leaves the detached Edge window alive: it still owns the
-    // profile, Chromium hands the new `--app` URL to that old process, one
-    // extra window flashes and the process we spawned exits at once — the
-    // "多余的弹窗弹出又自动关闭" report. Killing the stale window first makes
-    // this process the browser root, which is what lets us own and watch it.
-    const previous = readSession();
-    const wasClean = previous?.cleanExit === true;
-    // Consume the marker now: a crash before the next clean exit must not be
-    // mistaken for "nothing to clean".
+    // Always, even after a "clean" exit: the marker only records what we
+    // believed, and a single surviving Edge process makes the next spawn
+    // delegate — one window flashes and the process we spawned exits at once.
+    // A missed sweep is worse than one short query per launch.
     patchSession({ cleanExit: undefined });
 
     const recorded = await closeRecordedWindow(profile);
-    const swept = wasClean ? [] : await closeStaleWindows(profile);
+    const swept = await closeStaleWindows(profile);
     const closed = Array.from(new Set([...(recorded ? [recorded] : []), ...swept]));
     logDesktop('previous-window', { pid: recorded ?? null, swept });
     if (closed.length) {
       process.stdout.write(`  Closed the window left by the previous session (pid ${closed.join(', ')})\n`);
     }
-    view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
+
+    // A spawn that exits in under a second never owned a window: Chromium
+    // handed the URL to a stale process. Record it, and retry once after a
+    // second sweep so the user is not left with a window that closes itself.
+    let fastExit = false;
+    view = openWebView({
+      url: `${base}/`,
+      size: '1280,860',
+      quiet: true,
+      onClosed: (info) => {
+        if (info.elapsedMs < 1500) fastExit = true;
+      },
+    });
     if (view.engine === 'none') openSystemBrowser(`${base}/`);
-    else windowPid = await discoverWindow(profile);
+    else {
+      windowPid = await discoverWindow(profile, !fastExit);
+      if (fastExit) {
+        logDesktop('delegation-retry', { pid: windowPid ?? null });
+        view.close();
+        await closeStaleWindows(profile);
+        view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
+        windowPid = await discoverWindow(profile);
+      }
+    }
   }
 
   // Same resolution the store itself uses, so the banner never advertises a
@@ -303,7 +317,7 @@ async function main(): Promise<void> {
    * the "窗口显示连不上" report — so the pid is discovered instead, by asking
    * which process is holding our profile.
    */
-  async function discoverWindow(profile: string): Promise<number | undefined> {
+  async function discoverWindow(profile: string, allowFallback = true): Promise<number | undefined> {
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
       const pids = await findWindowProcesses(profile);
@@ -314,10 +328,16 @@ async function main(): Promise<void> {
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    logDesktop('window-missing', { profile });
-    // A window that never appears is worse than a browser tab: give the user
-    // something to click.
-    openSystemBrowser(`${base}/`);
+    if (allowFallback) {
+      logDesktop('window-missing', { profile });
+      // A window that never appears is worse than a browser tab: give the user
+      // something to click.
+      openSystemBrowser(`${base}/`);
+    } else {
+      // Delegation retry: the caller will sweep and respawn; opening the
+      // system browser here would add the very extra window we are removing.
+      logDesktop('window-missing', { profile, fallback: false });
+    }
     return undefined;
   }
 
@@ -346,6 +366,14 @@ async function main(): Promise<void> {
       if (++quietSeconds < 10) return;
       quietSeconds = 0;
       void (async () => {
+        // Cheap first: the pid we discovered is the window. Only fall back to
+        // the profile query when it is gone (delegation can move the window to
+        // a pid we never spawned). A CIM query on every quiet tick is both
+        // slow and the reason a probe timeout used to look like "no window".
+        if (isAlive(windowPid)) {
+          logDesktop('watchdog-check', { windowsAlive: 1, pids: [windowPid] });
+          return;
+        }
         const alive = windowProfile ? await findWindowProcesses(windowProfile) : [];
         logDesktop('watchdog-check', { windowsAlive: alive.length, pids: alive });
         if (alive.length === 0) shutdown('no-window');

@@ -64,7 +64,11 @@ export function runGit(args: string[], cwd?: string, bin = 'git'): Promise<GitRu
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      // `git.exe` is a console application. Spawned from the GUI exe without
+      // this flag, every probe opens a console window titled "Git/git.exe" —
+      // three of them at startup (rev-parse, status, log) and again on every
+      // 15 s watch tick.
+      child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (err) {
       resolve({ code: -1, stdout: '', stderr: (err as Error).message });
       return;

@@ -185,10 +185,14 @@ export async function closeRecordedWindow(profile: string): Promise<number | und
 export async function findWindowProcesses(profile: string): Promise<number[]> {
   if (process.platform !== 'win32') return [];
   const quoted = profile.replace(/'/g, "''");
+  // `.Contains()` is case-sensitive and the browser normalises the profile
+  // path, so an exact match misses the very process that makes Edge delegate.
+  // Match case-insensitively, and accept the loopback --app URL as a second
+  // marker: it is unique to this app even if the profile string differs.
   const script = [
     `$p = '${quoted}';`,
-    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |`,
-    `  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) -and $_.CommandLine.Contains('--app=') } |`,
+    `Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='msedgewebview2.exe'" |`,
+    `  Where-Object { $_.CommandLine -and $_.CommandLine -match '--app=' -and (($_.CommandLine.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($_.CommandLine -match '--app=http://127.0.0.1:')) } |`,
     '  ForEach-Object { $_.ProcessId }',
   ].join(' ');
   return await new Promise<number[]>((resolve) => {
@@ -215,15 +219,18 @@ export async function findWindowProcesses(profile: string): Promise<number[]> {
           .filter((pid) => Number.isFinite(pid) && pid > 0),
       );
     });
-    // A hung PowerShell must not hang the launch.
+    // A hung probe must not hang the launch. The timeout is deliberately
+    // generous: a cold CIM query on a busy machine can exceed 4 s, and a
+    // missed result is exactly what lets Edge delegate to a stale window.
     setTimeout(() => {
       try {
         child?.kill();
       } catch {
         /* ignore */
       }
+      logDesktop('window-probe-timeout', { profile });
       resolve([]);
-    }, 4000).unref?.();
+    }, 8000).unref?.();
   });
 }
 

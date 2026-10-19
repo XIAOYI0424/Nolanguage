@@ -170,6 +170,16 @@ check(
   /for \(const child of this\.children\)/.test(scriptHostSource) &&
     /child\.kill\('SIGKILL'\)/.test(scriptHostSource),
 );
+const sessionSource = readFileSync(join(here, '..', 'src', 'desktop', 'session.ts'), 'utf8');
+check('the window probe is case-insensitive', /OrdinalIgnoreCase/.test(sessionSource));
+check('the window probe also matches the app URL', /--app=http:\/\/127\.0\.0\.1:/.test(sessionSource));
+check('a delegated spawn is retried once', /delegation-retry/.test(mainSource));
+check('the watchdog checks the known window pid first', /isAlive\(windowPid\)/.test(mainSource));
+const gitProbeSource = readFileSync(join(here, '..', 'src', 'git', 'GitProbe.ts'), 'utf8');
+check(
+  'the git probe never opens a console window',
+  /spawn\(bin, args, \{[^}]*windowsHide:\s*true/.test(gitProbeSource),
+);
 
 // ---- stale-window sweep ----
 // The installer kills `Nolanguage.exe` on upgrade but cannot reach the detached
@@ -181,9 +191,10 @@ check(
   mainSource.indexOf('closeStaleWindows(') !== -1 &&
     mainSource.indexOf('closeStaleWindows(') < mainSource.indexOf('openWebView('),
 );
+check('a clean exit is recorded for the next launch', /cleanExit:\s*true/.test(mainSource));
 check(
-  'a clean exit is recorded for the next launch',
-  /cleanExit:\s*true/.test(mainSource) && /cleanExit\s*===\s*true/.test(mainSource),
+  'the launch always sweeps the profile',
+  /const swept = await closeStaleWindows\(profile\)/.test(mainSource),
 );
 check(
   'an abnormal exit drops the record instead of marking it clean',
