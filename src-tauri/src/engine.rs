@@ -53,6 +53,21 @@ pub struct Engine {
     child: Mutex<Option<tauri_plugin_shell::process::CommandChild>>,
 }
 
+impl Engine {
+    /// Drop the sidecar handle, which closes its stdin.
+    ///
+    /// A closed pipe is how the engine learns the UI is gone:
+    /// `StdioTransport.onClose` listens for `'end'`/`'close'` on stdin and shuts
+    /// the kernel down — language servers, the warm pool, the SQLite flush. So
+    /// this is the *graceful* half of a window close, and it must come first.
+    pub fn release(&self) {
+        if let Ok(mut guard) = self.child.lock() {
+            let dropped = guard.take();
+            drop(dropped);
+        }
+    }
+}
+
 /// Absolute path of the engine sidecar, or an error explaining what is wrong.
 ///
 /// Resolved explicitly rather than trusting the plugin's name lookup, because
