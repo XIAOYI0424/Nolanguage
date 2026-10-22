@@ -38,7 +38,7 @@ const EXAMPLES = join(here, '..', 'src', 'extensions', 'examples');
 
 function makeKernel(store: boolean | string = false): Kernel {
   return new Kernel({
-    appVersion: '0.6.0-ext',
+    appVersion: '0.7.0-ext',
     // TRACE + silent: the ring buffer must hold every record so the assertions
     // can see the extension batches. (`logSilent` keeps the console clean; it
     // does not affect the pipeline.)
@@ -55,7 +55,7 @@ function manifestChecks(): void {
   const good = parseManifest({
     id: 'demo.sample',
     version: '1.2.3',
-    engines: { kernel: '^0.6.0' },
+    engines: { kernel: '^0.7.0' },
     entry: 'extension.js',
     activationEvents: ['onStartup'],
   });
@@ -84,7 +84,7 @@ function manifestChecks(): void {
   check('rejects ^1.0.0 for 0.6.0', !satisfies('0.6.0', '^1.0.0'));
   check('exact range match', satisfies('1.2.3', '1.2.3') && !satisfies('1.2.4', '1.2.3'));
 
-  const registry = new ExtensionRegistry('0.6.0-ext');
+  const registry = new ExtensionRegistry('0.7.0-ext');
   registry.add({
     manifest: good,
     dir: '/tmp',
@@ -119,7 +119,7 @@ function manifestChecks(): void {
     dir: '/tmp',
     manifestPath: '/tmp/x.json',
     entryPath: '/tmp/x.js',
-    compatible: ExtensionRegistry.isCompatible(incompatible, '0.6.0-ext'),
+    compatible: ExtensionRegistry.isCompatible(incompatible, '0.7.0-ext'),
   });
   check('incompatible extension is flagged, not dropped', registry.get('demo.future')?.compatible === false);
   check('incompatible extension is not a startup target', registry.forStartup().every((e) => e.manifest.id !== 'demo.future'));
