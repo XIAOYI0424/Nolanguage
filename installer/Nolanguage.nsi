@@ -8,23 +8,15 @@
 ; Produces Nolanguage-Setup.exe, a normal Windows installer with
 ;   1. 欢迎页   2. 选择安装目录   3. 实时安装进度   4. 完成页（可勾选运行）
 ;
-; The payload is the Tauri desktop build: a native-window shell plus its engine
-; sidecar, both from `src-tauri/target/release`:
+; The payload is the standalone Nolanguage.exe (Node SEA, self-contained); it
+; provides two faces, selected by the launch flag:
 ;
-;   Nolanguage.exe        Tauri shell (native WebView2 window, no console)
-;   NolanguageEngine.exe  the Node SEA engine the shell spawns next to itself
+;   Nolanguage (Web)     -> Nolanguage.exe --open-browser   (default browser)
+;   Nolanguage (Desktop) -> Nolanguage.exe                  (native WebView window)
 ;
-; The shell is what the user opens — the desktop app, not a browser tab. The
-; sidecar is a full copy of the engine, so `nlg` (the CLI shim) talks to *it*
-; and keeps working on a machine with no Node and no source checkout.
-;
-; Build with `node installer/build-setup.mjs` (it passes both paths through
-; /DAPP_EXE and /DENGINE_EXE). Building with a bare `cargo build` is not
-; enough: without the `custom-protocol` feature the shell has no bundled page
-; and its window points at the dev URL, which refuses to connect.
-;
-; Why NSIS and not the Tauri-bundled installer: this one is a per-user install
-; (no UAC), ships the `nlg` CLI shim + PATH helper, and keeps a live log.
+; Why NSIS and not the old Node-SEA installer: an SEA is a console-subsystem
+; image, so double-clicking it *always* flashes a console window and it cannot
+; draw a wizard. NSIS is a GUI-subsystem executable — no console, real pages.
 ; ===========================================================================
 
 Unicode true
@@ -33,10 +25,7 @@ SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 
 !ifndef APP_EXE
-  !define APP_EXE "src-tauri\target\release\nolanguage.exe"
-!endif
-!ifndef ENGINE_EXE
-  !define ENGINE_EXE "src-tauri\target\release\NolanguageEngine.exe"
+  !define APP_EXE "dist\Nolanguage.exe"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "installer\Nolanguage-Setup.exe"
@@ -45,6 +34,7 @@ SetCompressor /SOLID lzma
 !define APP_NAME      "Nolanguage"
 !define APP_VERSION   "0.7.0"
 !define APP_PUBLISHER "Nolanguage"
+!define APP_WEB_ARG   "--open-browser"
 !define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
 Name "${APP_NAME}"
@@ -109,24 +99,12 @@ Section "安装 ${APP_NAME}" SecInstall
   DetailPrint "正在检查是否已运行 ${APP_NAME}…"
   nsExec::ExecToLog 'taskkill /IM "${APP_NAME}.exe" /F /T'
   Pop $0
-  ; An upgrade over a running app must also stop its engine, or the 95 MB
-  ; sidecar stays locked and the uninstall/upgrade leaves a zombie behind.
-  nsExec::ExecToLog 'taskkill /IM "NolanguageEngine.exe" /F /T'
-  Pop $0
 
   SetOutPath "$INSTDIR"
   SetOverwrite on
 
-  DetailPrint "正在解压 ${APP_NAME}…"
-  ; /oname keeps the installed name stable whatever the build tree calls it
-  ; (`nolanguage.exe` in cargo output, `Nolanguage.exe` in the install dir) —
-  ; the CLI shim, the shortcuts and the uninstaller all key off that name.
-  ; The switch goes before the filespec: NSIS only accepts that order.
-  File /oname=${APP_NAME}.exe "${APP_EXE}"
-
-  ; The engine sidecar: the shell refuses to start without it next to itself.
-  DetailPrint "正在解压 ${APP_NAME} 引擎…"
-  File "${ENGINE_EXE}"
+  DetailPrint "正在解压 ${APP_NAME}.exe…"
+  File "${APP_EXE}"
 
   ; The CLI shim and the PATH helper travel with the app: `nlg` has to work on a
   ; machine that never installed Node or a source checkout, and the PATH edit
@@ -140,11 +118,10 @@ Section "安装 ${APP_NAME}" SecInstall
 
   DetailPrint "正在创建开始菜单快捷方式…"
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  ; The desktop app is the product: one shortcut, no "which mode do I want"
-  ; question. (The old "(Web)" entry opened the same engine in a browser tab;
-  ; the Tauri shell has no browser mode, so the entry is gone and cleaned up.)
-  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"     "$INSTDIR\${APP_NAME}.exe" "${APP_WEB_ARG}" "$INSTDIR\${APP_NAME}.exe"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"           "$INSTDIR\${APP_NAME}.exe" ""              "$INSTDIR\${APP_NAME}.exe"
+  ; Left over from earlier builds that shipped a separate "(Desktop)" entry.
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Desktop).lnk"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\uninstall.exe"
 
   DetailPrint "正在创建桌面快捷方式…"
@@ -168,9 +145,9 @@ Section "安装 ${APP_NAME}" SecInstall
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair"            1
 
   ; A fixed estimate rather than `${GetSize}`: scanning the freshly written
-  ; 100 MB tree stalls the progress bar for seconds on a machine with real-time
+  ; 90 MB tree stalls the progress bar for seconds on a machine with real-time
   ; antivirus, and the value only feeds "Settings → Apps" size display.
-  WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" 103000
+  WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" 95000
 
   DetailPrint "安装完成。"
 SectionEnd
@@ -182,10 +159,6 @@ Section "Uninstall"
   DetailPrint "正在关闭 ${APP_NAME}…"
   nsExec::ExecToLog 'taskkill /IM "${APP_NAME}.exe" /F /T'
   Pop $0
-  ; The shell spawns the engine, so it can outlive the window: an uninstall that
-  ; leaves it running keeps a locked file and an orphan process behind.
-  nsExec::ExecToLog 'taskkill /IM "NolanguageEngine.exe" /F /T'
-  Pop $0
 
   ; Restore PATH before the helper script is deleted with the directory.
   DetailPrint "正在还原用户 PATH（按安装时记录的 receipt）…"
@@ -194,7 +167,6 @@ Section "Uninstall"
 
   DetailPrint "正在删除程序文件…"
   Delete "$INSTDIR\${APP_NAME}.exe"
-  Delete "$INSTDIR\NolanguageEngine.exe"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\nlg.cmd"
   Delete "$INSTDIR\path-tool.ps1"
