@@ -59,8 +59,14 @@ export const PYCHARM_CSS = `
   ::-webkit-scrollbar-thumb { background:var(--border); border-radius:5px; border:2px solid transparent; background-clip:padding-box; }
   ::-webkit-scrollbar-thumb:hover { background:var(--text-tertiary); background-clip:padding-box; border:2px solid transparent; }
 
-  /* ---------- shell grid: menu / toolbar / work / status ---------- */
+  /* ---------- shell grid: title / menu / toolbar / work / status ----------
+     The self-drawn title bar only exists when the OS chrome is off (Tauri), so
+     the row list is per mode. A grid with one row too few shifts every band up
+     by one: the toolbar would swallow the work area and the editor would end up
+     in the 24px status row — which is invisible in the Edge build, where
+     .titlebar is display:none and four rows are exactly right. */
   .ide { display:grid; grid-template-rows:28px 40px 1fr 24px; height:100vh; }
+  html[data-tauri="1"] .ide { grid-template-rows:32px 28px 40px 1fr 24px; }
 
   /* menu bar */
   .menubar { display:flex; align-items:center; gap:2px; padding:0 8px; background:var(--bg-primary);
@@ -431,4 +437,143 @@ export const PYCHARM_CSS = `
   /* transient status-bar hint (save feedback) */
   .status .cell.hint { color:var(--text-tertiary); opacity:0; transition:opacity .15s; }
   .status .cell.hint.on { opacity:1; color:var(--accent); }
+
+  /* ---------- MCP tool window ---------- */
+  .mcp { display:flex; flex-direction:column; gap:8px; padding:10px; font-size:12.5px; }
+  .mcp-head { display:flex; align-items:center; gap:6px; }
+  .mcp-title { flex:1; font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--text-secondary); }
+  .mcp-cfg { font:11px var(--mono); color:var(--text-tertiary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:copy; }
+  .mcp-cfg:hover { color:var(--text-secondary); }
+  .mcp-card { display:flex; flex-direction:column; gap:5px; padding:8px; border:1px solid var(--border);
+    border-radius:8px; background:var(--bg-secondary); }
+  .mcp-row { display:flex; align-items:center; gap:6px; }
+  .mcp-state { margin-right:auto; font-size:11px; color:var(--text-tertiary); }
+  .mcp-dot { flex:0 0 auto; width:8px; height:8px; border-radius:50%; background:var(--text-tertiary); }
+  .mcp-dot.ok { background:var(--success); }
+  .mcp-dot.warn { background:var(--warning); }
+  .mcp-dot.err { background:var(--error); }
+  .mcp-dot.off { background:var(--border); }
+  .mcp-cmd { font:11px var(--mono); color:var(--text-tertiary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mcp-desc { font-size:11px; color:var(--text-tertiary); }
+  .mcp-err { font-size:11px; color:var(--error); }
+  .mcp-tools { display:flex; flex-wrap:wrap; gap:4px; }
+  .mcp-tool { font:11px var(--mono); padding:2px 8px; border:1px solid var(--border); border-radius:999px;
+    background:var(--bg-primary); color:var(--text-secondary); cursor:pointer; }
+  .mcp-tool:hover { background:var(--bg-hover); color:var(--text-primary); }
+  .mcp-out { margin:2px 0 0; padding:8px; max-height:220px; overflow:auto; white-space:pre-wrap;
+    border:1px solid var(--border); border-radius:8px; background:var(--bg-primary);
+    font:11px var(--mono); color:var(--text-secondary); }
+
+  /* ---------- commit / VCS ---------- */
+  .commit-pane { display:flex; flex-direction:column; gap:8px; padding:10px; height:100%; }
+  .commit-pane textarea { flex:1; min-height:90px; resize:none; background:var(--bg-secondary);
+    color:var(--text-primary); border:1px solid var(--border); border-radius:8px; padding:8px;
+    font:12px var(--sans); outline:none; }
+  .commit-pane textarea:focus { border-color:var(--accent); }
+  .commit-actions { display:flex; gap:8px; }
+  .commit-actions .tbtn { flex:1; justify-content:center; }
+  .commit-branch { font-size:11.5px; color:var(--text-secondary); }
+  .git-list { flex:1; min-height:40px; overflow:auto; display:flex; flex-direction:column; gap:1px; }
+  .git-row { display:flex; gap:6px; align-items:baseline; font:11px var(--mono); padding:1px 2px; }
+  .git-row:hover { background:var(--bg-hover); }
+  .git-st { flex:0 0 auto; color:var(--text-tertiary); letter-spacing:.06em; }
+  .git-st.new { color:var(--success); }
+  .git-st.del { color:var(--error); }
+  .git-st.mod { color:var(--warning); }
+  .git-path { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-secondary); }
+  .git-err { color:var(--error); font-size:11.5px; line-height:1.5; }
+
+  /* ---------- debug toolbar (Run dock) ---------- */
+  .dbg-bar { display:none; align-items:center; gap:6px; padding:4px 8px;
+    border-bottom:1px solid var(--border); background:var(--bg-secondary); }
+  .dbg-bar .dbg-state { font:11px var(--mono); color:var(--accent); margin-right:4px; }
+  .dbg-bar .tbtn { padding:1px 8px; font-size:11.5px; }
+
+  /* ---------- coverage marks ---------- */
+  .gline.covmiss .num { color:var(--error); font-weight:600; }
+  .gline.covhit .num { color:var(--success); }
+  .CodeMirror .covmiss { background:rgba(224,90,90,.15); }
+  .CodeMirror .covhit { background:rgba(78,201,176,.10); }
+
+  /* ---------- breakpoints in the CodeMirror gutter ----------
+     While CodeMirror is active the app's own #gutter is hidden, so breakpoint
+     dots and the toggle live in a dedicated CM gutter column instead. The dot
+     element is a plain .bp span handed to setGutterMarker. */
+  .CodeMirror-gutter.bp-gutter { width:16px; text-align:center; cursor:pointer; }
+  .CodeMirror-gutter-elt .bp { display:inline-block; width:9px; height:9px; border-radius:50%;
+    background:var(--error); border:1px solid rgba(0,0,0,.25); vertical-align:middle; cursor:pointer; }
+  .CodeMirror-linenumber { cursor:pointer; }
+
+  /* ---------- diagnostics: squiggly underline + gutter tint ---------- */
+  .CodeMirror .diag-sq { text-decoration: underline wavy; text-underline-position: under;
+    text-decoration-skip-ink: none; text-decoration-thickness: 1px; }
+  .CodeMirror .diag-s1 { text-decoration-color: var(--error); }
+  .CodeMirror .diag-s2 { text-decoration-color: var(--warning); }
+  .CodeMirror .diag-s3 { text-decoration-color: var(--text-tertiary); }
+  .CodeMirror .diag-g1 { background: rgba(219,92,92,.20); }
+  .CodeMirror .diag-g2 { background: rgba(214,165,69,.18); }
+  .CodeMirror .diag-g3 { background: rgba(255,255,255,.05); }
+  /* textarea fallback (no CodeMirror): colour the line number + tint the gutter */
+  .gline.haserr { background: rgba(219,92,92,.10); }
+  .gline.haswarn { background: rgba(214,165,69,.10); }
+  .gline.haserr .num { color: var(--error); font-weight:600; }
+  .gline.haswarn .num { color: var(--warning); font-weight:600; }
+  .gline.hasinfo .num { color: var(--text-tertiary); }
+  .prob { cursor:pointer; }
+  .prob:hover { background: var(--bg-hover); }
+
+  /* ---------- kernel flame graph window ---------- */
+  .flame-win { position:fixed; z-index:95; left:50%; top:10%; transform:translateX(-50%);
+    width:min(980px,94vw); height:min(760px,88vh); display:none; flex-direction:column;
+    background:var(--bg-primary); border:1px solid var(--border); border-radius:10px;
+    box-shadow:0 18px 48px rgba(0,0,0,.45); overflow:hidden; }
+  .flame-win.open { display:flex; }
+  .flame-head { display:flex; align-items:center; gap:8px; padding:7px 10px;
+    border-bottom:1px solid var(--border); background:var(--bg-secondary); cursor:move; user-select:none; }
+  .flame-head b { font-size:12.5px; font-weight:600; }
+  .flame-meta { font:11px var(--mono); color:var(--text-tertiary); }
+  /* Chart on top, hotspots underneath. A right-hand column looked fine at
+     980px but was clipped as soon as the window (or a narrow display) shrank,
+     so the two regions stack instead of competing for width. */
+  .flame-body { flex:1; display:flex; flex-direction:column; min-height:0; }
+  .flame-chart { flex:1 1 auto; min-height:0; position:relative; overflow:auto; padding:8px;
+    background:var(--bg-primary); font:11px var(--mono); }
+  /* memory trend between the flame and the hotspots */
+  .flame-mem { flex:0 0 auto; height:150px; border-top:1px solid var(--border);
+    display:flex; flex-direction:column; min-height:0; background:var(--bg-primary); }
+  .flame-mem-head { display:flex; justify-content:space-between; align-items:baseline;
+    font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--text-secondary); padding:5px 10px 2px; }
+  .flame-mem-top { text-transform:none; letter-spacing:0; font:10.5px var(--mono);
+    color:var(--accent); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .flame-mem-chart { flex:1; min-height:0; overflow:hidden; }
+  .flame-mem-chart svg { display:block; width:100%; height:100%; }
+  .flame-mem-chart .empty { padding:12px; }
+  .flame-mem-legend { display:flex; flex-wrap:wrap; gap:1px 12px; padding:2px 10px 5px;
+    font:10px var(--mono); color:var(--text-tertiary); max-height:32px; overflow:hidden; }
+  .flame-mem-legend i { display:inline-block; width:9px; height:2px; margin-right:4px;
+    vertical-align:middle; }
+  .flame-side { flex:0 0 auto; max-height:180px; border-top:1px solid var(--border);
+    display:flex; flex-direction:column; min-height:0; background:var(--bg-secondary); }
+  .flame-side-title { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--text-secondary); padding:6px 10px 3px; }
+  .flame-hot { flex:1; overflow:auto; padding:0 8px 6px; display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:1px 10px; align-content:start; }
+  .flame-hot-row { display:flex; flex-direction:column; gap:0; padding:2px 4px; border-radius:5px; cursor:default; }
+  .flame-hot-row:hover { background:var(--bg-hover); }
+  .flame-hot-name { font:11px var(--mono); color:var(--text-primary); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .flame-hot-meta { font:10px var(--mono); color:var(--text-tertiary); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .flame-note { font-size:10.5px; color:var(--text-tertiary); line-height:1.45;
+    padding:3px 10px 6px; border-top:1px solid var(--border); }
+  .fnode { position:absolute; height:16px; line-height:16px; font:10.5px var(--mono);
+    padding:0 3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+    border-radius:2px; border:1px solid rgba(0,0,0,.18); cursor:default; }
+  .fnode.k-js { background:#3a6ea5; color:#eaf2fb; }
+  .fnode.k-native { background:#5b4a8a; color:#efeafb; }
+  .fnode.k-idle { background:#3b3f45; color:#9aa0a6; }
+  .fnode.k-gc { background:#8a5a2b; color:#fbeee2; }
+  .fnode.k-kernel { background:#2f7d6b; color:#e6fbf5; }
+  .fnode:hover { outline:1px solid #fff; }
 `;

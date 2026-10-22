@@ -166,6 +166,7 @@
     ],
     "serverName": "delve",
     "memoryHint": "80MB",
-    "degradedNote": "delve not installed - debugging is unavailable for Go"
+    "degradedNote": "delve not installed - debugging is unavailable for Go",
+    "install": "go install github.com/go-delve/delve/cmd/dlv@latest"
   }
 }

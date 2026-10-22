@@ -274,6 +274,9 @@ export class LanguageRegistry {
           const raw: unknown = JSON.parse(await readFile(manifestPath, 'utf8'));
           const validation = validateManifest(raw);
           const base = raw as LanguageManifest;
+          // Localization plugins ship a translation bundle, not a language; the i18n
+          // loader handles them. They must never enter the language registry.
+          if ((raw as Record<string, unknown>).type === 'localization') continue;
           if (!validation.ok || !base.id) continue;
           const id = base.id;
           // Overrides are applied per id, before anything compares versions:

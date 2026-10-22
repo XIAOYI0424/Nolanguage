@@ -118,6 +118,8 @@ export interface WorkspaceRunResult {
   runId: string;
   exitCode: number | null;
   signal: string | null;
+  /** The host stopped this run (Stop button), not the program exiting. */
+  cancelled?: boolean;
   durationMs: number;
   stdout: string;
   stderr: string;
@@ -284,6 +286,8 @@ export class WorkspaceService {
   private syncing = false;
   /** Serialises queued plugin syncs (see `queueSync`). */
   private syncChain: Promise<unknown> = Promise.resolve();
+  /** Live runs per session id, so the Stop button aborts the right process. */
+  private activeRuns = new Map<string, AbortController>();
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
@@ -849,6 +853,8 @@ export class WorkspaceService {
       timeoutMs?: number;
       onData?: (stream: 'stdout' | 'stderr', text: string) => void;
       onStdinReady?: (sink: (data: string) => void) => void;
+      /** Host cancellation, merged with the internal per-session controller. */
+      signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceRunResult> {
     const slot = this.requireSlot(id);
@@ -866,32 +872,66 @@ export class WorkspaceService {
     const mode: RunMode = opts.mode ?? 'run';
     if (opts.reset) await slot.runner.resetSession(sessionId);
 
-    const outcome = await slot.runner.run({
-      code,
-      sessionId,
-      mode,
-      timeoutMs: opts.timeoutMs ?? this.opts.runTimeoutMs,
-      onData: opts.onData,
-      onStdinReady: opts.onStdinReady,
-    });
+    // One live run per session: a second Run replaces the first (PyCharm stops
+    // the previous process instead of leaving two programs on the same stdin),
+    // and Stop reaches the run through `cancel(sessionId)`.
+    const previous = this.activeRuns.get(sessionId);
+    if (previous) previous.abort();
+    const ctl = new AbortController();
+    this.activeRuns.set(sessionId, ctl);
+    const relayAbort = (): void => ctl.abort();
+    if (opts.signal) {
+      if (opts.signal.aborted) ctl.abort();
+      else opts.signal.addEventListener('abort', relayAbort, { once: true });
+    }
 
-    return {
-      languageId: id,
-      sessionId: outcome.sessionId,
-      runId: outcome.runId,
-      exitCode: outcome.exitCode,
-      signal: outcome.signal,
-      durationMs: outcome.durationMs,
-      stdout: outcome.stdout,
-      stderr: outcome.stderr,
-      timedOut: outcome.timedOut,
-      logLines: outcome.logLines,
-      mode,
-      binary: outcome.binary,
-      phase: outcome.phase,
-      compileError: outcome.compileError,
-      buildMs: outcome.buildMs,
-    };
+    try {
+      const outcome = await slot.runner.run({
+        code,
+        sessionId,
+        mode,
+        timeoutMs: opts.timeoutMs ?? this.opts.runTimeoutMs,
+        onData: opts.onData,
+        onStdinReady: opts.onStdinReady,
+        signal: ctl.signal,
+      });
+
+      return {
+        languageId: id,
+        sessionId: outcome.sessionId,
+        runId: outcome.runId,
+        exitCode: outcome.exitCode,
+        signal: outcome.signal,
+        cancelled: outcome.cancelled,
+        durationMs: outcome.durationMs,
+        stdout: outcome.stdout,
+        stderr: outcome.stderr,
+        timedOut: outcome.timedOut,
+        logLines: outcome.logLines,
+        mode,
+        binary: outcome.binary,
+        phase: outcome.phase,
+        compileError: outcome.compileError,
+        buildMs: outcome.buildMs,
+      };
+    } finally {
+      opts.signal?.removeEventListener('abort', relayAbort);
+      if (this.activeRuns.get(sessionId) === ctl) this.activeRuns.delete(sessionId);
+    }
+  }
+
+  /**
+   * Stop the run attached to `sessionId`.
+   *
+   * Returns false when nothing is running, so the UI can say "no run in
+   * progress" instead of pretending it stopped something.
+   */
+  cancel(sessionId = 'ide'): boolean {
+    const ctl = this.activeRuns.get(sessionId);
+    if (!ctl) return false;
+    this.activeRuns.delete(sessionId);
+    ctl.abort();
+    return true;
   }
 
   async resetSession(id: LanguageId, sessionId = 'ide'): Promise<boolean> {

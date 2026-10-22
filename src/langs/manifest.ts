@@ -125,6 +125,8 @@ export interface DebugSpec {
   memoryHint?: string;
   /** What to tell the user when discovery fails. */
   degradedNote?: string;
+  /** Concrete install command shown when the adapter is missing (item 4). */
+  install?: string;
 }
 
 export interface LanguageManifest {
@@ -262,6 +264,11 @@ export function validateManifest(raw: unknown): ManifestValidation {
     return { ok: false, issues: [{ field: '', message: 'manifest must be a JSON object' }] };
   }
   const m = raw as Record<string, unknown>;
+
+  // A localization plugin contributes a translation bundle, not a language: it has
+  // no `file`/`grammar`/`run` and is discovered by the i18n loader, never by the
+  // language registry. Validation is therefore not applicable.
+  if (asString(m.type) === 'localization') return { ok: true, issues: [] };
 
   if (!ID_RE.test(asString(m.id))) add('id', 'must be lowercase letters, digits or hyphens, starting with a letter');
   if (!asString(m.displayName)) add('displayName', 'is required');

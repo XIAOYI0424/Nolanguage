@@ -15,6 +15,9 @@ import { PYCHARM_CSS } from './ui/pycharm-css.js';
 import { PYCHARM_SHELL } from './ui/pycharm-shell.js';
 import { pyCharmClientScript } from './ui/pycharm-client.js';
 import { CODEMIRROR_CSS, CODEMIRROR_JS } from './ui/codemirror-assets.js';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { officialRoots } from '../langs/pluginRoots.js';
 
 /**
  * PyCharm New UI shell (design: 复刻 PyCharm 2024.1+ New UI).
@@ -74,6 +77,8 @@ const ICONS: Record<string, { vb: string; d: string }> = {
   perf: { vb: '0 0 20 20', d: '<path d="M2.6 16.6h14.8"/><path d="M5 16.6V11M8.6 16.6V6.4M12.2 16.6V9M15.8 16.6V3.8"/>' },
   logs: { vb: '0 0 20 20', d: '<path d="M4 5h12M4 9h12M4 13h8M4 17h6"/>' },
   ai: { vb: '0 0 20 20', d: '<path d="M10 2.2l1.7 4.6 4.6 1.7-4.6 1.7L10 14.8 8.3 10.2 3.7 8.5l4.6-1.7z" fill="currentColor" stroke="none"/>' },
+  // MCP: one hub, four peers — a client wired to external tool servers.
+  mcp: { vb: '0 0 20 20', d: '<circle cx="10" cy="10" r="2.3"/><circle cx="4.4" cy="4.6" r="1.5"/><circle cx="15.6" cy="4.6" r="1.5"/><circle cx="4.4" cy="15.4" r="1.5"/><circle cx="15.6" cy="15.4" r="1.5"/><path d="M6.1 6.2l1.7 1.7M13.9 6.2l-1.7 1.7M6.1 13.8l1.7-1.7M13.9 13.8l-1.7-1.7"/>' },
   settings: { vb: '0 0 20 20', d: '<circle cx="10" cy="10" r="2.6"/><path d="M10 2v2.3M10 15.7V18M2 10h2.3M15.7 10H18M4.3 4.3l1.6 1.6M14.1 14.1l1.6 1.6M15.7 4.3l-1.6 1.6M5.9 14.1l-1.6 1.6"/>' },
   search: { vb: '0 0 20 20', d: '<circle cx="8.7" cy="8.7" r="4.5"/><path d="M12.1 12.1l3.6 3.6"/>' },
   more: { vb: '0 0 20 20', d: '<circle cx="10" cy="4.4" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="15.6" r="1.1" fill="currentColor" stroke="none"/>' },
@@ -89,6 +94,44 @@ const ICONS: Record<string, { vb: string; d: string }> = {
   check: { vb: '0 0 16 16', d: '<path d="M3.5 8.5l3 3 6-7"/>' },
 };
 
+/**
+ * Gather every localization plugin's `contributes.i18n` bundle, keyed by locale.
+ *
+ * Localization plugins (`type: "localization"`) live alongside languages under
+ * `<builtin>/<id>@<version>/manifest.json` but are discovered here, not by the
+ * language registry. Each contributes `{ locale, messages }`; the browser i18n
+ * layer (`t()` in the client) picks the active locale's map and falls back to the
+ * English strings baked into the page. A plugin whose manifest is missing or
+ * malformed is skipped — one bad bundle must not take the whole UI down.
+ */
+function collectI18nBundles(): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const root of officialRoots()) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(root.dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const mf = join(root.dir, name, 'manifest.json');
+      if (!existsSync(mf)) continue;
+      try {
+        const m = JSON.parse(readFileSync(mf, 'utf8'));
+        const i18n = m?.contributes?.i18n;
+        if (i18n && typeof i18n.locale === 'string' && i18n.messages && typeof i18n.messages === 'object') {
+          out[i18n.locale] = { ...(out[i18n.locale] || {}), ...i18n.messages };
+        }
+      } catch {
+        // ignore malformed localization manifest
+      }
+    }
+  }
+  return out;
+}
+
 export function renderPyCharmHtml(_port: number): string {
   const iconsJson = JSON.stringify(ICONS);
   const patternJson = JSON.stringify(PY_PATTERN);
@@ -96,6 +139,7 @@ export function renderPyCharmHtml(_port: number): string {
   const utilsJson = JSON.stringify(SAMPLE_UTILS);
   const jsJson = JSON.stringify(SAMPLE_JS);
   const readmeJson = JSON.stringify(SAMPLE_README);
+  const i18nJson = JSON.stringify(collectI18nBundles());
 
   return `<!doctype html>
 <html lang="en" data-theme="darcula">
@@ -116,7 +160,7 @@ ${PYCHARM_SHELL}
 ${CODEMIRROR_JS}
 </script>
 <script>
-${pyCharmClientScript({ iconsJson, patternJson, mainJson, utilsJson, jsJson, readmeJson })}
+${pyCharmClientScript({ iconsJson, patternJson, mainJson, utilsJson, jsJson, readmeJson, i18nJson })}
 </script>
 </body>
 </html>`;

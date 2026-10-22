@@ -129,6 +129,7 @@ export class ReplSessionRunner implements Runner {
       onData: opts.onData,
       onStdinReady: opts.onStdinReady,
       captureLines: true,
+      signal: opts.signal,
     });
 
     const metrics = this.ctx.kernel.perfMetrics();
@@ -142,6 +143,7 @@ export class ReplSessionRunner implements Runner {
       runId,
       exitCode: res.exitCode,
       signal: res.signal,
+      cancelled: res.cancelled,
       durationMs: res.durationMs,
       stdout: res.stdout,
       stderr: res.stderr,

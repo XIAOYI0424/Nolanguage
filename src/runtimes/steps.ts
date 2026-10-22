@@ -37,6 +37,8 @@ export interface StepRunInput {
   ctx: HostContext;
   onData?: (stream: 'stdout' | 'stderr', text: string) => void;
   onStdinReady?: (sink: (data: string) => void) => void;
+  /** Host cancellation, forwarded to every step's `capture`. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -92,12 +94,23 @@ export async function runSteps(input: StepRunInput): Promise<RunOutcome> {
       onData: input.onData,
       onStdinReady: input.onStdinReady,
       captureLines: true,
+      signal: input.signal,
     });
 
     stdout.push(res.stdout);
     stderr.push(res.stderr);
     logLines += res.logLines;
     if (step.role === 'build') buildMs += res.durationMs;
+
+    if (res.cancelled) {
+      return finish({
+        exitCode: res.exitCode,
+        signal: res.signal,
+        cancelled: true,
+        phase: step.role,
+        buildMs: buildMs || undefined,
+      });
+    }
 
     if (res.exitCode !== 0 || res.timedOut) {
       const phase = step.role;

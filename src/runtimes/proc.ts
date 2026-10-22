@@ -28,6 +28,12 @@ export interface CaptureOptions {
   onStdinReady?: (sink: (data: string) => void) => void;
   /** Count non-empty lines into the log (used for `execution.lines`). */
   captureLines?: boolean;
+  /**
+   * Cancellation from the host (the IDE's Stop button). Aborting kills the
+   * child with SIGKILL — a runaway program must not outlive the button that
+   * asked it to die — and resolves the promise as `cancelled`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface CaptureResult {
@@ -36,6 +42,8 @@ export interface CaptureResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** True when the host aborted the run rather than the program exiting. */
+  cancelled: boolean;
   logLines: number;
   durationMs: number;
 }
@@ -103,17 +111,20 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
     const stderr: string[] = [];
     let logLines = 0;
     let timedOut = false;
+    let cancelled = false;
     let settled = false;
 
     const finish = (exitCode: number | null, signal: string | null): void => {
       if (settled) return;
       settled = true;
+      opts.signal?.removeEventListener('abort', onAbort);
       resolve({
         exitCode,
         signal,
         stdout: stdout.join(''),
         stderr: stderr.join(''),
         timedOut,
+        cancelled,
         logLines,
         durationMs: Date.now() - started,
       });
@@ -133,6 +144,22 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
       opts.log?.error('Execution timed out', { timeoutMs: opts.timeoutMs, command });
       child.kill('SIGKILL');
     }, Math.max(250, opts.timeoutMs));
+
+    /** The host aborted (Stop button): kill first, let `close` resolve. */
+    function onAbort(): void {
+      if (settled) return;
+      cancelled = true;
+      opts.log?.info('Execution cancelled', { runId: opts.runId, command });
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     const onChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
       const text = chunk.toString('utf8');

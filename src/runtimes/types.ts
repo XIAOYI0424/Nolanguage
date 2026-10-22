@@ -137,6 +137,8 @@ export interface RunRequest {
   env?: Record<string, string>;
   onData?: (stream: 'stdout' | 'stderr', text: string) => void;
   onStdinReady?: (sink: (data: string) => void) => void;
+  /** Host cancellation (the IDE's Stop button). Runtimes race it against the child. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -152,6 +154,8 @@ export interface RunOutcome {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** True when the host stopped the run (Stop button) instead of it exiting. */
+  cancelled?: boolean;
   logLines: number;
   /** Which binary/command produced the output. */
   binary: string;

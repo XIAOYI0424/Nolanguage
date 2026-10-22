@@ -249,8 +249,8 @@ async function testBoot(): Promise<void> {
     ['File', 'Edit', 'View', 'Navigate', 'Code', 'Run', 'Tools', 'VCS', 'Window', 'Help'].every((m) => menus.indexOf(m) !== -1),
     menus.join(','));
   check('boot: main toolbar renders the run widget', !!q(w, '#runBtn') && !!q(w, '#projWidget'));
-  check('boot: tool strip renders 9 tools + settings', qa(w, '#strip .sbtn').length === 10, `${qa(w, '#strip .sbtn').length} buttons`);
-  check('boot: icons are painted as inline SVG', qa(w, '#strip .sbtn svg').length === 10);
+  check('boot: tool strip renders 10 tools + settings', qa(w, '#strip .sbtn').length === 11, `${qa(w, '#strip .sbtn').length} buttons`);
+  check('boot: icons are painted as inline SVG', qa(w, '#strip .sbtn svg').length === 11);
   check('boot: editor gutter renders line numbers', qa(w, '#glines .gline').length > 5, `${qa(w, '#glines .gline').length} rows`);
   check('boot: editor loads the main.py sample', (q(w, '#ta')?.value ?? '').indexOf('def fib') !== -1);
   check('boot: three document tabs render', qa(w, '#etabs .etab').length === 3, `${qa(w, '#etabs .etab').length} tabs`);
@@ -498,9 +498,40 @@ async function testTauriBridge(): Promise<void> {
   check('tauri: no WebSocket is opened at all', FakeSocket.instances.length === 0, String(FakeSocket.instances.length));
   check('tauri: every message is an engine_send invoke',
     FakeTauri.invokes.length > 0 &&
-    FakeTauri.invokes.every((i) => i.cmd === 'engine_send' || i.cmd === 'plugin:event|listen'),
+    FakeTauri.invokes.every((i) => i.cmd === 'engine_send' || i.cmd === 'plugin:event|listen' || /^plugin:window\|/.test(i.cmd)),
     FakeTauri.invokes.map((i) => (i.cmd === 'engine_send' ? String(i.args?.msg?.kind) : i.cmd)).join(','));
   check('tauri: the handshake reaches the engine over IPC', !!FakeTauri.sent('listExtensions'));
+
+  // ---- title bar: the OS chrome is off, so the shell owns the buttons ----
+  // The buttons used to call window.__TAURI__.window.getCurrentWindow(), which
+  // does not exist on this page (no @tauri-apps/api bundle) — so no handler was
+  // ever attached and every click did nothing. They now go through the
+  // internals, the same global the transport bridge uses.
+  fire(w, q(w, '#tbMin'), 'click', {});
+  fire(w, q(w, '#tbMax'), 'click', {});
+  fire(w, q(w, '#tbClose'), 'click', {});
+  await settle(w);
+  const cmds = FakeTauri.invokes.map((i) => i.cmd);
+  check('tauri: minimize reaches the window plugin',
+    cmds.indexOf('plugin:window|minimize') !== -1, cmds.join(','));
+  check('tauri: toggle_maximize reaches the window plugin',
+    cmds.indexOf('plugin:window|toggle_maximize') !== -1, cmds.join(','));
+  check('tauri: close reaches the window plugin',
+    cmds.indexOf('plugin:window|close') !== -1, cmds.join(','));
+  check('tauri: the title bar marks the document as a Tauri window',
+    q(w, 'html').getAttribute('data-tauri') === '1', String(q(w, 'html').getAttribute('data-tauri')));
+
+  // Dragging the bar moves the window (WebView2 ignores -webkit-app-region,
+  // which is what the Edge --app build uses), but a press on a button must not.
+  fire(w, q(w, '.titlebar .tb-spacer'), 'mousedown', { button: 0 });
+  await settle(w);
+  const drags = FakeTauri.invokes.filter((i) => i.cmd === 'plugin:window|start_dragging').length;
+  check('tauri: dragging the title bar asks the window to move', drags === 1, String(drags));
+  fire(w, q(w, '#tbClose'), 'mousedown', { button: 0 });
+  await settle(w);
+  check('tauri: a press on a button does not start a drag',
+    FakeTauri.invokes.filter((i) => i.cmd === 'plugin:window|start_dragging').length === 1,
+    String(FakeTauri.invokes.filter((i) => i.cmd === 'plugin:window|start_dragging').length));
 
   // Engine → UI is an event, not a frame.
   FakeTauri.emit('engine_message', {
@@ -791,6 +822,70 @@ async function testLanguageSwitch(): Promise<void> {
     (q(w, '#probOut')?.textContent ?? '').indexOf('stale js problem') === -1,
     (q(w, '#probOut')?.textContent ?? '').trim().slice(0, 40));
 
+  // ---- L0: the same diagnostics reach the editor, not just the panel ----
+  const glineAt = (i: number) => qa(w, '#glines .gline')[i];
+  check('diag: an error tints its gutter line',
+    /haserr/.test(glineAt(0)?.className ?? ''), String(glineAt(0)?.className ?? ''));
+  socket.deliver({ kind: 'diagnostics', language: 'python', items: [{ line: 1, character: 0, severity: 2, message: 'heads up' }] });
+  await settle(w);
+  check('diag: a warning uses its own tint',
+    /haswarn/.test(glineAt(1)?.className ?? '') && !/haserr/.test(glineAt(1)?.className ?? ''),
+    String(glineAt(1)?.className ?? ''));
+  check('diag: an info diagnostic is tinted too',
+    (() => { socket.deliver({ kind: 'diagnostics', language: 'python', items: [{ line: 2, character: 0, severity: 3, message: 'fyi' }] }); return /hasinfo/.test(glineAt(2)?.className ?? ''); })(),
+    String(glineAt(2)?.className ?? ''));
+
+  // A Problems row is a navigation shortcut: clicking it puts the caret there.
+  // Line 2 of the JS sample is blank, so ask for column 0 and expect line 3.
+  socket.deliver({ kind: 'diagnostics', language: 'python', items: [{ line: 2, character: 0, severity: 1, message: 'jump target' }] });
+  await settle(w);
+  const probRow = qa(w, '#probOut .prob')[0];
+  check('diag: a problem row is addressable for jumping', !!probRow && probRow.getAttribute('data-pi') === '0',
+    String(probRow && probRow.getAttribute('data-pi')));
+  probRow?.click();
+  await settle(w);
+  check('diag: clicking a problem row moves the caret to its line',
+    (q(w, '#stPos')?.textContent ?? '').indexOf('Ln 3') !== -1,
+    (q(w, '#stPos')?.textContent ?? '').trim());
+
+  // L1: check as you type — an edit schedules a check instead of waiting for
+  // the manual button.
+  const checksBefore = socket.sent.filter((m: any) => m.kind === 'check').length;
+  const ta = q(w, '#ta');
+  ta.value = 'x = undeclared_var\n';
+  fire(w, ta, 'input', {});
+  check('diag: an edit does not check synchronously',
+    socket.sent.filter((m: any) => m.kind === 'check').length === checksBefore,
+    `${socket.sent.filter((m: any) => m.kind === 'check').length - checksBefore} sent`);
+  await settle(w, 360);
+  const lastCheck = socket.lastSentOf('check');
+  check('diag: an edit schedules a debounced check',
+    !!lastCheck && (lastCheck.code as string).indexOf('undeclared_var') !== -1 && lastCheck.language === 'python',
+    JSON.stringify(lastCheck && { language: lastCheck.language, code: String(lastCheck.code).slice(0, 24) }));
+
+  // L3: saving re-checks and reports errors once, with a way to open the panel.
+  // Save has no button of its own — it is Ctrl+S (or the File menu).
+  socket.deliver({ kind: 'diagnostics', language: 'python', items: [{ line: 0, character: 0, severity: 1, message: 'still broken' }] });
+  await settle(w);
+  q(w, '#ta').value = 'y = 1\n';
+  fire(w, q(w, '#ta'), 'input', {});
+  await settle(w, 360);
+  fire(w, w.document, 'keydown', { key: 's', ctrlKey: true });
+  await settle(w, 360);
+  socket.deliver({ kind: 'diagnostics', language: 'python', items: [{ line: 0, character: 0, severity: 1, message: 'still broken' }] });
+  await settle(w);
+  check('diag: saving with errors raises a balloon that offers the panel',
+    (q(w, '#balloons')?.textContent ?? '').indexOf('syntax error') !== -1 &&
+    (q(w, '#balloons')?.textContent ?? '').indexOf('Show') !== -1,
+    `writes=${socket.sent.filter((m: any) => m.kind === 'fsWrite').length} · ${(q(w, '#balloons')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 70)}`);
+  // A clean document must not claim problems it does not have.
+  socket.deliver({ kind: 'diagnostics', language: 'python', items: [] });
+  await settle(w);
+  check('diag: a clean answer clears the gutter tint',
+    !/haserr|haswarn|hasinfo/.test(glineAt(0)?.className ?? '') &&
+    (q(w, '#probOut')?.textContent ?? '').indexOf('No problems') !== -1,
+    String(glineAt(0)?.className ?? ''));
+
   // ---- scoped to its own document ----
   check('lang: opened main.py', openViaFile(w, 'main.py'));
   await settle(w);
@@ -1030,6 +1125,83 @@ async function testInteractions(): Promise<void> {
   w.close();
 }
 
+// ---------------------------------------------------------- i18n (localization plugin)
+
+async function testI18n(): Promise<void> {
+  // The built-in zh-cn localization plugin reaches the page as a bundle.
+  check('i18n: built-in zh-cn bundle is embedded in the page', html.indexOf('"menu.File":"文件"') !== -1);
+
+  // Default locale is English: menus keep their source strings.
+  const en = mountPage(html);
+  await settle(en.window);
+  const enMenus = qa(en.window, '#menubar .menu').map((m: any) => (m.textContent || '').trim());
+  check('i18n: default locale keeps English menus', enMenus.some((m: string) => m.indexOf('File') === 0), enMenus.join('|'));
+  en.window.close();
+
+  // With locale zh-CN persisted, the same menus render in Chinese and the
+  // toolbar label follows the locale.
+  const zh = mountPage(html, JSON.stringify({ locale: 'zh-CN' }));
+  await settle(zh.window);
+  const zhMenus = qa(zh.window, '#menubar .menu').map((m: any) => (m.textContent || '').trim());
+  check('i18n: zh-CN locale renders Chinese menus', zhMenus.some((m: string) => m.indexOf('文件') === 0), zhMenus.join('|'));
+  const tb = q(zh.window, '#runBtn span[data-i18n]') as any;
+  check('i18n: toolbar label follows the locale', !!tb && (tb.textContent || '') === '运行');
+  zh.window.close();
+}
+
+// ---------------------------------------------------------- MCP sidebar
+
+async function testMcp(): Promise<void> {
+  FakeSocket.instances = [];
+  const { window: w, socket } = mountPage(html);
+  await settle(w);
+
+  // Open the sidebar tool window the way a user does.
+  const btn = qa(w, '#strip .sbtn').find((b: any) => (b.title ?? '').indexOf('MCP') === 0);
+  check('mcp: the strip exposes an MCP tool window', !!btn);
+  btn.click();
+  await settle(w);
+  check('mcp: the panel renders', !!q(w, '#panelBody .mcp'));
+  check('mcp: opening the panel asks the engine for the catalogue', !!socket?.lastSentOf('mcpList'));
+
+  // The engine's frame: one ready server with a tool, one idle server.
+  socket!.deliver({
+    kind: 'mcp',
+    configPath: 'C:\\data\\mcp.json',
+    configExists: true,
+    configError: '',
+    servers: [
+      { id: 'filesystem', command: 'npx', args: ['-y', 'server-fs'], description: 'Files', status: 'ready', error: '', tools: [{ name: 'read_file', description: 'Read a file' }] },
+      { id: 'demo', command: 'node', args: ['demo.js'], description: '', status: 'idle', error: '', tools: [] },
+    ],
+  });
+  await settle(w);
+  check('mcp: a ready server renders with its tool', (q(w, '#panelBody')?.textContent ?? '').indexOf('filesystem') !== -1
+    && qa(w, '#panelBody .mcp-tool').length === 1, `${qa(w, '#panelBody .mcp-tool').length} tools`);
+  check('mcp: an idle server offers Connect', qa(w, '#panelBody button[data-id="demo"]').length === 1);
+
+  // Clicking a tool asks the engine to call it.
+  qa(w, '#panelBody .mcp-tool')[0].click();
+  await settle(w);
+  const call = socket!.lastSentOf('mcpCall');
+  check('mcp: clicking a tool sends mcpCall', !!call && call.id === 'filesystem' && call.tool === 'read_file');
+
+  // And the result lands in the output block.
+  socket!.deliver({ kind: 'mcpCallResult', id: 'filesystem', tool: 'read_file', ok: true, result: { content: [{ type: 'text', text: 'hi' }] } });
+  await settle(w);
+  check('mcp: the tool result renders in the output block',
+    (q(w, '#mcpOut')?.textContent ?? '').indexOf('"text": "hi"') !== -1, (q(w, '#mcpOut')?.textContent ?? '').slice(0, 40));
+
+  // A failed connect shows the reason instead of a spinner forever.
+  socket!.deliver({ kind: 'mcp', configPath: 'x', configExists: true, configError: '', servers: [
+    { id: 'broken', command: 'nope', args: [], description: '', status: 'error', error: 'spawn nope ENOENT', tools: [] },
+  ] });
+  await settle(w);
+  check('mcp: a failed server shows its error', (q(w, '#panelBody')?.textContent ?? '').indexOf('ENOENT') !== -1);
+
+  w.close();
+}
+
 // ---------------------------------------------------------- run
 
 await testBoot();
@@ -1043,6 +1215,10 @@ console.log('');
 await testLanguageSwitch();
 console.log('');
 await testLanguageRestore();
+console.log('');
+await testI18n();
+console.log('');
+await testMcp();
 console.log('');
 await testInteractions();
 console.log('');

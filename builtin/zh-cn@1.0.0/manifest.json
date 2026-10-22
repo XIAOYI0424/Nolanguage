@@ -1,0 +1,49 @@
+{
+  "id": "zh-cn",
+  "displayName": "简体中文",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "nolanguage",
+  "type": "localization",
+  "description": "界面中文本地化（内置汉化插件）。贡献 zh-CN 文案包，由前端 i18n 层按当前语言加载；未覆盖的项回落到英文。",
+  "order": 100,
+  "trust": {
+    "sandbox": "none"
+  },
+  "contributes": {
+    "i18n": {
+      "locale": "zh-CN",
+      "messages": {
+        "menu.File": "文件",
+        "menu.Edit": "编辑",
+        "menu.View": "视图",
+        "menu.Navigate": "导航",
+        "menu.Code": "代码",
+        "menu.Run": "运行",
+        "menu.Tools": "工具",
+        "menu.VCS": "版本控制",
+        "menu.Window": "窗口",
+        "menu.Help": "帮助",
+        "modal.Extensions": "扩展",
+        "modal.About": "关于",
+        "modal.RecentFiles": "最近文件",
+        "modal.Search": "搜索",
+        "modal.Language": "语言模式",
+        "modal.Settings": "设置",
+        "modal.Cancel": "取消",
+        "modal.OK": "确定",
+        "toolbar.Run": "运行",
+        "toolbar.Debug": "调试",
+        "toolbar.Coverage": "覆盖率运行",
+        "toolbar.Stop": "停止",
+        "toolbar.Search": "全局搜索",
+        "toolbar.Settings": "设置",
+        "toolbar.Theme": "切换主题",
+        "toolbar.Minimize": "最小化",
+        "toolbar.Maximize": "最大化",
+        "toolbar.Close": "关闭",
+        "status.Problems": "个问题"
+      }
+    }
+  }
+}

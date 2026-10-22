@@ -21,7 +21,7 @@
  *       PANEL_RUN_TIMEOUT=15000 hard timeout per editor run (ms)
  *       PYTHON_BIN             interpreter to use
  */
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -46,9 +46,15 @@ import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
 import type { SandboxLanguage } from '../exec/types.js';
 import { FsService, FsError } from './FsService.js';
+import { McpManager } from '../mcp/McpManager.js';
 import { ExtensionManager } from '../extensions/ExtensionManager.js';
 import { materializeAssets } from '../desktop/embeddedAssets.js';
 import { StdioTransport, WsTransport, parseFrame, type Transport } from './Transport.js';
+import { FlameSampler } from './flame.js';
+import { runPythonCoverage } from './coverage.js';
+import { gitStatus, gitCommit } from './git.js';
+import { DapClient, type DapStackFrame } from '../dap/DapClient.js';
+import { discoverBinary } from '../langs/discover.js';
 
 /**
  * Directory of this source file. In a Single Executable Application build
@@ -238,7 +244,7 @@ export async function main(
   let workspaceFailure: string | undefined;
 
   const kernel = new Kernel({
-    appVersion: '0.6.0-workspace',
+    appVersion: '0.7.0-workspace',
     slowThresholdMs: Number(process.env.PANEL_SLOW_MS ?? 60),
     logLevel: LogLevel.TRACE,
     logPretty: !stdio,
@@ -357,9 +363,45 @@ export async function main(
   const fs = new FsService(explorerRoot);
   kernel.logger.root().info('Project explorer ready', { root: fs.root });
 
+  // ---- MCP (Model Context Protocol) servers, for the sidebar tool window ----
+  // Config lives in app state (`<appData>/mcp.json`); `NOLANGUAGE_MCP_CONFIG`
+  // overrides it, which is what the test harness uses. Loading is tolerant: a
+  // broken file becomes a card-level error, never a boot failure.
+  const mcp = new McpManager({
+    configPath: process.env.NOLANGUAGE_MCP_CONFIG,
+    logger: {
+      info: (m, meta) => kernel.logger.root().info(m, meta),
+      warn: (m, meta) => kernel.logger.root().warn(m, meta),
+    },
+  });
+  await mcp.load();
+  kernel.logger.root().info('MCP manager ready', {
+    config: mcp.payload().configPath,
+    servers: mcp.payload().servers.length,
+  });
+
   const hub = new PanelHub(kernel, { pushIntervalMs: 1000 });
   hub.install();
   hub.start();
+
+  // ---- kernel flame graph ----
+  // One V8 CPU profiler for the whole process, shared by every IDE window that
+  // opens the flame graph. Sampling starts on the first subscriber and stops
+  // when the last one leaves (see flame.ts).
+  const flame = new FlameSampler({
+    // Memory attribution next to the CPU samples. The kernel's own RSS/heap is
+    // measurable in-process; a language server is a separate process, and its
+    // RSS is what `ProfileManager` already tracks — that is the "which service
+    // is holding the memory" half of the window, not a guess.
+    memory: () => {
+      const mu = process.memoryUsage();
+      const profiles = workspace.resourceSummary().profiles ?? [];
+      const services = profiles
+        .filter((p) => p.lspRunning && p.lspMemoryBytes > 0)
+        .map((p) => ({ name: `${p.languageId} LSP`, bytes: p.lspMemoryBytes }));
+      return { rss: mu.rss, heapUsed: mu.heapUsed, external: mu.external, services };
+    },
+  });
 
   /**
    * Wire one client to the engine. Everything below is transport-agnostic: the
@@ -371,6 +413,20 @@ export async function main(
    */
   /** Clients currently attached, so page-specific frames can be broadcast. */
   const wsClients = new Set<Transport>();
+  /**
+   * Push the MCP catalogue to every attached client. A connect/disconnect
+   * changes what another window should show, and the sidebar repaints from it.
+   */
+  const broadcastMcp = (): void => {
+    const payload = mcp.payload();
+    for (const c of wsClients) {
+      try {
+        c.send(payload);
+      } catch {
+        /* a closed client missed the update */
+      }
+    }
+  };
   /** Last user-code profile result, so a /profile page opened after the IDE
    * triggered a run can render it without the IDE relaying state. */
   let lastProfile: unknown = null;
@@ -462,6 +518,8 @@ export async function main(
     reply({ kind: 'fsRoot', reqId: 0, ...fs.describe() });
     // Plugins page bootstrap: installed set + budget + runtimes in one frame.
     reply(pluginPayload(workspace));
+    // MCP sidebar bootstrap: the declared servers and their live state.
+    reply(mcp.payload());
     kernel.logger.root().info('Client connected', { client: label, clients: hub.clientCount() });
 
     transport.onMessage((raw: string) => {
@@ -482,6 +540,54 @@ export async function main(
         case 'langInstall':
           void handlePluginOp(msg, reply);
           break;
+
+        // ---------- MCP (sidebar tool window) ----------
+        case 'mcpList':
+          reply(mcp.payload());
+          break;
+
+        case 'mcpReload':
+          void mcp
+            .load()
+            .then(() => reply(mcp.payload()))
+            .catch((err: unknown) => reply({ kind: 'mcpError', id: '', error: (err as Error).message }));
+          break;
+
+        case 'mcpInitConfig':
+          void mcp
+            .initConfig()
+            .then(() => {
+              broadcastMcp();
+              reply(mcp.payload());
+            })
+            .catch((err: unknown) => reply({ kind: 'mcpError', id: '', error: (err as Error).message }));
+          break;
+
+        case 'mcpConnect':
+        case 'mcpDisconnect': {
+          const id = String(msg.id ?? '');
+          const op = msg.kind === 'mcpConnect' ? mcp.connect(id) : mcp.disconnect(id);
+          void Promise.resolve(op)
+            .then(() => broadcastMcp())
+            .catch((err: unknown) => {
+              reply({ kind: 'mcpError', id, error: (err as Error).message });
+              broadcastMcp();
+            });
+          break;
+        }
+
+        case 'mcpCall': {
+          const id = String(msg.id ?? '');
+          const tool = String(msg.tool ?? '');
+          const args = msg.args && typeof msg.args === 'object' ? (msg.args as Record<string, unknown>) : {};
+          void mcp
+            .callTool(id, tool, args, msg.timeoutMs ? Number(msg.timeoutMs) : undefined)
+            .then((result) => reply({ kind: 'mcpCallResult', id, tool, ok: true, result }))
+            .catch((err: unknown) =>
+              reply({ kind: 'mcpCallResult', id, tool, ok: false, error: (err as Error).message }),
+            );
+          break;
+        }
 
         case 'reclaimResources':
           void workspace
@@ -563,6 +669,94 @@ export async function main(
         case 'run':
           void handleRun(key, workspace, msg, reply);
           break;
+
+        // Stop button / Run → Stop: cancel the live run *and* a debug session.
+        case 'stop': {
+          const sessionId = String(msg.sessionId ?? 'ide');
+          const st = stateFor(key);
+          const debugStopped = !!st.dap;
+          if (st.dap) {
+            void st.dap.stop().catch(() => undefined);
+            st.dap = undefined;
+          }
+          const cancelled = workspace.cancel(sessionId);
+          reply({ kind: 'stopped', sessionId, cancelled, debugStopped });
+          break;
+        }
+
+        // Debug: the manifest's `debug` block names the adapter; a missing
+        // adapter is reported as such instead of faking a session.
+        case 'debug':
+          void handleDebug(key, workspace, kernel, msg, reply);
+          break;
+
+        case 'debugCmd':
+          void handleDebugCmd(key, msg, reply);
+          break;
+
+        // Run with coverage (Python stdlib tracer).
+        case 'coverage': {
+          const language = asLanguage(msg.language, workspace);
+          if (language !== 'python') {
+            reply({
+              kind: 'coverageResult',
+              ok: false,
+              language,
+              error: `line coverage is only implemented for Python (this document is ${language})`,
+            });
+            break;
+          }
+          const bin = workspace.languageStatus('python').binary || process.env.PYTHON_BIN || 'python';
+          void runPythonCoverage(bin, String(msg.code ?? ''), {
+            timeoutMs: msg.timeoutMs ? Number(msg.timeoutMs) : 30_000,
+          })
+            .then((r) => reply({ kind: 'coverageResult', ...r }))
+            .catch((err: unknown) =>
+              reply({ kind: 'coverageResult', ok: false, language, error: (err as Error).message }),
+            );
+          break;
+        }
+
+        // Commit pane + git widget: real porcelain status and commit.
+        case 'gitStatus':
+          void gitStatus(fs.root)
+            .then((s) => reply({ kind: 'gitStatus', ...s }))
+            .catch((err: unknown) =>
+              reply({ kind: 'gitStatus', ok: false, branch: '', changes: [], error: (err as Error).message }),
+            );
+          break;
+
+        case 'gitCommit':
+          void gitCommit(fs.root, String(msg.message ?? ''))
+            .then((r) => reply({ kind: 'gitCommitResult', ...r }))
+            .catch((err: unknown) =>
+              reply({ kind: 'gitCommitResult', ok: false, branch: '', committed: 0, output: '', error: (err as Error).message }),
+            );
+          break;
+
+        // Kernel flame graph: subscribe this window to live CPU samples.
+        case 'flameStart':
+          flame.subscribe(reply, msg.intervalMs ? Number(msg.intervalMs) : undefined);
+          break;
+
+        case 'flameStop':
+          flame.unsubscribe(reply);
+          break;
+
+        // Command palette → kernel command. The list arrives in `hello`, and
+        // selecting one runs it for real; an argument-taking command answers
+        // with the bus's own error instead of a silent no-op.
+        case 'command': {
+          const id = String(msg.id ?? '');
+          const args = Array.isArray(msg.args) ? (msg.args as unknown[]) : [];
+          void kernel.commands
+            .execute(id, ...args)
+            .then((result) => reply({ kind: 'commandResult', id, ok: true, result }))
+            .catch((err: unknown) =>
+              reply({ kind: 'commandResult', id, ok: false, error: (err as Error).message }),
+            );
+          break;
+        }
 
         case 'check':
           void handleCheck(workspace, msg, reply);
@@ -696,6 +890,10 @@ export async function main(
     transport.onClose(() => {
       const st = connState.get(key);
       if (st?.termChild) { try { st.termChild.kill('SIGKILL'); } catch { /* gone */ } }
+      // A closed window must not keep the CPU profiler (or a debug adapter)
+      // alive; both are per-window subscriptions, not per-process services.
+      flame.unsubscribe(reply);
+      if (st?.dap) void st.dap.stop().catch(() => undefined);
       if (st) connState.delete(key);
       hub.removeClient(clientId);
       kernel.logger.root().info('Client disconnected', { client: label, clients: hub.clientCount() });
@@ -812,6 +1010,9 @@ export async function main(
     // by a language slot. Without these two lines they outlive the app — the
     // "Node.js still running after close" report.
     if (exec) await exec.close().catch(() => undefined);
+    // MCP servers are grandchildren of the shell: without this they outlive the
+    // window exactly like the language servers did.
+    await mcp.close().catch(() => undefined);
     await extManager.dispose().catch(() => undefined);
     hub.stop();
     if (ws) await ws.close();
@@ -884,8 +1085,16 @@ if (invokedDirectly) {
  * Per-connection interactive-execution state: an attached terminal child and the
  * active run's stdin sink. Keyed by the live connection object.
  */
-const connState = new Map<unknown, { runSink?: (d: string) => void; termChild?: ChildProcess }>();
-function stateFor(conn: unknown): { runSink?: (d: string) => void; termChild?: ChildProcess } {
+const connState = new Map<unknown, {
+  runSink?: (d: string) => void;
+  termChild?: ChildProcess;
+  dap?: DapClient;
+}>();
+function stateFor(conn: unknown): {
+  runSink?: (d: string) => void;
+  termChild?: ChildProcess;
+  dap?: DapClient;
+} {
   let s = connState.get(conn);
   if (!s) { s = {}; connState.set(conn, s); }
   return s;
@@ -1012,6 +1221,7 @@ async function handleRun(
       sessionId: result.sessionId,
       exitCode: result.exitCode,
       signal: result.signal,
+      cancelled: result.cancelled,
       stdout: result.stdout,
       stderr: result.stderr,
       durationMs: result.durationMs,
@@ -1024,6 +1234,193 @@ async function handleRun(
     });
   } catch (err) {
     reply({ kind: 'error', language, message: `run failed: ${(err as Error).message}` });
+  }
+}
+
+/**
+ * Start a debug session for one document.
+ *
+ * The adapter is declared by the language plugin (`manifest.debug`), so this
+ * function contains no language branching: it discovers the adapter, launches
+ * it over DAP, applies the breakpoints the editor already renders, and streams
+ * output/stopped frames back. When discovery fails, the reply says exactly
+ * what is missing — a Debug button that silently does nothing is worse than a
+ * Debug button that explains why it cannot start.
+ */
+async function handleDebug(
+  client: object,
+  workspace: WorkspaceService,
+  kernel: Kernel,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const language = asLanguage(msg.language, workspace);
+  const code = typeof msg.code === 'string' ? msg.code : '';
+  const st = stateFor(client);
+  if (st.dap) {
+    reply({ kind: 'debugState', ok: false, state: 'running', error: 'a debug session is already running' });
+    return;
+  }
+  const spec = workspace.manifestOf(language)?.debug;
+  if (!spec) {
+    reply({
+      kind: 'debugState',
+      ok: false,
+      error: `"${language}" does not declare a debug adapter (manifest.debug)`,
+    });
+    return;
+  }
+  const resolved = discoverBinary(spec.discovery, { root: workspace.root });
+  if (!resolved.bin || resolved.source === 'missing') {
+    reply({
+      kind: 'debugState',
+      ok: false,
+      adapter: spec.adapter,
+      error: spec.degradedNote || `${spec.serverName ?? spec.adapter} is not installed`,
+      hint: `install ${spec.adapter} or point ${(spec.discovery?.envVars ?? [])[0] ?? 'its discovery env var'} at the adapter`,
+      install: spec.install,
+    });
+    return;
+  }
+  // A debug configuration may name the entry script explicitly (VS Code's
+  // launch.json `program`). When it does, debug that file on disk; otherwise
+  // fall back to the language's scratch buffer (the original behaviour).
+  const requestedProgram = typeof msg.program === 'string' && msg.program ? msg.program : '';
+  const program = requestedProgram ? join(workspace.root, requestedProgram) : workspace.bufferPath(language);
+  if (!program) {
+    reply({ kind: 'debugState', ok: false, error: `no program path for "${language}"` });
+    return;
+  }
+  // `serverReads` means the script already exists on disk (e.g. a configuration
+  // pointing at a file that is not the open buffer) — launch it as-is. When code
+  // is supplied (an open, possibly dirty buffer) we flush it to disk first, the
+  // same way an IDE saves before launching.
+  const serverReads = requestedProgram !== '' && msg.serverReads === true;
+  let effectiveCode = code;
+  if (serverReads && !effectiveCode) {
+    try {
+      effectiveCode = await readFile(program, 'utf8');
+    } catch {
+      /* missing file — the adapter will report a clean error */
+    }
+  }
+  if (effectiveCode) await writeFile(program, effectiveCode, 'utf8').catch(() => undefined);
+
+  const template = spec.command?.length ? spec.command : ['{resolved}'];
+  const [head, ...rest] = template;
+  const command = head.replace('{resolved}', resolved.bin);
+  const args = [...rest, ...(spec.args ?? [])].map((a) => a.replace('{resolved}', resolved.bin));
+
+  // Extra launch fields from the configuration: program arguments, environment
+  // overrides and a working directory. All optional; adapters ignore what they
+  // do not understand. (`request: 'attach'` is accepted but treated as launch
+  // for now — attach needs a running target, which this flow does not yet start.)
+  const cfgArgs = Array.isArray(msg.args)
+    ? msg.args.map((a) => String(a))
+    : typeof msg.args === 'string' && msg.args
+      ? msg.args.split(/\s+/).filter(Boolean)
+      : [];
+  const cfgEnv = msg.env && typeof msg.env === 'object' ? (msg.env as Record<string, string>) : undefined;
+  const cfgCwd = typeof msg.cwd === 'string' && msg.cwd ? msg.cwd : undefined;
+
+  const dap = new DapClient(
+    kernel,
+    {
+      command,
+      args,
+      adapterId: spec.type ?? spec.adapter,
+      cwd: cfgCwd ?? workspace.root,
+      launchArgs: {
+        program,
+        stopOnEntry: msg.stopOnEntry !== false,
+        // Compiled-language adapters (dlv dap) need the build mode; ignored by
+        // adapters that do not know the field.
+        mode: 'debug',
+        ...(cfgArgs.length ? { args: cfgArgs } : {}),
+        ...(cfgEnv ? { env: cfgEnv } : {}),
+        ...(cfgCwd ? { cwd: cfgCwd } : {}),
+      },
+    },
+    {
+      onStopped: (info) => {
+        void (async () => {
+          let frames: DapStackFrame[] = [];
+          try {
+            frames = await dap.stackTrace(info.threadId);
+          } catch {
+            /* the adapter may have no stack for this stop */
+          }
+          reply({ kind: 'debugState', ok: true, state: 'stopped', reason: info.reason, frames });
+        })();
+      },
+      onOutput: (text, category) => reply({ kind: 'debugOut', text, category }),
+      onTerminated: () => {
+        const live = connState.get(client);
+        if (live) live.dap = undefined;
+        reply({ kind: 'debugState', ok: true, state: 'terminated' });
+      },
+    },
+  );
+  st.dap = dap;
+  try {
+    await dap.start();
+    const breakpoints = Array.isArray(msg.breakpoints)
+      ? (msg.breakpoints as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
+      : [];
+    if (breakpoints.length) await dap.setBreakpoints(program, breakpoints);
+    reply({ kind: 'debugState', ok: true, state: 'running', adapter: spec.adapter, program });
+  } catch (err) {
+    st.dap = undefined;
+    reply({
+      kind: 'debugState',
+      ok: false,
+      adapter: spec.adapter,
+      error: `debug adapter failed: ${(err as Error).message}`,
+    });
+  }
+}
+
+/** One debugger command from the toolbar (continue / step / stack / stop). */
+async function handleDebugCmd(
+  client: object,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const st = connState.get(client);
+  const dap = st?.dap;
+  if (!dap) {
+    reply({ kind: 'debugState', ok: false, error: 'no debug session is running' });
+    return;
+  }
+  const cmd = String(msg.cmd ?? '');
+  try {
+    if (cmd === 'continue') {
+      await dap.continue_();
+      reply({ kind: 'debugState', ok: true, state: 'running' });
+      return;
+    }
+    if (cmd === 'next' || cmd === 'stepIn' || cmd === 'stepOut') {
+      if (cmd === 'next') await dap.stepOver();
+      else if (cmd === 'stepIn') await dap.stepIn();
+      else await dap.stepOut();
+      const frames = await dap.stackTrace();
+      reply({ kind: 'debugState', ok: true, state: 'stopped', reason: cmd, frames });
+      return;
+    }
+    if (cmd === 'stack') {
+      const frames = await dap.stackTrace();
+      reply({ kind: 'debugState', ok: true, state: 'stopped', frames });
+      return;
+    }
+    if (cmd === 'stop') {
+      await dap.stop();
+      if (st) st.dap = undefined;
+      reply({ kind: 'debugState', ok: true, state: 'terminated' });
+      return;
+    }
+    reply({ kind: 'debugState', ok: false, error: `unknown debug command: ${cmd}` });
+  } catch (err) {
+    reply({ kind: 'debugState', ok: false, error: (err as Error).message });
   }
 }
 

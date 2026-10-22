@@ -80,6 +80,7 @@ export class TemplateRunner implements Runner {
       ctx: this.ctx,
       onData: opts.onData,
       onStdinReady: opts.onStdinReady,
+      signal: opts.signal,
     });
   }
 

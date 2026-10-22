@@ -20,10 +20,11 @@ export interface PanelClientData {
   utilsJson: string;
   jsJson: string;
   readmeJson: string;
+  i18nJson: string;
 }
 
 export function pyCharmClientScript(d: PanelClientData): string {
-  const { iconsJson, patternJson, mainJson, utilsJson, jsJson, readmeJson } = d;
+  const { iconsJson, patternJson, mainJson, utilsJson, jsJson, readmeJson, i18nJson } = d;
   return `
 /* ---------- native-app hardening (double insurance) ----------
    The Tauri shell disables these at the WebView2 level (context menu, DevTools,
@@ -70,6 +71,10 @@ export function pyCharmClientScript(d: PanelClientData): string {
 (function () {
   "use strict";
   var ICONS = ${iconsJson};
+  // Translation bundles gathered from localization plugins, keyed by locale
+  // (e.g. { "zh-CN": { "menu.File": "文件", ... } }). Null/empty when no such
+  // plugin is installed — every UI string then falls back to its English source.
+  var I18N = ${i18nJson};
   var PY_PATTERN = ${patternJson};
   var FILES = {
     "main.py": ${mainJson},
@@ -88,6 +93,33 @@ export function pyCharmClientScript(d: PanelClientData): string {
   function paintIcons(root) {
     (root || document).querySelectorAll('[data-ic]').forEach(function (el) {
       el.innerHTML = ic(el.getAttribute('data-ic'), el.getAttribute('data-size') || 16);
+    });
+  }
+
+  // ---------- i18n (built-in localization plugins) ----------
+  // A localization plugin contributes a { locale, messages } bundle (see
+  // collectI18nBundles on the server). t() resolves the active locale's map
+  // and falls back to the English string baked into the page when a key is
+  // missing or no plugin is installed — so the UI is always coherent.
+  function activeLocale() {
+    try { return (PREFS && PREFS.locale) || 'en'; } catch (e) { return 'en'; }
+  }
+  function t(key, fallback) {
+    var m = (typeof I18N === 'object' && I18N) ? I18N[activeLocale()] : null;
+    return (m && m[key] != null) ? m[key] : fallback;
+  }
+  // Translate every [data-i18n] element. With data-i18n-title the tooltip is
+  // targeted instead (for elements that mix an icon and visible text); otherwise
+  // the element's own text is the target. Calling it again is idempotent.
+  function applyI18n(root) {
+    (root || document).querySelectorAll('[data-i18n]').forEach(function (el) {
+      var key = el.getAttribute('data-i18n');
+      if (!key) return;
+      if (el.hasAttribute('data-i18n-title')) {
+        el.setAttribute('title', t(key, el.getAttribute('title') || ''));
+      } else {
+        el.textContent = t(key, el.textContent);
+      }
     });
   }
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
@@ -144,6 +176,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
    */
   function showModal(o) {
     var root = $('dlgRoot'); if (!root) return null;
+    DIALOG_KIND = null; // a new dialog owns the body; stale paint targets are void
     var prev = root.querySelector('.dlg-scrim'); if (prev) root.removeChild(prev);
     var scrim = document.createElement('div');
     scrim.className = 'dlg-scrim';
@@ -335,8 +368,15 @@ export function pyCharmClientScript(d: PanelClientData): string {
       var listen = function (name, fn) {
         // v2 events are a plugin command taking a callback id; transformCallback
         // allocates it. The handler receives { event, payload, id }.
+        //
+        // target is REQUIRED by the command even for an app-wide listener:
+        // omitting it fails with "missing required key target", the listen never
+        // registers, and the page silently receives no engine events at all — the
+        // whole inbound half of the bridge is dead while engine_send still works.
+        // Any matches app.emit(...), which is how the Rust relay sends.
         T.invoke('plugin:event|listen', {
           event: name,
+          target: { kind: 'Any' },
           handler: T.transformCallback(function (e) { fn(e); })
         });
       };
@@ -371,12 +411,31 @@ export function pyCharmClientScript(d: PanelClientData): string {
     toast('Workspace disconnected');
   });
 
+  // True inside the Tauri shell. It matters because the shell has **no HTTP
+  // server**: its engine runs over a pipe (--panel-stdio), so URLs like
+  // /plugins and /profile do not exist there — those views are rendered
+  // in-app from bridge messages instead of window.open.
+  function isTauriShell() {
+    var T = window.__TAURI_INTERNALS__;
+    return !!(T && typeof T.invoke === 'function');
+  }
+  /** Latest "plugins" frame (sent on connect and after every plugin operation). */
+  var PLUGINS = null;
+  /** Which in-app dialog is on screen, so async replies know where to paint. */
+  var DIALOG_KIND = null;
+
   // ---------- editor ----------
   var ta = $('ta'), hlCode = $('hlCode'), hl = $('hl'), glines = $('glines');
   var currentFile = 'main.py';
   var currentLang = 'python';
-  var BREAKPOINTS = { 9: true }; // 1-based line numbers with a breakpoint
+  var BREAKPOINTS = {}; // file (rel path) -> { line(1-based): true }
+  function bpsFor(file) { return BREAKPOINTS[file] || (BREAKPOINTS[file] = {}); }
   var folded = {}; // line -> collapsed
+  // Diagnostics for the current document (the engine's check answer). Kept
+  // apart from problems (the rendered list) so the editor can paint marks from
+  // the same data the panel shows — one source, two projections.
+  var DIAGS = [];
+  var DIAG_MARKS = []; // CodeMirror textMarker handles, cleared on every repaint
 
   // ---------- CodeMirror (vendored, optional) ----------
   // When the vendored CodeMirror is present the textarea becomes a thin adapter
@@ -384,6 +443,39 @@ export function pyCharmClientScript(d: PanelClientData): string {
   // of this file, written against a textarea, keeps working unchanged. jsdom
   // has no layout, so the test harness stays on the textarea.
   var CMEDITOR = null;
+  // Breakpoints are painted into a dedicated CodeMirror gutter column while CM
+  // is active (the app's own #gutter is hidden in that mode). Markers track
+  // their lines as the user types, but cm.setValue() — which every file switch
+  // goes through — drops them, so the current file is repainted when it changes.
+  var CM_BP_FILE = null;
+  function bpDot() {
+    var d = document.createElement('span');
+    d.className = 'bp';
+    d.setAttribute('title', 'Breakpoint - click to remove');
+    return d;
+  }
+  function paintCmBreakpoints() {
+    if (!CMEDITOR || !currentFile) return;
+    var cm = CMEDITOR.cm;
+    cm.clearGutter('bp-gutter');
+    var mk = bpsFor(currentFile);
+    var count = cm.lineCount();
+    for (var i = 0; i < count; i++) {
+      if (mk[i + 1]) cm.setGutterMarker(i, 'bp-gutter', bpDot());
+    }
+  }
+  function toggleCmBreakpoint(line0) {
+    if (!CMEDITOR || !currentFile) return;
+    var n = line0 + 1;
+    var mk = bpsFor(currentFile);
+    if (mk[n]) {
+      delete mk[n];
+      CMEDITOR.cm.setGutterMarker(line0, 'bp-gutter', null);
+    } else {
+      mk[n] = true;
+      CMEDITOR.cm.setGutterMarker(line0, 'bp-gutter', bpDot());
+    }
+  }
   function cmModeFor(lang) {
     switch (lang) {
       case 'python': return 'python';
@@ -458,6 +550,9 @@ export function pyCharmClientScript(d: PanelClientData): string {
         value: ta.value,
         mode: cmModeFor(currentLang),
         lineNumbers: true,
+        // A dedicated breakpoint gutter sits left of the line numbers; clicking
+        // either column toggles a breakpoint (wired just below).
+        gutters: ['CodeMirror-linenumbers', { className: 'bp-gutter', style: 'width:16px' }],
         lineWrapping: false,
         matchBrackets: true,
         autoCloseBrackets: true,
@@ -477,6 +572,16 @@ export function pyCharmClientScript(d: PanelClientData): string {
       var g0 = $('gutter'); if (g0) g0.style.display = 'none';
       CMEDITOR = makeCmAdapter(cm);
       ta = CMEDITOR;
+      // CodeMirror owns its gutter here, so breakpoint dots and the toggle are
+      // projected onto it. CM fires gutterClick on mousedown and reports which
+      // column was hit; both the line numbers and the breakpoint column toggle,
+      // exactly as PyCharm does. (The hidden app #gutter keeps its own wiring
+      // for the textarea fallback.)
+      cm.on('gutterClick', function (cmi, line, g) {
+        if (g !== 'CodeMirror-linenumbers' && g !== 'bp-gutter') return;
+        toggleCmBreakpoint(line);
+      });
+      paintCmBreakpoints();
     } catch (e) {
       if (host && host.parentNode) host.parentNode.removeChild(host);
       CMEDITOR = null;
@@ -690,10 +795,29 @@ export function pyCharmClientScript(d: PanelClientData): string {
 
   function renderGutter(lines) {
     var html = '';
+    // One pass over the diagnostics builds a line -> severity map, so a file
+    // with many problems still renders in O(lines + diagnostics).
+    var sev = {};
+    for (var q = 0; q < DIAGS.length; q++) {
+      var dd = DIAGS[q];
+      var da = dd.line || 0, db = dd.endLine == null ? da : dd.endLine;
+      if (db < da) db = da;
+      for (var ln = da; ln <= db; ln++) if (sev[ln] !== 1) sev[ln] = dd.severity === 1 ? 1 : dd.severity === 2 ? 2 : 3;
+    }
     for (var i = 0; i < lines.length; i++) {
       var n = i + 1;
       var cls = 'gline';
-      if (BREAKPOINTS[n]) cls += ' hasbp';
+      if (bpsFor(currentFile)[n]) cls += ' hasbp';
+      var sv = sev[i];
+      if (sv === 1) cls += ' haserr';
+      else if (sv === 2) cls += ' haswarn';
+      else if (sv) cls += ' hasinfo';
+      // Coverage marks belong to the document they were measured on; a tab
+      // switch must not paint the previous file's misses on this one.
+      if (COVERAGE && COVERAGE.file === currentFile) {
+        if (COVERAGE.missing[n]) cls += ' covmiss';
+        else if (COVERAGE.covered[n]) cls += ' covhit';
+      }
       var defI = isDefLine(lines[i]) ? lineIndent(lines[i]) : -1;
       if (defI >= 0) {
         // foldable when the block has at least one deeper, non-blank line
@@ -704,14 +828,27 @@ export function pyCharmClientScript(d: PanelClientData): string {
         }
       }
       var inner = '<span class="num">' + n + '</span>';
-      if (BREAKPOINTS[n]) inner = '<span class="bp" data-bp="' + n + '"></span>' + inner;
+      if (bpsFor(currentFile)[n]) inner = '<span class="bp" data-bp="' + n + '"></span>' + inner;
       if (cls.indexOf('foldable') >= 0) inner = '<span class="fold" data-fold="' + n + '">' + (folded[n] ? ic('chevR', 12) : ic('chevD', 12)) + '</span>' + inner;
-      html += '<div class="' + cls + '">' + inner + '</div>';
+      html += '<div class="' + cls + '" data-line="' + n + '">' + inner + '</div>';
     }
     glines.innerHTML = html;
-    glines.querySelectorAll('[data-bp]').forEach(function (el) {
-      el.addEventListener('click', function (e) { e.stopPropagation(); var n = +el.getAttribute('data-bp'); delete BREAKPOINTS[n]; renderEditor(); });
-    });
+    // Click a gutter line to toggle a breakpoint (add or remove). The fold
+    // chevron keeps its own stopPropagation handler so folding never toggles a
+    // breakpoint, and an existing breakpoint is removed by the same click.
+    if (!glines.__bpWired) {
+      glines.__bpWired = true;
+      glines.addEventListener('click', function (e) {
+        if (e.target.closest && e.target.closest('[data-fold]')) return;
+        var g = e.target.closest ? e.target.closest('.gline') : null;
+        if (!g) return;
+        var n = +g.getAttribute('data-line');
+        if (!n) return;
+        var mk = bpsFor(currentFile);
+        if (mk[n]) delete mk[n]; else mk[n] = true;
+        renderEditor();
+      });
+    }
     glines.querySelectorAll('[data-fold]').forEach(function (el) {
       el.addEventListener('click', function (e) { e.stopPropagation(); var n = +el.getAttribute('data-fold'); if (folded[n]) delete folded[n]; else folded[n] = true; renderEditor(); });
     });
@@ -736,6 +873,10 @@ export function pyCharmClientScript(d: PanelClientData): string {
     if (CMEDITOR) {
       // CM renders itself; keep its language in step with the tab's language.
       CMEDITOR.cm.setOption('mode', cmModeFor(currentLang));
+      // A file switch lands here right after the adapter's value setter ran
+      // cm.setValue(), which drops every gutter marker. Repaint this file's
+      // breakpoints once — not on every keystroke, since markers follow lines.
+      if (CM_BP_FILE !== currentFile) { CM_BP_FILE = currentFile; paintCmBreakpoints(); }
       return;
     }
     var code = ta.value;
@@ -768,7 +909,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
   var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [], dismissed: false };
   var HOV = { timer: 0, reqId: 0, cx: 0, cy: 0 };
 
-  ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); });
+  ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); scheduleCheck(); });
   ta.addEventListener('scroll', syncScroll);
   ta.addEventListener('keyup', updateCaret);
   ta.addEventListener('click', updateCaret);
@@ -1083,6 +1224,22 @@ export function pyCharmClientScript(d: PanelClientData): string {
     clearTimeout(HOV.timer);
     if (CMEDITOR) {
       var p = CMEDITOR.cm.coordsChar({ left: e.clientX, top: e.clientY });
+      HOV.cx = e.clientX; HOV.cy = e.clientY;
+      // A diagnostic on the line under the pointer wins over an LSP hover: it is
+      // already local, so it answers "why is this red?" instantly, with no
+      // round-trip. Only fall back to hover when the line is clean.
+      var ds = diagsOnLine(p.line);
+      if (ds.length) {
+        var tip = $('hoverTip');
+        if (tip) {
+          tip.textContent = ds.map(function (d) {
+            return (d.severity === 1 ? 'Error' : d.severity === 2 ? 'Warning' : 'Info') + ': ' + d.message;
+          }).join(NLc + NLc);
+          showTipAt(HOV.cx, HOV.cy, tip);
+        }
+        return;
+      }
+      var t0 = $('hoverTip'); if (t0) t0.classList.remove('open');
       HOV.timer = setTimeout(function () { requestHoverAt(p.line, p.ch); }, 450);
       return;
     }
@@ -1117,16 +1274,20 @@ export function pyCharmClientScript(d: PanelClientData): string {
     HOV.reqId++;
     BRIDGE.send({ kind: 'hover', code: ta.value, language: lspLang(), line: line, character: w.start + 1, requestId: HOV.reqId });
   }
+  /** Position an open hover tip near the pointer, clamped inside its host. */
+  function showTipAt(cx, cy, tip) {
+    var host = tip.parentNode ? tip.parentNode : document.body;
+    var hr = host.getBoundingClientRect();
+    tip.style.left = Math.max(0, Math.min(cx - hr.left + 12, host.clientWidth - 340)) + 'px';
+    tip.style.top = (cy - hr.top + 16) + 'px';
+    tip.classList.add('open');
+  }
   function onHover(m) {
     if (m.requestId !== HOV.reqId) return;
     var tip = $('hoverTip'), text = hoverText(m.hover);
     if (!text) { tip.classList.remove('open'); return; }
     tip.textContent = text;
-    var host = tip.parentNode ? tip.parentNode : document.body;
-    var hr = host.getBoundingClientRect();
-    tip.style.left = Math.max(0, Math.min(HOV.cx - hr.left + 12, host.clientWidth - 340)) + 'px';
-    tip.style.top = (HOV.cy - hr.top + 16) + 'px';
-    tip.classList.add('open');
+    showTipAt(HOV.cx, HOV.cy, tip);
   }
   function hoverText(h) {
     if (!h) return '';
@@ -1194,12 +1355,15 @@ export function pyCharmClientScript(d: PanelClientData): string {
       buf = BUFFERS[name] = { content: fallback, languageId: langOfDoc(name), editable: true, dirty: false };
     }
     if (!isOpen(name)) TABS.push(name);
+    if (currentFile !== name) clearCoverage();
     currentFile = name; currentLang = buf.languageId || 'python';
     ta.value = buf.content;
     ta.readOnly = !buf.editable;
     $('stFile').textContent = name;
     renderStLang();
     renderTabs(); renderEditor(); updateCaret();
+    // Stale marks from the previous document must not follow the caret here.
+    clearDiags();
     if (lspLang()) BRIDGE.send({ kind: 'check', code: ta.value, language: lspLang() });
     pushRecent(name);
     savePrefs({ tabs: TABS, current: currentFile });
@@ -1212,6 +1376,10 @@ export function pyCharmClientScript(d: PanelClientData): string {
     // No dialog: PyCharm writes straight to disk and only shows a transient
     // status-bar hint. The failure path is the one that talks.
     setStatusHint('Saving ' + p + ' …');
+    // L3: a save is a natural checkpoint — check the file we just wrote and, if
+    // it still has errors, say so once instead of letting Run be the first to
+    // find out. (setDiags turns pendingSaveCheck into the balloon.)
+    if (lspLang()) { pendingSaveCheck = true; requestCheck(); }
   }
   function onFsFile(f) {
     var name = f.path;
@@ -1254,7 +1422,8 @@ export function pyCharmClientScript(d: PanelClientData): string {
     { id: 'structure', title: 'Structure', icon: 'structure', key: 'Alt+7' },
     { id: 'vcs', title: 'Version Control', icon: 'vcs', key: 'Alt+9' },
     { id: 'commit', title: 'Commit', icon: 'commit', key: 'Ctrl+K' },
-    { id: 'ai', title: 'AI Assistant', icon: 'ai', key: 'Alt+A' }
+    { id: 'ai', title: 'AI Assistant', icon: 'ai', key: 'Alt+A' },
+    { id: 'mcp', title: 'MCP', icon: 'mcp', key: 'Alt+M' }
   ];
   var BOTTOM_WINDOWS = [
     { id: 'run', title: 'Run', icon: 'run', key: 'Alt+4' },
@@ -1265,7 +1434,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
   ];
   var PROBLEMS = { id: 'problems', title: 'Problems', icon: 'warn', key: '' };
   // strip order per PyCharm New UI
-  var STRIP = ['project', 'vcs', 'commit', 'terminal', 'run', 'structure', 'perf', 'logs', 'ai'];
+  var STRIP = ['project', 'vcs', 'commit', 'terminal', 'run', 'structure', 'perf', 'logs', 'ai', 'mcp'];
 
   var activeLeft = 'project';
   var activeBottom = 'run';
@@ -1313,6 +1482,9 @@ export function pyCharmClientScript(d: PanelClientData): string {
       if (activeLeft === id && !panel.classList.contains('hidden')) panel.classList.add('hidden');
       else { activeLeft = id; panel.classList.remove('hidden'); }
       renderPanel();
+      // Opening the panel asks for a fresh catalogue (the engine may have
+      // restarted, or the config file changed on disk).
+      if (id === 'mcp' && !panel.classList.contains('hidden')) BRIDGE.send({ kind: 'mcpList' });
     }
     renderStrip();
     saveLayout();
@@ -1325,11 +1497,13 @@ export function pyCharmClientScript(d: PanelClientData): string {
     var body = $('panelBody');
     if (activeLeft === 'project') { if (!TREE['']) loadDir(''); renderTree(); }
     else if (activeLeft === 'structure') body.innerHTML = structureTree(ta.value);
-    else if (activeLeft === 'vcs') body.innerHTML = '<div class="empty">No local changes.<br/>Working tree clean on <b>main</b>.</div>';
+    else if (activeLeft === 'vcs') body.innerHTML = vcsPane();
     else if (activeLeft === 'commit') body.innerHTML = commitPane();
     else if (activeLeft === 'ai') body.innerHTML = aiPane();
+    else if (activeLeft === 'mcp') { body.innerHTML = mcpPane(); wireMcp(body); }
     else body.innerHTML = '';
     if (activeLeft === 'commit') wireCommit(body);
+    if (activeLeft === 'vcs') wireVcs(body);
   }
   function treeHtml(nodes) {
     var h = '<div style="padding:6px 4px;font-size:12.5px">';
@@ -1559,15 +1733,57 @@ export function pyCharmClientScript(d: PanelClientData): string {
     if (!nodes.length) return '<div class="empty">No symbols in this file.</div>';
     return treeHtml(nodes.map(function (n) { return { name: n.name, d: n.d }; }));
   }
+  // The Commit panel is a projection of "git status --porcelain"; pressing
+  // Commit asks the engine to stage tracked changes and commit them. Nothing
+  // here invents a clean tree.
+  var GIT = { status: null, error: '', loading: false };
+  function gitChangeRow(c) {
+    var s = c.status || '  ';
+    var kind = s.indexOf('??') >= 0 ? 'new' : s.indexOf('D') >= 0 ? 'del' : 'mod';
+    return '<div class="git-row"><span class="git-st ' + kind + '">' + esc(s.replace(/ /g, '·')) + '</span>' +
+      '<span class="git-path" title="' + esc(c.path) + '">' + esc(c.path) + '</span></div>';
+  }
+  function gitListHtml() {
+    if (GIT.error) return '<div class="git-err">' + esc(GIT.error) + '</div>';
+    if (!GIT.status) return '<div class="empty">Reading git status…</div>';
+    if (!GIT.status.changes.length) {
+      return '<div class="empty">Working tree clean on <b>' + esc(GIT.status.branch || 'HEAD') + '</b>.</div>';
+    }
+    return GIT.status.changes.map(gitChangeRow).join('');
+  }
   function commitPane() {
-    return '<div style="padding:10px;display:flex;flex-direction:column;gap:8px;height:100%">' +
-      '<textarea id="commitMsg" placeholder="Commit message" style="flex:1;min-height:90px;resize:none;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:8px;font:12px var(--sans)"></textarea>' +
-      '<div style="display:flex;gap:8px"><button class="tbtn" id="commitBtn" style="flex:1;justify-content:center">Commit</button></div>' +
-      '<div class="empty">Unversioned files · nothing staged (demo)</div></div>';
+    return '<div class="commit-pane">' +
+      '<textarea id="commitMsg" placeholder="Commit message" spellcheck="false"></textarea>' +
+      '<div class="commit-actions"><button class="tbtn primary" id="commitBtn">Commit</button>' +
+      '<button class="tbtn" id="gitRefresh" title="Refresh git status">Refresh</button></div>' +
+      '<div class="commit-branch">' +
+      (GIT.status ? 'Changes on <b>' + esc(GIT.status.branch || 'HEAD') + '</b>' : 'Git status') +
+      '</div><div class="git-list">' + gitListHtml() + '</div></div>';
   }
   function wireCommit(body) {
     var b = body.querySelector('#commitBtn');
-    if (b) b.addEventListener('click', function () { toast('Committed (demo)'); });
+    if (b) b.addEventListener('click', function () {
+      var msgEl = body.querySelector('#commitMsg');
+      var text = msgEl ? msgEl.value.trim() : '';
+      if (!text) { toast('A commit message is required'); if (msgEl) msgEl.focus(); return; }
+      b.disabled = true;
+      BRIDGE.send({ kind: 'gitCommit', message: text });
+    });
+    var r = body.querySelector('#gitRefresh');
+    if (r) r.addEventListener('click', function () { GIT.status = null; GIT.loading = true; BRIDGE.send({ kind: 'gitStatus' }); });
+    if (!GIT.status && !GIT.loading) { GIT.loading = true; BRIDGE.send({ kind: 'gitStatus' }); }
+  }
+  function vcsPane() {
+    return '<div class="commit-pane">' +
+      '<div class="commit-branch">' +
+      (GIT.status ? 'On <b>' + esc(GIT.status.branch || 'HEAD') + '</b>' : 'Git status') +
+      ' · <a id="vcsCommit" style="color:var(--accent);cursor:pointer">Commit…</a></div>' +
+      '<div class="git-list">' + gitListHtml() + '</div></div>';
+  }
+  function wireVcs(body) {
+    var c = body.querySelector('#vcsCommit');
+    if (c) c.addEventListener('click', function () { toggleWindow('commit'); });
+    if (!GIT.status && !GIT.loading) { GIT.loading = true; BRIDGE.send({ kind: 'gitStatus' }); }
   }
   function aiPane() {
     return '<div style="padding:12px;display:flex;flex-direction:column;gap:10px">' +
@@ -1575,6 +1791,89 @@ export function pyCharmClientScript(d: PanelClientData): string {
       '<div style="display:flex;gap:6px"><input id="aiInput" placeholder="Explain this function…" style="flex:1;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--text-primary)"/>' +
       '<button class="tbtn" id="aiAsk">Ask</button></div>' +
       '<div id="aiOut" class="console dim">—</div></div>';
+  }
+
+  // ---------- MCP tool window ----------
+  // The engine owns the servers; this panel is a projection of the last mcp
+  // frame plus the last tool-call output. Keeping both in state means switching
+  // tabs never blanks the panel or loses a result.
+  var MCP = { servers: [], configPath: '', configExists: false, configError: '' };
+  var MCP_OUT = '';
+
+  /** The status dot is the only at-a-glance state, so it gets the four colours. */
+  function mcpDot(status) {
+    return status === 'ready' ? 'ok'
+      : status === 'connecting' ? 'warn'
+        : status === 'error' ? 'err'
+          : status === 'disabled' ? 'off' : 'idle';
+  }
+  function mcpPane() {
+    var list = MCP.servers || [];
+    var h = '<div class="mcp">';
+    h += '<div class="mcp-head"><span class="mcp-title">MCP servers</span>' +
+      '<button class="tbtn" data-mcp="refresh">Refresh</button>' +
+      (list.length ? '' : '<button class="tbtn" data-mcp="init">Example</button>') + '</div>';
+    h += '<div class="mcp-cfg" title="Click to copy the path">' + esc(MCP.configPath || 'mcp.json') + '</div>';
+    if (MCP.configError) h += '<div class="mcp-err">' + esc(MCP.configError) + '</div>';
+    if (!list.length) {
+      h += '<div class="empty">No MCP servers configured.<br/>' +
+        'Declare them in the file above, then Refresh.' +
+        (MCP.configExists ? '' : '<br/>Or create an example config.') + '</div>';
+    } else {
+      list.forEach(function (sv) {
+        var on = sv.status === 'ready';
+        var cmd = [sv.command].concat(sv.args || []).join(' ');
+        h += '<div class="mcp-card">';
+        h += '<div class="mcp-row"><span class="mcp-dot ' + mcpDot(sv.status) + '"></span>' +
+          '<b class="mcp-name">' + esc(sv.id) + '</b>' +
+          '<span class="mcp-state">' + esc(sv.status) + '</span>';
+        if (sv.status !== 'disabled') {
+          h += '<button class="tbtn" data-mcp="' + (on ? 'disconnect' : 'connect') + '" data-id="' + esc(sv.id) + '">' +
+            (on ? 'Disconnect' : 'Connect') + '</button>';
+        }
+        h += '</div>';
+        h += '<div class="mcp-cmd" title="' + esc(cmd) + '">' + esc(cmd) + '</div>';
+        if (sv.description) h += '<div class="mcp-desc">' + esc(sv.description) + '</div>';
+        if (sv.error) h += '<div class="mcp-err">' + esc(sv.error) + '</div>';
+        var tools = sv.tools || [];
+        if (tools.length) {
+          h += '<div class="mcp-tools">' + tools.map(function (t) {
+            return '<button class="mcp-tool" data-mcp="call" data-id="' + esc(sv.id) + '" data-tool="' + esc(t.name) +
+              '" title="' + esc(t.description || 'Call with empty arguments') + '">' + esc(t.name) + '</button>';
+          }).join('') + '</div>';
+        } else if (on) {
+          h += '<div class="mcp-desc">connected · no tools reported</div>';
+        }
+        h += '</div>';
+      });
+    }
+    h += '<pre class="mcp-out" id="mcpOut">' + esc(MCP_OUT || 'Tool output appears here.') + '</pre>';
+    h += '</div>';
+    return h;
+  }
+  function wireMcp(body) {
+    body.querySelectorAll('button[data-mcp]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var act = b.getAttribute('data-mcp');
+        if (act === 'refresh') { BRIDGE.send({ kind: 'mcpList' }); return; }
+        if (act === 'init') { BRIDGE.send({ kind: 'mcpInitConfig' }); return; }
+        var id = b.getAttribute('data-id') || '';
+        if (act === 'connect' || act === 'disconnect') {
+          b.disabled = true;
+          BRIDGE.send({ kind: act === 'connect' ? 'mcpConnect' : 'mcpDisconnect', id: id });
+          return;
+        }
+        if (act === 'call') {
+          var tool = b.getAttribute('data-tool') || '';
+          MCP_OUT = 'calling ' + id + ' / ' + tool + ' …';
+          var out = $('mcpOut');
+          if (out) out.textContent = MCP_OUT;
+          BRIDGE.send({ kind: 'mcpCall', id: id, tool: tool, args: {} });
+        }
+      });
+    });
+    var cfg = body.querySelector('.mcp-cfg');
+    if (cfg) cfg.addEventListener('click', function () { copyText(cfg.textContent); });
   }
 
   // ---- bottom dock ----
@@ -1591,7 +1890,13 @@ export function pyCharmClientScript(d: PanelClientData): string {
     });
     var body = $('dockBody');
     body.innerHTML =
-      pane('run', '<div class="console" id="runOut"><span class="dim">Click Run (Shift+F10) to execute main.py in the sandbox.</span></div>' +
+      pane('run', '<div class="dbg-bar" id="dbgBar"><span class="dbg-state" id="dbgState">debug</span>' +
+        '<button class="tbtn" data-dbg="continue">Continue</button>' +
+        '<button class="tbtn" data-dbg="next">Step Over</button>' +
+        '<button class="tbtn" data-dbg="stepIn">Step In</button>' +
+        '<button class="tbtn" data-dbg="stepOut">Step Out</button>' +
+        '<button class="tbtn" data-dbg="stop">Stop</button></div>' +
+        '<div class="console" id="runOut"><span class="dim">Click Run (Shift+F10) to execute main.py in the sandbox.</span></div>' +
         '<div class="term-line" id="runLine"><span class="prompt" id="runPrompt">input&gt;</span>' +
         '<input class="term-in" id="runIn" disabled spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="program asks for input? type here, then Enter" /></div>') +
       pane('terminal', termPane()) +
@@ -1599,7 +1904,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
       pane('logs', logsPane()) +
       pane('find', findPane()) +
       pane('problems', '<div id="probOut"><div class="empty">No problems.</div></div>');
-    wirePerf(); wireLogs(); wireTerm(); wireFind();
+    wirePerf(); wireLogs(); wireTerm(); wireFind(); wireDbg();
     var ri = $('runIn');
     if (ri) ri.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
@@ -1699,6 +2004,12 @@ export function pyCharmClientScript(d: PanelClientData): string {
     }).join('') || '<div class="empty">No metrics yet.</div>';
   }
   function fmtMs(v) { return v >= 100 ? Math.round(v) + 'ms' : (Math.round(v * 10) / 10) + 'ms'; }
+  function fmtBytes(v) {
+    if (!v) return '0 B';
+    var u = ['B', 'KB', 'MB', 'GB'], i = 0, n = v;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (n >= 100 ? Math.round(n) : Math.round(n * 10) / 10) + ' ' + u[i];
+  }
   function sparkline(ser) {
     if (!ser || ser.length < 2) return '';
     var w = 100, h = 30, max = Math.max.apply(null, ser), min = Math.min.apply(null, ser);
@@ -1711,6 +2022,238 @@ export function pyCharmClientScript(d: PanelClientData): string {
       '<polyline points="' + pts + '" fill="none" stroke="var(--accent)" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>';
   }
   function wirePerf() { if (activeBottom !== 'perf') return; }
+
+  // ---------- kernel flame graph window ----------
+  // A separate, draggable window rather than a dock pane: the point is to watch
+  // the kernel while a program runs, so the editor and the run output must stay
+  // usable behind it. Data arrives as "flame" frames pushed by the engine
+  // (V8 CPU samples of the kernel process, aggregated into a call tree).
+  var FLAME = { open: false, paused: false, last: null, drag: null, mem: [] };
+  function shortFlameUrl(u) {
+    if (!u) return '';
+    var s = String(u).replace(/^file:\\/\\/\\/?/, '');
+    var i = s.lastIndexOf('/src/');
+    return i >= 0 ? s.slice(i + 1) : s;
+  }
+  function openFlame() {
+    var w = $('flameWin');
+    if (!w) return;
+    w.classList.add('open');
+    w.setAttribute('aria-hidden', 'false');
+    FLAME.open = true;
+    if (!FLAME.paused) BRIDGE.send({ kind: 'flameStart', intervalMs: 1000 });
+    renderFlame(FLAME.last);
+  }
+  function closeFlame() {
+    var w = $('flameWin');
+    if (w) { w.classList.remove('open'); w.setAttribute('aria-hidden', 'true'); }
+    FLAME.open = false;
+    BRIDGE.send({ kind: 'flameStop' });
+  }
+  function flamePauseToggle() {
+    FLAME.paused = !FLAME.paused;
+    var b = $('flamePause');
+    if (b) b.textContent = FLAME.paused ? 'Resume' : 'Pause';
+    BRIDGE.send({ kind: FLAME.paused ? 'flameStop' : 'flameStart', intervalMs: 1000 });
+  }
+  function renderFlame(f) {
+    if (f) FLAME.last = f;
+    var chart = $('flameChart'), meta = $('flameMeta'), hot = $('flameHot');
+    if (!chart) return;
+    // The memory trend lives on its own buffer, so it must be drawn even when
+    // this frame carries no call tree (error frames, first sample).
+    renderFlameMemory();
+    if (!f) {
+      chart.innerHTML = '<div class="empty">Sampling the kernel…</div>';
+      return;
+    }
+    if (!f.ok) {
+      if (meta) meta.textContent = 'error';
+      chart.innerHTML = '<div class="empty" style="color:var(--error)">' + esc(f.error || 'sampler error') + '</div>';
+      if (hot) hot.innerHTML = '';
+      return;
+    }
+    if (meta) {
+      meta.textContent = 'busy ' + fmtMs(f.busyMs) + ' / ' + fmtMs(f.totalMs) +
+        ' · ' + f.samples + ' frames · ' + (f.intervalMs / 1000).toFixed(1) + 's';
+    }
+    var root = f.root;
+    if (!root) { chart.innerHTML = '<div class="empty">No samples yet.</div>'; return; }
+    // The vertical scrollbar eats ~17px of the client box; reserving it keeps
+    // the right-most frame from sliding under the thumb.
+    var chartW = Math.max(320, chart.clientWidth - 30);
+    var rowH = 17, html = '', budget = 700, nodes = [];
+
+    function nodeHtml(n, depth, left, width) {
+      if (width < 0.6 || width <= 1.5 || depth > 40) return;
+      var tip = n.name + ' · self ' + fmtMs(n.selfMs) + ' · total ' + fmtMs(n.totalMs) +
+        (n.url ? ' · ' + shortFlameUrl(n.url) + ':' + n.line : '');
+      // No half-glyphs: a box narrower than ~26px shows colour + tooltip only.
+      var label = width >= 26 ? esc(n.name) : '';
+      html += '<div class="fnode k-' + n.kind + '" style="left:' + left.toFixed(1) + 'px;top:' +
+        (depth * rowH) + 'px;width:' + Math.max(1, width - 1).toFixed(1) + 'px" title="' +
+        esc(tip) + '">' + label + '</div>';
+    }
+
+    function walk(n, depth, left, width) {
+      if (budget <= 0 || width < 0.6 || depth > 40) return;
+      budget--;
+      nodeHtml(n, depth, left, width);
+      // Idle is "waiting for work", not a hotspot; keeping it out of the list
+      // is what makes the right-hand ranking about actual kernel load.
+      if (n.kind !== 'idle') nodes.push(n);
+      var total = n.totalMs || 1, x = left;
+      (n.children || []).forEach(function (c) {
+        var w = width * (c.totalMs / total);
+        walk(c, depth + 1, x, w);
+        x += w;
+      });
+    }
+
+    // Idle usually owns 90%+ of the root width, which squeezes every frame
+    // that carries load into an unreadable sliver at the right edge. Give idle
+    // a full-width row of its own and stack the busy boxes *below* it, scaled
+    // to their own total so the small coloured frames become readable.
+    var idleNode = null, busy = [];
+    (root.children || []).forEach(function (c) {
+      if (c.kind === 'idle') idleNode = c; else busy.push(c);
+    });
+
+    nodeHtml(root, 0, 0, chartW);
+    var depth = 1;
+    if (idleNode) {
+      walk(idleNode, depth, 0, chartW);
+      depth++;
+    }
+    var busyTotal = 0;
+    busy.forEach(function (n) { busyTotal += n.totalMs; });
+    if (busy.length) {
+      var bx = 0;
+      busy.forEach(function (n) {
+        // A zero-sample frame would vanish at 0px; share the row evenly.
+        var w = busyTotal > 0 ? chartW * (n.totalMs / busyTotal) : chartW / busy.length;
+        walk(n, depth, bx, w);
+        bx += w;
+      });
+    }
+
+    chart.innerHTML = html || '<div class="empty">No samples yet.</div>';
+    if (hot) {
+      var top = nodes.slice().sort(function (a, b) { return b.selfMs - a.selfMs; }).slice(0, 12);
+      hot.innerHTML = top.map(function (n) {
+        return '<div class="flame-hot-row" title="' + esc(shortFlameUrl(n.url) + ':' + n.line) + '">' +
+          '<span class="flame-hot-name">' + esc(n.name) + '</span>' +
+          '<span class="flame-hot-meta">self ' + fmtMs(n.selfMs) + ' · total ' + fmtMs(n.totalMs) + '</span></div>';
+      }).join('') || '<div class="empty">No hotspots yet.</div>';
+    }
+  }
+
+  /**
+   * Memory trend: one line per holder, sampled alongside each CPU frame.
+   *
+   * The kernel's RSS is the whole process; "kernel heap" is the part V8 owns;
+   * every running language server is a separate process, which is why it can be
+   * attributed exactly. The legend is sorted by the latest value, so the first
+   * entry is the answer to "which service is using the most memory".
+   */
+  function renderFlameMemory() {
+    var box = $('flameMemChart'), legend = $('flameMemLegend'), top = $('flameMemTop');
+    if (!box) return;
+    var pts = FLAME.mem;
+    if (!pts.length) {
+      box.innerHTML = '<div class="empty">Waiting for a memory sample…</div>';
+      if (top) top.textContent = 'waiting…';
+      if (legend) legend.innerHTML = '';
+      return;
+    }
+    var last = pts[pts.length - 1];
+    var series = [
+      { name: 'kernel rss', color: '#8b949e', get: function (p) { return p.rss; } },
+      { name: 'kernel heap', color: '#61afef', get: function (p) { return p.heapUsed; } }
+    ];
+    var seen = {};
+    pts.forEach(function (p) {
+      (p.services || []).forEach(function (s) { seen[s.name] = 1; });
+    });
+    var palette = ['#e06c75', '#98c379', '#e5c07b', '#c678dd', '#56b6c2', '#d19a66'];
+    var ci = 0;
+    Object.keys(seen).forEach(function (name) {
+      series.push({
+        name: name,
+        color: palette[ci++ % palette.length],
+        get: function (p) {
+          var list = p.services || [];
+          for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i].bytes;
+          return 0;
+        }
+      });
+    });
+
+    var W = Math.max(320, box.clientWidth || 320);
+    var H = Math.max(64, box.clientHeight || 96);
+    var padL = 46, padR = 8, padT = 6, padB = 12;
+    var innerW = Math.max(10, W - padL - padR), innerH = Math.max(10, H - padT - padB);
+    var maxV = 1;
+    series.forEach(function (s) {
+      pts.forEach(function (p) { var v = s.get(p); if (v > maxV) maxV = v; });
+    });
+    maxV *= 1.1;
+    function xOf(i) { return padL + (pts.length === 1 ? innerW / 2 : innerW * (i / (pts.length - 1))); }
+    function yOf(v) { return padT + innerH - innerH * Math.min(1, v / maxV); }
+
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '">';
+    for (var g = 0; g <= 2; g++) {
+      var gy = padT + innerH * (g / 2);
+      svg += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' +
+        gy.toFixed(1) + '" stroke="rgba(140,150,165,.20)" stroke-width="1"/>';
+      svg += '<text x="' + (padL - 5) + '" y="' + (gy + 3).toFixed(1) +
+        '" fill="#8b949e" font-size="9" text-anchor="end">' + fmtBytes(maxV * (1 - g / 2)) + '</text>';
+    }
+    series.forEach(function (s) {
+      var d = [];
+      for (var i = 0; i < pts.length; i++) d.push(xOf(i).toFixed(1) + ',' + yOf(s.get(pts[i])).toFixed(1));
+      svg += '<polyline fill="none" stroke="' + s.color + '" stroke-width="1.5" points="' + d.join(' ') + '"/>';
+      svg += '<circle cx="' + xOf(pts.length - 1).toFixed(1) + '" cy="' + yOf(s.get(last)).toFixed(1) +
+        '" r="2.2" fill="' + s.color + '"/>';
+    });
+    svg += '</svg>';
+    box.innerHTML = svg;
+
+    var ranked = series.slice().sort(function (a, b) { return b.get(last) - a.get(last); });
+    if (top) top.textContent = 'top: ' + ranked[0].name + ' · ' + fmtBytes(ranked[0].get(last));
+    if (legend) {
+      legend.innerHTML = ranked.map(function (s) {
+        return '<span><i style="background:' + s.color + '"></i>' + esc(s.name) + ' ' +
+          fmtBytes(s.get(last)) + '</span>';
+      }).join('');
+    }
+  }
+  function initFlameWindow() {
+    var w = $('flameWin'), head = $('flameHead');
+    if (!w || !head) return;
+    var close = $('flameClose'); if (close) close.addEventListener('click', closeFlame);
+    var pause = $('flamePause'); if (pause) pause.addEventListener('click', flamePauseToggle);
+    head.addEventListener('mousedown', function (e) {
+      if (e.target && e.target.closest && e.target.closest('button')) return;
+      var r = w.getBoundingClientRect();
+      FLAME.drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      w.style.transform = 'none';
+      w.style.left = r.left + 'px';
+      w.style.top = r.top + 'px';
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!FLAME.drag) return;
+      w.style.left = Math.max(0, Math.min(window.innerWidth - 80, e.clientX - FLAME.drag.dx)) + 'px';
+      w.style.top = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - FLAME.drag.dy)) + 'px';
+    });
+    document.addEventListener('mouseup', function () { FLAME.drag = null; });
+  }
+  /** Window → Minimize: real in the desktop shell, explained in a browser tab. */
+  function minimizeWindow() {
+    if (tauriInvoke) { tauriInvoke('plugin:window|minimize'); return; }
+    toast('Minimize is only available in the desktop window');
+  }
 
   // ---------- logs ----------
   var LOGS = [];
@@ -1771,27 +2314,129 @@ export function pyCharmClientScript(d: PanelClientData): string {
     }).join('') || '<div class="empty">No log records at this level.</div>';
   }
 
-  // ---------- problems ----------
+  // ---------- problems (LSP diagnostics) ----------
+  // problems is the list the panel renders; DIAGS is the same list kept so
+  // the editor can paint marks from it. One setter drives both, so the squiggles
+  // and the panel can never disagree.
   var problems = [];
+  var pendingSaveCheck = false;
+  function diagSev(d) { return d.severity === 1 ? 1 : d.severity === 2 ? 2 : 3; }
+  function diagEndLine(d) { return d.endLine == null ? (d.line || 0) : d.endLine; }
+  function diagsOnLine(line0) {
+    var out = [];
+    for (var i = 0; i < DIAGS.length; i++) {
+      var d = DIAGS[i];
+      if (line0 >= (d.line || 0) && line0 <= diagEndLine(d)) out.push(d);
+    }
+    return out;
+  }
+  function clearDiagMarks() {
+    if (CMEDITOR) DIAG_MARKS.forEach(function (h) { h.clear(); });
+    DIAG_MARKS = [];
+  }
+  // Wavy underline + a gutter tint per diagnostic. CodeMirror's textMarker is the
+  // same mechanism the coverage view already leans on, so this adds no
+  // dependency; the textarea fallback shows a coloured line number instead.
+  function paintDiagMarks() {
+    clearDiagMarks();
+    if (!CMEDITOR || !DIAGS.length) return;
+    var cm = CMEDITOR.cm;
+    DIAGS.forEach(function (d) {
+      try {
+        var line = d.line || 0;
+        var from = { line: line, ch: d.character || 0 };
+        var to = { line: diagEndLine(d), ch: d.endCharacter == null ? from.ch : d.endCharacter };
+        if (to.line < from.line || (to.line === from.line && to.ch <= from.ch)) to = { line: from.line, ch: from.ch + 1 };
+        var cls = 'diag-sq diag-s' + diagSev(d), gcls = 'diag-g' + diagSev(d);
+        DIAG_MARKS.push(cm.markText(from, to, { className: cls }));
+        cm.addLineClass(line, 'gutter', gcls);
+        DIAG_MARKS.push({ clear: function () { cm.removeLineClass(line, 'gutter', gcls); } });
+      } catch (e) { /* the document shrank under a stale diagnostic */ }
+    });
+  }
+  function setDiags(items) {
+    DIAGS = items || [];
+    renderProblems(DIAGS);
+    paintDiagMarks();
+    // The textarea fallback paints its tint from the gutter, so it needs a
+    // re-render; CodeMirror already carries its marks from paintDiagMarks.
+    renderEditor();
+    // L3: a save is a checkpoint. If the file we just wrote still has errors,
+    // say so once instead of letting Run be the first to find out.
+    if (pendingSaveCheck) {
+      pendingSaveCheck = false;
+      var errs = 0;
+      for (var i = 0; i < DIAGS.length; i++) if (DIAGS[i].severity === 1) errs++;
+      if (errs) {
+        balloon({
+          type: 'warning',
+          title: 'Saved ' + (currentFile || 'file'),
+          message: errs + (errs === 1 ? ' syntax error' : ' syntax errors') + ' - see the Problems panel.',
+          actions: [{ label: 'Show', onClick: function () { toggleWindow('problems'); } }]
+        });
+      }
+    }
+  }
+  function clearDiags() { DIAGS = []; renderProblems([]); paintDiagMarks(); renderEditor(); }
   function renderProblems(items) {
     problems = items || [];
     var out = $('probOut');
     $('stProblems').textContent = problems.length + (problems.length === 1 ? ' problem' : ' problems');
     if (!out) return;
     if (!problems.length) { out.innerHTML = '<div class="empty">No problems detected.</div>'; return; }
-    out.innerHTML = problems.map(function (p) {
-      var sev = p.severity === 1 ? 'error' : 'warn';
-      return '<div class="prob ' + sev + '"><span class="ic">' + ic(sev === 'error' ? 'close' : 'warn', 14) + '</span>' +
+    out.innerHTML = problems.map(function (p, i) {
+      var sev = p.severity === 1 ? 'error' : p.severity === 2 ? 'warn' : 'info';
+      return '<div class="prob ' + sev + '" data-pi="' + i + '"><span class="ic">' + ic(sev === 'error' ? 'close' : 'warn', 14) + '</span>' +
         '<span class="loc">' + (p.line + 1) + ':' + (p.character + 1) + '</span>' +
         '<span class="msg">' + esc(p.message) + '</span></div>';
     }).join('');
+    // A Problems row is a navigation shortcut, as in PyCharm: click jumps there.
+    Array.prototype.forEach.call(out.querySelectorAll('.prob'), function (row) {
+      row.addEventListener('click', function () {
+        var p = problems[+row.getAttribute('data-pi')];
+        if (p) gotoLine(p.line || 0, p.character || 0);
+      });
+    });
   }
+  /** Put the caret on a diagnostic's position and bring it into view. */
+  function gotoLine(line0, ch) {
+    if (CMEDITOR) {
+      var cm = CMEDITOR.cm;
+      cm.setCursor({ line: line0, ch: ch || 0 });
+      cm.scrollIntoView({ line: line0, ch: ch || 0 }, 80);
+      cm.focus();
+      return;
+    }
+    var lines = ta.value.split(NLc), idx = 0;
+    for (var i = 0; i < line0 && i < lines.length; i++) idx += lines[i].length + 1;
+    ta.selectionStart = ta.selectionEnd = idx + (ch || 0);
+    ta.scrollTop = Math.max(0, (line0 - 4) * 20);
+    syncScroll();
+    updateCaret();
+    ta.focus();
+  }
+  // ---------- L1 · check as you type ----------
+  // The engine already has the realtime plumbing (didChange -> publishDiagnostics);
+  // what was missing is the editor asking. A debounced check turns the manual
+  // Check button into live diagnostics, the way every IDE behaves.
+  var diagTimer = 0;
+  function requestCheck() {
+    var lg = lspLang();
+    if (!lg) { clearDiags(); return; }
+    BRIDGE.send({ kind: 'check', code: ta.value, language: lg });
+  }
+  function scheduleCheck() { clearTimeout(diagTimer); diagTimer = setTimeout(requestCheck, 300); }
 
   // ---------- run ----------
   function runCode() {
     activeBottom = 'run'; $('dock').classList.remove('hidden'); renderDock();
     var out = $('runOut');
-    out.innerHTML = '<span class="cmd">&gt; ' + currentLang + ' ' + esc(currentFile) + '</span>\\n';
+    out.innerHTML = '<span class="cmd">&gt; ' + lg + ' ' + esc(currentFile) + '</span>\\n';
+    // Run follows the file on screen: its language (honouring an explicit
+    // #stLang override) and its buffer. This is the "run the open file"
+    // contract the UI suite asserts — a Run/Debug *configuration* must never
+    // hijack the editor, so it is not consulted here. Debug (Shift+F9) is where
+    // the configuration drives things: program, args, env and cwd.
     var lg = lspLang();
     if (!lg) { toast('run: only Python / Go / JavaScript are supported yet'); return; }
     BRIDGE.send({ kind: 'run', code: ta.value, language: lg, sessionId: 'pycharm' });
@@ -1803,6 +2448,257 @@ export function pyCharmClientScript(d: PanelClientData): string {
     var out = $('runOut'); if (!out) return;
     var s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text;
     out.appendChild(s);
+  }
+
+  // ---------- stop / debug ----------
+  // "Stop" is a protocol message, not a line of text: the engine aborts the
+  // live run (and a debug adapter, if one is attached) and answers "stopped".
+  var DBG = { active: false, state: '', frames: [], reason: '' };
+  function stopRun() {
+    // Always ask: the engine owns the truth about what is running, and it
+    // answers "stopped" with a cancelled flag either way. Guessing locally (a
+    // run that has not reached runStart yet) would drop a legitimate Stop.
+    BRIDGE.send({ kind: 'stop', sessionId: 'pycharm' });
+    setStatusHint('Stopping…');
+  }
+  function renderDbgBar() {
+    var bar = $('dbgBar');
+    if (!bar) return;
+    bar.style.display = DBG.active ? 'flex' : 'none';
+    var st = $('dbgState');
+    if (st) st.textContent = 'debug · ' + (DBG.state || 'idle');
+    bar.querySelectorAll('[data-dbg]').forEach(function (b) {
+      var cmd = b.getAttribute('data-dbg');
+      // While the program runs only Continue/Stop make sense; the step buttons
+      // need a stopped thread to act on.
+      b.disabled = !DBG.active || (cmd !== 'continue' && cmd !== 'stop' && DBG.state !== 'stopped');
+    });
+  }
+  function wireDbg() {
+    var bar = $('dbgBar');
+    if (!bar) return;
+    bar.querySelectorAll('[data-dbg]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var cmd = b.getAttribute('data-dbg');
+        if (cmd === 'stop') { stopRun(); return; }
+        BRIDGE.send({ kind: 'debugCmd', cmd: cmd });
+      });
+    });
+    renderDbgBar();
+  }
+  function debugCurrent() {
+    activeBottom = 'run'; $('dock').classList.remove('hidden'); renderDock();
+    var cfg = normCfg(activeConfig());
+    if (!cfg.language) {
+      reportError({ level: 'warn', title: 'Debug', message: 'Cannot determine a language for "' + cfg.path + '" — set it in the Run/Debug configuration.' });
+      return;
+    }
+    if (isOpen(cfg.path) && currentFile !== cfg.path) openFile(cfg.path);
+    var fileOpen = isOpen(cfg.path) && currentFile === cfg.path;
+    var lg = cfg.language;
+    DBG = { active: true, state: 'starting', frames: [], reason: '' };
+    renderDbgBar();
+    appendRun('\\n[debug] starting ' + cfg.name + ' → ' + cfg.path + ' (' + cfg.language + ' adapter)…\\n', 'dim');
+    var bps = fileOpen ? Object.keys(bpsFor(currentFile)).map(Number).filter(function (n) { return n > 0; }) : [];
+    BRIDGE.send({
+      kind: 'debug',
+      code: fileOpen ? ta.value : '',
+      language: cfg.language,
+      program: cfg.path,
+      breakpoints: bps,
+      stopOnEntry: cfg.stopOnEntry,
+      serverReads: !fileOpen,
+      args: cfg.args,
+      env: cfg.env,
+      cwd: cfg.cwd,
+      request: cfg.request
+    });
+  }
+  function applyDebugState(m) {
+    if (m.ok === false) {
+      DBG.active = false; DBG.state = '';
+      appendRun('\\n[debug] ' + String(m.error || 'session failed') +
+        (m.hint ? '\\n[debug] ' + m.hint : '') + '\\n', 'err');
+      renderDbgBar();
+      if (m.install) appendRun('\\n[debug] install:  ' + m.install + '\\n', 'warn');
+      var dbgDetail = (m.install ? (m.install + '\\n') : '') + (m.hint || '');
+      reportError({ level: 'warn', title: 'Debug unavailable', message: String(m.error || 'session failed'), detail: dbgDetail || undefined });
+      return;
+    }
+    var state = String(m.state || '');
+    if (state === 'running') {
+      DBG.active = true; DBG.state = 'running';
+      appendRun('[debug] running' + (m.adapter ? ' · ' + m.adapter : '') + '\\n', 'dim');
+      RUN_ACTIVE = true;
+    } else if (state === 'stopped') {
+      DBG.active = true; DBG.state = 'stopped';
+      DBG.frames = m.frames || [];
+      DBG.reason = String(m.reason || '');
+      appendRun('\\n[debug] stopped · ' + (DBG.reason || 'breakpoint') + '\\n', 'warn');
+      DBG.frames.slice(0, 8).forEach(function (f) {
+        appendRun('    at ' + f.name + (f.file ? '  (' + f.file + (f.line ? ':' + f.line : '') + ')' : '') + '\\n', 'dim');
+      });
+    } else if (state === 'terminated') {
+      DBG.active = false; DBG.state = '';
+      RUN_ACTIVE = false;
+      appendRun('[debug] session terminated\\n', 'dim');
+    }
+    renderDbgBar();
+  }
+
+  // ---------- coverage ----------
+  // Line coverage comes from the engine (Python's stdlib tracer); the UI only
+  // projects the answer: gutter marks for covered/missing executable lines.
+  var COVERAGE = null; // { file, covered:{line:1}, missing:{line:1} }
+  var CM_COVER_MARKS = [];
+  function runCoverage() {
+    var lg = lspLang();
+    if (lg !== 'python') {
+      reportError({ level: 'warn', title: 'Coverage', message: 'Line coverage is implemented for Python only.' });
+      return;
+    }
+    activeBottom = 'run'; $('dock').classList.remove('hidden'); renderDock();
+    appendRun('\\n[coverage] running the file under the Python tracer…\\n', 'dim');
+    BRIDGE.send({ kind: 'coverage', code: ta.value, language: 'python' });
+  }
+  function clearCoverage() {
+    COVERAGE = null;
+    if (CMEDITOR) {
+      CM_COVER_MARKS.forEach(function (n) {
+        CMEDITOR.cm.removeLineClass(n - 1, 'background', 'covmiss');
+        CMEDITOR.cm.removeLineClass(n - 1, 'background', 'covhit');
+      });
+    }
+    CM_COVER_MARKS = [];
+  }
+  function applyCoverage(r) {
+    if (!r || r.ok === false) {
+      appendRun('[coverage] ' + String((r && r.error) || 'failed') + '\\n', 'err');
+      reportError({ level: 'error', title: 'Coverage failed', message: String((r && r.error) || 'unknown error') });
+      return;
+    }
+    clearCoverage();
+    var covered = {}, missing = {};
+    (r.lines || []).forEach(function (l) {
+      if (l.count > 0) covered[l.line] = 1; else missing[l.line] = 1;
+    });
+    COVERAGE = { file: currentFile, covered: covered, missing: missing };
+    var pct = r.executableLines ? Math.round((r.coveredLines / r.executableLines) * 100) : 0;
+    var miss = (r.missing || []).slice(0, 30).join(', ');
+    appendRun('[coverage] ' + r.coveredLines + '/' + r.executableLines + ' lines · ' + pct + '%' +
+      (miss ? '\\n[coverage] missing: ' + miss : '') + '\\n', pct >= 80 ? 'ok' : 'warn');
+    setStatusHint('Coverage ' + pct + '% · ' + r.coveredLines + '/' + r.executableLines + ' lines');
+    if (CMEDITOR) {
+      Object.keys(missing).forEach(function (n) {
+        var line = Number(n) - 1;
+        if (line >= 0) { CMEDITOR.cm.addLineClass(line, 'background', 'covmiss'); CM_COVER_MARKS.push(Number(n)); }
+      });
+      Object.keys(covered).forEach(function (n) {
+        var line = Number(n) - 1;
+        if (line >= 0) { CMEDITOR.cm.addLineClass(line, 'background', 'covhit'); CM_COVER_MARKS.push(Number(n)); }
+      });
+    } else {
+      renderEditor();
+    }
+    showModal({
+      title: 'Coverage', icon: 'coverage',
+      message: r.coveredLines + ' of ' + r.executableLines + ' executable lines covered (' + pct + '%).',
+      list: (r.missing || []).slice(0, 12).map(function (n) { return { icon: 'warn', label: 'line ' + n + ' not executed' }; }),
+      detail: r.command,
+      buttons: [{ label: 'Close', primary: true, onClick: function () {} }],
+    });
+  }
+
+  // ---------- formatting ----------
+  // Reformat is a real text transform, not a toast: trailing whitespace, tabs
+  // in indentation, runs of blank lines and a missing final newline are exactly
+  // the things a hand-written buffer accumulates. The rewrite keeps the file's
+  // own line ending so a CRLF document does not flip to LF behind the user.
+  function setEditorText(text) {
+    if (CMEDITOR) {
+      var cm = CMEDITOR.cm;
+      var last = cm.lastLine();
+      cm.replaceRange(text, { line: 0, ch: 0 }, { line: last, ch: cm.getLine(last).length });
+    } else {
+      ta.value = text;
+      renderEditor();
+    }
+    if (currentFile && BUFFERS[currentFile]) BUFFERS[currentFile].dirty = true;
+    renderTabs(); updateCaret();
+  }
+  function basicFormat(text) {
+    var eol = text.indexOf('\\r\\n') >= 0 ? '\\r\\n' : '\\n';
+    var lines = text.replace(/^\\uFEFF/, '').split(/\\r?\\n/);
+    var out = [], blank = 0;
+    lines.forEach(function (line) {
+      var s = line.replace(/[ \\t]+$/, '').replace(/^\\t+/, function (m) { return '    '.repeat(m.length); });
+      if (s.trim() === '') {
+        blank++;
+        if (blank > 2) return;
+      } else blank = 0;
+      out.push(s);
+    });
+    while (out.length && out[out.length - 1] === '') out.pop();
+    return out.join(eol) + eol;
+  }
+  function changedLines(a, b) {
+    var x = a.split(/\\r?\\n/), y = b.split(/\\r?\\n/), n = 0;
+    for (var i = 0; i < Math.max(x.length, y.length); i++) if (x[i] !== y[i]) n++;
+    return n;
+  }
+  function reformatCode() {
+    if (!CAN_EDIT()) { toast('Reformat: no editable document'); return; }
+    var before = ta.value, after = basicFormat(before);
+    if (after === before) { toast('Reformatted · nothing to change'); return; }
+    setEditorText(after);
+    toast('Reformatted · ' + changedLines(before, after) + ' lines changed');
+  }
+  /**
+   * Import hygiene: de-duplicate and sort the leading import block. Nothing is
+   * deleted — deciding an import is unused needs a resolver — so this is safe
+   * on a half-edited file and still fixes the two things people actually hit.
+   */
+  function optimizeImportsText(text, lang) {
+    var eol = text.indexOf('\\r\\n') >= 0 ? '\\r\\n' : '\\n';
+    var lines = text.split(/\\r?\\n/);
+    if (lang !== 'python' && lang !== 'javascript' && lang !== 'typescript') return null;
+    var re = lang === 'python'
+      ? /^\\s*(import\\s+\\S|from\\s+\\S+\\s+import\\s+)/
+      : /^\\s*import\\s.+from\\s+['"]/;
+    var start = -1, end = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) { if (start < 0) start = i; end = i; }
+      else if (start >= 0) break;
+    }
+    if (start < 0) return null;
+    var seen = {}, block = [];
+    for (var j = start; j <= end; j++) {
+      var line = lines[j];
+      if (!line.trim()) continue;
+      if (!re.test(line)) { block.push(line); continue; } // comment inside the block
+      if (seen[line.trim()]) continue;
+      seen[line.trim()] = 1;
+      block.push(line);
+    }
+    var imports = block.filter(function (l) { return re.test(l); });
+    var comments = block.filter(function (l) { return !re.test(l); });
+    imports.sort(function (a, b) {
+      var key = function (s) {
+        var m = /^\\s*from\\s+(\\S+)/.exec(s);
+        return (m ? '1' + m[1] : '0' + s.trim());
+      };
+      return key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
+    });
+    var next = lines.slice(0, start).concat(comments, imports, lines.slice(end + 1));
+    return { text: next.join(eol), added: imports.length, removed: block.length - imports.length };
+  }
+  function optimizeImports() {
+    if (!CAN_EDIT()) { toast('Optimize Imports: no editable document'); return; }
+    var res = optimizeImportsText(ta.value, currentLang);
+    if (!res) { toast('Optimize Imports: no import block found for ' + currentLang); return; }
+    if (res.text === ta.value) { toast('Imports already optimized'); return; }
+    setEditorText(res.text);
+    toast('Imports optimized · ' + res.added + ' kept, ' + res.removed + ' duplicate lines removed');
   }
 
   // ---------- terminal ----------
@@ -1893,6 +2789,9 @@ export function pyCharmClientScript(d: PanelClientData): string {
     switch (m.kind) {
       case 'hello':
         KCOMMANDS = m.commands || [];
+        // First real git read: the status bar's branch cell must not keep the
+        // sample name it booted with.
+        BRIDGE.send({ kind: 'gitStatus' });
         $('aboutBody').innerHTML = 'Nolanguage · PyCharm-style shell<br/>app ' + esc(m.appVersion) +
           '<br/>' + esc(m.os) + ' / ' + esc(m.arch) + '<br/><span class="dim">kernel commands: ' + KCOMMANDS.length + '</span>';
         break;
@@ -1900,8 +2799,44 @@ export function pyCharmClientScript(d: PanelClientData): string {
         // The plugin catalogue: languages, extensions, grammar and capabilities.
         applyLanguageCatalog(m.languages || []);
         break;
+      case 'plugins':
+        // The full plugin catalogue. It arrives unprompted on connect, and again
+        // after every enable/disable/install, so an open dialog stays current.
+        PLUGINS = m;
+        paintPluginDialog();
+        break;
+      case 'profileResult':
+        paintProfileDialog(m);
+        break;
+      case 'mcp':
+        // The catalogue arrives on connect and after every connect/disconnect, so
+        // an open sidebar stays current without polling.
+        MCP = m;
+        if (activeLeft === 'mcp') renderPanel();
+        break;
+      case 'mcpCallResult':
+        MCP_OUT = (m.ok ? 'OK ' : 'ERROR ') + (m.id || '') + ' / ' + (m.tool || '') + '\\n' +
+          (m.ok ? JSON.stringify(m.result, null, 2) : String(m.error || ''));
+        if (activeLeft === 'mcp') renderPanel();
+        break;
+      case 'mcpError':
+        MCP_OUT = 'ERROR ' + (m.id ? m.id + ': ' : '') + String(m.error || '');
+        if (activeLeft === 'mcp') renderPanel();
+        break;
       case 'metrics':
         lastMetrics = m; if (activeBottom === 'perf') renderPerf(m);
+        break;
+      case 'flame':
+        // Live CPU profile frame: keep the memory trend even when the window is
+        // closed, so opening it shows the last ~90s instead of a single dot.
+        if (m.memory) {
+          FLAME.mem.push({
+            at: m.at, rss: m.memory.rss, heapUsed: m.memory.heapUsed,
+            services: m.memory.services || []
+          });
+          if (FLAME.mem.length > 90) FLAME.mem.shift();
+        }
+        if (FLAME.open) renderFlame(m); else FLAME.last = m;
         break;
       case 'log':
         (m.records || []).forEach(function (r) { LOGS.push(r); });
@@ -1912,9 +2847,15 @@ export function pyCharmClientScript(d: PanelClientData): string {
         // A switch can move the document on while a check is in flight; showing
         // the old language's problems under the new one would be a lie.
         if (m.language && m.language !== currentLang) break;
-        renderProblems(m.items || []);
+        setDiags(m.items || []);
         break;
       case 'runResult':
+        if (m.cancelled) {
+          RUN_ACTIVE = false;
+          { var ri4 = $('runIn'); if (ri4) ri4.disabled = true; }
+          appendRun('\\n[stopped by user]\\n', 'warn');
+          break;
+        }
         appendRun('\\nProcess finished with exit code ' + (m.exitCode == null ? '?' : m.exitCode) +
           '  (' + fmtMs(m.durationMs) + ')\\n', m.exitCode === 0 ? 'ok' : 'err');
         RUN_ACTIVE = false;
@@ -1927,6 +2868,60 @@ export function pyCharmClientScript(d: PanelClientData): string {
         break;
       case 'runOut':
         appendRun(m.text, m.stream === 'stderr' ? 'err' : '');
+        break;
+      case 'stopped':
+        RUN_ACTIVE = false;
+        DBG.active = false; DBG.state = '';
+        appendRun('\\n[stopped]\\n', 'dim');
+        renderDbgBar();
+        toast(m.cancelled ? 'Run stopped' : (m.debugStopped ? 'Debug session stopped' : 'Nothing was running'));
+        break;
+      case 'debugState':
+        applyDebugState(m);
+        break;
+      case 'debugOut':
+        appendRun(m.text, m.category === 'stderr' ? 'err' : '');
+        break;
+      case 'coverageResult':
+        applyCoverage(m);
+        break;
+      case 'commandResult': {
+        if (m.ok) {
+          var kres;
+          try { kres = m.result === undefined ? 'ok' : JSON.stringify(m.result); } catch (e) { kres = String(m.result); }
+          if (!kres) kres = 'ok';
+          balloon({
+            type: 'success', title: 'Kernel: ' + m.id,
+            message: kres.length > 240 ? kres.slice(0, 240) + '…' : kres,
+          });
+        } else {
+          reportError({ level: 'error', title: 'Kernel command failed', message: String(m.error || 'unknown error'), detail: String(m.id || '') });
+        }
+        break;
+      }
+      case 'gitStatus':
+        GIT.status = m.ok ? m : null;
+        GIT.error = m.error || '';
+        GIT.loading = false;
+        if (m.ok) {
+          var sg = $('stGit');
+          if (sg) {
+            var n = (m.changes || []).length;
+            sg.innerHTML = ic('vcs', 14) + esc(m.branch || 'git') + (n ? ' · ' + n : '');
+          }
+        }
+        if (activeLeft === 'commit' || activeLeft === 'vcs') renderPanel();
+        break;
+      case 'gitCommitResult':
+        GIT.status = null; GIT.loading = false;
+        if (m.ok) {
+          balloon({ type: 'success', title: 'Committed', message: String(m.branch || '') + ' · ' + m.committed + ' files' });
+          var cmEl = $('commitMsg'); if (cmEl) cmEl.value = '';
+          BRIDGE.send({ kind: 'gitStatus' });
+        } else {
+          reportError({ level: 'error', title: 'Commit failed', message: String(m.error || 'git refused the commit'), detail: m.output });
+        }
+        if (activeLeft === 'commit' || activeLeft === 'vcs') renderPanel();
         break;
       case 'termResult':
         TERM_ATTACHED = false;
@@ -2028,14 +3023,15 @@ export function pyCharmClientScript(d: PanelClientData): string {
       { label: 'File Structure', sc: 'Ctrl+F12', act: function () { toggleWindow('structure'); } }
     ],
     'Code': [
-      { label: 'Reformat Code', sc: 'Ctrl+Alt+L', act: function () { toast('Reformatted (demo)'); } },
-      { label: 'Optimize Imports', sc: 'Ctrl+Alt+O', act: function () { toast('Optimized imports (demo)'); } }
+      { label: 'Reformat Code', sc: 'Ctrl+Alt+L', act: reformatCode },
+      { label: 'Optimize Imports', sc: 'Ctrl+Alt+O', act: optimizeImports }
     ],
     'Run': [
       { label: "Run 'main'", sc: 'Shift+F10', act: runCode },
-      { label: "Debug 'main'", sc: 'Shift+F9', act: function () { runCode(); toast('Debug (demo)'); } },
+      { label: "Debug 'main'", sc: 'Shift+F9', act: debugCurrent },
+      { label: 'Run with Coverage', act: runCoverage },
       { sep: true },
-      { label: 'Stop', act: function () { appendRun('\\n[stopped]\\n', 'dim'); } }
+      { label: 'Stop', act: stopRun }
     ],
     'Tools': [
       { label: 'Extensions', act: openExt },
@@ -2044,18 +3040,19 @@ export function pyCharmClientScript(d: PanelClientData): string {
       { label: 'Profile current file', sc: 'Alt+9', act: profileCurrent },
       { label: 'Command Palette…', sc: 'Ctrl+P', act: openPalette },
       { sep: true },
+      { label: 'Kernel Flame Graph', sc: 'Ctrl+Alt+F', act: openFlame },
       { label: 'Performance', sc: 'Alt+8', act: function () { toggleWindow('perf'); } },
       { label: 'Logs', sc: 'Alt+0', act: function () { toggleWindow('logs'); } }
     ],
-    'VCS': [ { label: 'Show Git Widget', act: function () { toast('Git: main (clean)'); } } ],
-    'Window': [ { label: 'Minimize', act: function () { toast('minimize (demo)'); } } ],
+    'VCS': [ { label: 'Show Git Widget', act: function () { toggleWindow('vcs'); } } ],
+    'Window': [ { label: 'Minimize', act: function () { minimizeWindow(); } } ],
     'Help': [ { label: 'About', act: openAbout } ]
   };
   function renderMenus() {
     var bar = $('menubar');
     Object.keys(MENUS).forEach(function (name) {
       var m = document.createElement('div');
-      m.className = 'menu'; m.textContent = name;
+      m.className = 'menu'; m.textContent = t('menu.' + name, name);
       var pop = document.createElement('div'); pop.className = 'pop';
       MENUS[name].forEach(function (it) {
         if (it.sep) { var s = document.createElement('div'); s.className = 'sep'; pop.appendChild(s); return; }
@@ -2185,7 +3182,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
     // Re-check under the new language; a language with no server has no
     // problems to show, so clear the previous language's list.
     if (lspLang()) BRIDGE.send({ kind: 'check', code: ta.value, language: lspLang() });
-    else renderProblems([]);
+    else clearDiags();
     toast('Language mode: ' + langLabel(chosen) + (lang ? ' (manual)' : ' (from file type)'));
   }
 
@@ -2195,17 +3192,96 @@ export function pyCharmClientScript(d: PanelClientData): string {
   $('scrim').addEventListener('click', closeModals);
   function openAbout() { openModal('aboutModal'); }
   function openExt() { openModal('extModal'); BRIDGE.send({ kind: 'listExtensions' }); }
-  // Plugins live in their own page because managing them means typing a path,
-  // reading a validation report and watching a budget — a modal is too small
-  // for that, and the IDE already has a place for "the whole picture": a tab.
-  function openPlugins() { window.open('/plugins', '_blank'); }
-  function openProfile() { window.open('/profile', '_blank'); }
-  /** Profile the current editor buffer and open the flamegraph page. */
+  // The browser build has full /plugins and /profile pages served over HTTP.
+  // The Tauri shell has no HTTP server at all (the engine runs over a pipe), so
+  // window.open('/plugins') lands on a route that does not exist. Both views are
+  // therefore rendered in-app from the very same bridge messages the pages use.
+  function openPlugins() {
+    if (!isTauriShell()) { window.open('/plugins', '_blank'); return; }
+    showModal({
+      title: 'Language Plugins', icon: 'database',
+      message: 'Installed language plugins, their tier and validation state.',
+      buttons: [{ label: 'Close', primary: true, onClick: function () {} }]
+    });
+    DIALOG_KIND = 'plugins';
+    paintPluginDialog();
+    BRIDGE.send({ kind: 'listPlugins' });
+  }
+  /** Render the plugin catalogue into the open dialog (no-op when it is closed). */
+  function paintPluginDialog() {
+    if (DIALOG_KIND !== 'plugins') return;
+    var root = $('dlgRoot');
+    var body = root && root.querySelector('.dlg-body');
+    if (!body) return;
+    var list = (PLUGINS && PLUGINS.plugins) || [];
+    if (!list.length) { body.innerHTML = '<div class="dlg-msg">No language plugins reported yet.</div>'; return; }
+    body.innerHTML = list.map(function (p) {
+      var exts = (p.extensions || []).map(function (e) { return '.' + e; }).join(' ');
+      var notes = '';
+      if (p.runnerError) notes += '<div style="color:var(--warning);font-size:11px">' + esc(p.runnerError) + '</div>';
+      if (p.validationOk === false) {
+        notes += '<div style="color:var(--error);font-size:11px">' +
+          esc((p.validation || []).map(function (i) { return (i.field || '') + ': ' + (i.message || ''); }).join('; ')) + '</div>';
+      }
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">' +
+        '<div style="flex:1;min-width:0">' +
+          '<b>' + esc(p.displayName || p.id) + '</b> ' +
+          '<span style="color:var(--text-secondary)">' + esc(p.version || '') + ' · ' + (p.enabled ? 'enabled' : 'disabled') + ' · ' + esc(p.kind || '') + '</span>' +
+          '<div style="font-size:11px;color:var(--text-secondary)">' + esc(exts) + (p.runMode ? ' · ' + esc(p.runMode) : '') + '</div>' +
+          notes +
+        '</div>' +
+        '<button class="dlg-btn" data-plug="' + esc(p.id) + '" data-on="' + (p.enabled ? '1' : '0') + '">' +
+          (p.enabled ? 'Disable' : 'Enable') + '</button>' +
+      '</div>';
+    }).join('');
+    body.querySelectorAll('button[data-plug]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.getAttribute('data-plug');
+        b.disabled = true;
+        BRIDGE.send({ kind: b.getAttribute('data-on') === '1' ? 'langDisable' : 'langEnable', id: id });
+      });
+    });
+  }
+  function openProfile() {
+    if (!isTauriShell()) { window.open('/profile', '_blank'); return; }
+    showModal({
+      title: 'Profile', icon: 'perf', message: 'Waiting for the profiler…',
+      buttons: [{ label: 'Close', primary: true, onClick: function () {} }]
+    });
+    DIALOG_KIND = 'profile';
+  }
+  /** Render a profile result into the open dialog (no-op when it is closed). */
+  function paintProfileDialog(res) {
+    if (DIALOG_KIND !== 'profile') return;
+    var root = $('dlgRoot');
+    var body = root && root.querySelector('.dlg-body');
+    if (!body) return;
+    if (!res || res.ok === false) {
+      body.innerHTML = '<div class="dlg-msg">' + esc((res && res.error) || 'Profiler unavailable for this language.') + '</div>';
+      return;
+    }
+    var rows = (res.hotspots || []).map(function (h) {
+      return '<tr><td>' + esc(h.name || '') + '</td>' +
+        '<td style="color:var(--text-secondary)">' + esc(h.file || '') + (h.line ? ':' + h.line : '') + '</td>' +
+        '<td style="text-align:right">' + Math.round(h.tottimeMs || 0) + '</td>' +
+        '<td style="text-align:right">' + Math.round(h.cumtimeMs || 0) + '</td></tr>';
+    }).join('');
+    body.innerHTML =
+      '<div style="font-size:12px;margin-bottom:6px;color:var(--text-secondary)">' +
+        esc(res.source || '') + ' · ' + esc(String(res.languageId || '')) + ' · ' +
+        (res.sampleCount || 0) + ' functions · ' + Math.round(res.wallMs || 0) + ' ms</div>' +
+      '<table style="width:100%;font-size:12px;border-collapse:collapse">' +
+        '<thead><tr><th style="text-align:left">Function</th><th style="text-align:left">Location</th>' +
+        '<th style="text-align:right">Self ms</th><th style="text-align:right">Cum ms</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table>' +
+      (res.stdout ? '<pre style="margin-top:8px;font-size:11px;white-space:pre-wrap">' + esc(res.stdout) + '</pre>' : '');
+  }
+  /** Profile the current editor buffer and show the result. */
   function profileCurrent() {
     if (!ta) return;
     var lg = currentLang;
-    BRIDGE.send({ kind: 'profile', code: ta.value, language: lg, timeoutMs: 60000 });
     openProfile();
+    BRIDGE.send({ kind: 'profile', code: ta.value, language: lg, timeoutMs: 60000 });
   }
   /** Open the command palette (the UI surface for nlg run <script> -- <args>). */
   function openPalette() {
@@ -2277,23 +3353,38 @@ export function pyCharmClientScript(d: PanelClientData): string {
     var dark = document.documentElement.getAttribute('data-theme') !== 'light';
     var bars = $('strip').style.display !== 'none';
     var sb = (function () { var s = document.querySelector('.status'); return s && s.style.display !== 'none'; })();
+    var chinese = activeLocale() === 'zh-CN';
     showModal({
-      title: 'Settings', icon: 'settings',
+      title: t('modal.Settings', 'Settings'), icon: 'settings',
       checkboxes: [
         { name: 'dark', label: 'Darcula theme (dark)', def: dark },
         { name: 'bars', label: 'Show tool window bars', def: bars },
-        { name: 'status', label: 'Show status bar', def: sb }
+        { name: 'status', label: 'Show status bar', def: sb },
+        { name: 'zh', label: '界面语言：简体中文 (Chinese UI)', def: chinese }
       ],
       buttons: [
-        { label: 'Cancel', onClick: function () {} },
-        { label: 'OK', primary: true, onClick: function (v) {
+        { label: t('modal.Cancel', 'Cancel'), onClick: function () {} },
+        { label: t('modal.OK', 'OK'), primary: true, onClick: function (v) {
           setTheme(v.dark ? 'darcula' : 'light');
           $('strip').style.display = v.bars ? '' : 'none';
           var st = document.querySelector('.status'); if (st) st.style.display = v.status ? '' : 'none';
           savePrefs({ theme: v.dark ? 'darcula' : 'light' });
+          var next = v.zh ? 'zh-CN' : 'en';
+          if (next !== activeLocale()) {
+            savePrefs({ locale: next });
+            applyTranslations();
+          }
         } }
       ]
     });
+  }
+
+  // Re-render everything that carries a translatable string for the active locale.
+  // Menus are rebuilt from MENUS; static markup with data-i18n is swept again.
+  function applyTranslations() {
+    document.documentElement.setAttribute('lang', activeLocale() === 'zh-CN' ? 'zh-CN' : 'en');
+    renderMenus();
+    applyI18n(document);
   }
 
   // ---------- Run / Debug configurations ----------
@@ -2302,6 +3393,25 @@ export function pyCharmClientScript(d: PanelClientData): string {
   var RUN_CONFIGS = (PREFS.runConfigs && PREFS.runConfigs.length) ? PREFS.runConfigs.slice() : [{ name: 'main', path: 'main.py' }];
   var ACTIVE_CFG = PREFS.activeConfig && RUN_CONFIGS.some(function (c) { return c.name === PREFS.activeConfig; })
     ? PREFS.activeConfig : RUN_CONFIGS[0].name;
+  function activeConfig() {
+    return RUN_CONFIGS.find(function (c) { return c.name === ACTIVE_CFG; }) || RUN_CONFIGS[0] || { name: 'main', path: 'main.py' };
+  }
+  // Mirrors VS Code's launch.json shape: the active configuration (not the open
+  // tab) drives both Run and Debug. Every field is optional and falls back to a
+  // sensible default, so old { name, path } configs keep working.
+  function normCfg(c) {
+    c = c || {};
+    return {
+      name: c.name || 'main',
+      path: c.path || 'main.py',
+      language: c.language || langOfName(c.path || 'main.py') || '',
+      cwd: c.cwd || '',
+      args: Array.isArray(c.args) ? c.args : (typeof c.args === 'string' && c.args ? c.args.split(/\s+/).filter(Boolean) : []),
+      env: (c.env && typeof c.env === 'object') ? c.env : {},
+      stopOnEntry: c.stopOnEntry !== false,
+      request: c.request || 'launch'
+    };
+  }
   function renderCfgLabel() {
     var b = $('cfgBtn'); if (b) { var v = b.querySelector('.val'); if (v) v.textContent = ACTIVE_CFG; }
   }
@@ -2315,17 +3425,41 @@ export function pyCharmClientScript(d: PanelClientData): string {
     showCtx(r.left, r.bottom + 3, items);
   }
   function editRunConfigs() {
-    var dirty = RUN_CONFIGS.map(function (c) { return { name: c.name, path: c.path }; });
+    var dirty = RUN_CONFIGS.map(function (c) {
+      return {
+        name: c.name, path: c.path,
+        language: c.language || '', cwd: c.cwd || '',
+        args: Array.isArray(c.args) ? c.args.join(' ') : (c.args || ''),
+        env: c.env && typeof c.env === 'object' ? Object.keys(c.env).map(function (k) { return k + '=' + c.env[k]; }).join(' ') : (c.env || ''),
+        stopOnEntry: c.stopOnEntry !== false,
+        request: c.request || 'launch'
+      };
+    });
     function draw() {
       showModal({
         title: 'Run/Debug Configurations', icon: 'run',
-        message: 'Each configuration names a script entry point for the selected language.',
+        message: 'Mirrors VS Code launch.json: the active configuration drives Run and Debug, not the open tab.',
         buttons: [
-          { label: 'Add', onClick: function () { dirty.push({ name: 'config' + (dirty.length + 1), path: 'main.py' }); draw(); } },
+          { label: 'Add', onClick: function () { dirty.push({ name: 'config' + (dirty.length + 1), path: 'main.py', language: '', cwd: '', args: '', env: '', stopOnEntry: true, request: 'launch' }); draw(); } },
           { label: 'Cancel', onClick: function () {} },
           { label: 'OK', primary: true, onClick: function () {
-            RUN_CONFIGS = dirty;
-            if (!dirty.some(function (c) { return c.name === ACTIVE_CFG; })) ACTIVE_CFG = dirty.length ? dirty[0].name : 'main';
+            RUN_CONFIGS = dirty.map(function (c) {
+              var o = { name: c.name || 'main', path: c.path || 'main.py' };
+              if (c.language) o.language = c.language;
+              if (c.cwd) o.cwd = c.cwd;
+              if (c.args) o.args = String(c.args).split(/\s+/).filter(Boolean);
+              if (c.env) {
+                var envObj = {};
+                String(c.env).split(/\s+/).filter(Boolean).forEach(function (kv) {
+                  var idx = kv.indexOf('='); if (idx > 0) envObj[kv.slice(0, idx)] = kv.slice(idx + 1);
+                });
+                if (Object.keys(envObj).length) o.env = envObj;
+              }
+              if (c.stopOnEntry === false) o.stopOnEntry = false;
+              if (c.request && c.request !== 'launch') o.request = c.request;
+              return o;
+            });
+            if (!dirty.some(function (c) { return c.name === ACTIVE_CFG; })) ACTIVE_CFG = RUN_CONFIGS.length ? RUN_CONFIGS[0].name : 'main';
             savePrefs({ runConfigs: RUN_CONFIGS, activeConfig: ACTIVE_CFG }); renderCfgLabel();
           } }
         ]
@@ -2333,55 +3467,89 @@ export function pyCharmClientScript(d: PanelClientData): string {
       var body = $('dlgRoot').querySelector('.dlg-body');
       if (!body) return;
       body.innerHTML = dirty.map(function (c, i) {
-        return '<div style="display:flex;gap:6px;margin-bottom:6px">' +
-          '<input data-cn="' + i + '" value="' + esc(c.name) + '" style="width:38%" placeholder="name" />' +
-          '<input data-cp="' + i + '" value="' + esc(c.path) + '" style="flex:1" placeholder="script path" />' +
-          '<button data-del="' + i + '" class="dlg-btn" style="padding:0 9px">✕</button></div>';
+        return '<div style="display:grid;grid-template-columns:84px 1fr;gap:4px 6px;margin-bottom:8px;align-items:center">' +
+          '<label>Name</label><input data-cn="' + i + '" value="' + esc(c.name) + '" placeholder="name" />' +
+          '<label>Script</label><input data-cp="' + i + '" value="' + esc(c.path) + '" placeholder="main.py" />' +
+          '<label>Language</label><input data-cl="' + i + '" value="' + esc(c.language) + '" placeholder="auto from ext" />' +
+          '<label>CWD</label><input data-cc="' + i + '" value="' + esc(c.cwd) + '" placeholder="project root" />' +
+          '<label>Args</label><input data-ca="' + i + '" value="' + esc(c.args) + '" placeholder="space separated" />' +
+          '<label>Env</label><input data-ce="' + i + '" value="' + esc(c.env) + '" placeholder="KEY=VAL space separated" />' +
+          '<label>Stop on entry</label><input type="checkbox" data-cs="' + i + '"' + (c.stopOnEntry ? ' checked' : '') + ' />' +
+          '<label>Request</label><select data-cr="' + i + '"><option value="launch"' + (c.request !== 'attach' ? ' selected' : '') + '>launch</option><option value="attach"' + (c.request === 'attach' ? ' selected' : '') + '>attach</option></select>' +
+          '<label></label><button data-del="' + i + '" class="dlg-btn" style="padding:0 9px">✕ remove</button>' +
+          '</div>';
       }).join('');
-      body.querySelectorAll('input[data-cn]').forEach(function (inp) {
-        inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cn')].name = inp.value; });
-      });
-      body.querySelectorAll('input[data-cp]').forEach(function (inp) {
-        inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cp')].path = inp.value; });
-      });
-      body.querySelectorAll('button[data-del]').forEach(function (b) {
-        b.addEventListener('click', function () { dirty.splice(+b.getAttribute('data-del'), 1); draw(); });
-      });
+      body.querySelectorAll('input[data-cn]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cn')].name = inp.value; }); });
+      body.querySelectorAll('input[data-cp]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cp')].path = inp.value; }); });
+      body.querySelectorAll('input[data-cl]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cl')].language = inp.value.trim(); }); });
+      body.querySelectorAll('input[data-cc]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cc')].cwd = inp.value.trim(); }); });
+      body.querySelectorAll('input[data-ca]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-ca')].args = inp.value; }); });
+      body.querySelectorAll('input[data-ce]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-ce')].env = inp.value; }); });
+      body.querySelectorAll('input[data-cs]').forEach(function (inp) { inp.addEventListener('change', function () { dirty[+inp.getAttribute('data-cs')].stopOnEntry = inp.checked; }); });
+      body.querySelectorAll('select[data-cr]').forEach(function (sel) { sel.addEventListener('change', function () { dirty[+sel.getAttribute('data-cr')].request = sel.value; }); });
+      body.querySelectorAll('button[data-del]').forEach(function (b) { b.addEventListener('click', function () { dirty.splice(+b.getAttribute('data-del'), 1); draw(); }); });
     }
     draw();
   }
 
   // ---------- native file pickers (Tauri only) ----------
   // These are the one allowed piece of OS-native UI: Open / Open Folder / Save As
-  // are real system dialogs. In the web preview there is no OS picker, so we fall
-  // back to a balloon and the Project tool window still opens files.
-  function tauriDialog() {
-    var T = window.__TAURI__;
-    return (T && T.dialog) ? T.dialog : null;
+  // are real system dialogs. The page bundles no @tauri-apps/api, so the calls go
+  // straight to the dialog plugin through __TAURI_INTERNALS__ — the same trap the
+  // bridge and the title-bar buttons document: window.__TAURI__ does not exist
+  // here, and asking for it made every native picker a no-op in the desktop app.
+  // In the web preview there is no OS picker, so we fall back to a balloon and the
+  // Project tool window still opens files.
+  function tauriInternals() {
+    var T = window.__TAURI_INTERNALS__;
+    return (T && typeof T.invoke === 'function') ? T : null;
+  }
+  function nativeOpen(opts) {
+    var T = tauriInternals();
+    return T ? T.invoke('plugin:dialog|open', { options: opts }) : null;
+  }
+  function nativeSave(opts) {
+    var T = tauriInternals();
+    return T ? T.invoke('plugin:dialog|save', { options: opts }) : null;
+  }
+  function pickerFailed(title, err) {
+    balloon({ type: 'error', title: title, message: 'The system dialog could not open: ' + ((err && err.message) || err || 'unknown error') });
   }
   function openNativeFile() {
-    var d = tauriDialog();
-    if (!d) { balloon({ type: 'info', title: 'Open', message: 'The native file picker is available in the desktop app. In the web preview, open files from the Project tool window.' }); return; }
-    d.open({
+    var p = nativeOpen({
       multiple: false, directory: false,
       filters: [{ name: 'Source', extensions: ['py', 'js', 'ts', 'go', 'md', 'json', 'yaml', 'html', 'css'] }],
       title: 'Open File'
-    }).then(function (p) { if (p) BRIDGE.send({ kind: 'fsRead', path: p }); });
+    });
+    if (!p) { balloon({ type: 'info', title: 'Open', message: 'The native file picker is available in the desktop app. In the web preview, open files from the Project tool window.' }); return; }
+    p.then(
+      function (r) { var path = Array.isArray(r) ? r[0] : r; if (path) BRIDGE.send({ kind: 'fsRead', path: path }); },
+      function (err) { pickerFailed('Open', err); }
+    );
   }
   function openNativeFolder() {
-    var d = tauriDialog();
-    if (!d) { balloon({ type: 'info', title: 'Open Folder', message: 'The native folder picker is available in the desktop app.' }); return; }
-    d.open({ directory: true, multiple: false, title: 'Open Folder' }).then(function (p) { if (p) BRIDGE.send({ kind: 'openFolder', path: p }); });
+    var p = nativeOpen({ directory: true, multiple: false, title: 'Open Folder' });
+    if (!p) { balloon({ type: 'info', title: 'Open Folder', message: 'The native folder picker is available in the desktop app.' }); return; }
+    p.then(
+      function (r) { var path = Array.isArray(r) ? r[0] : r; if (path) BRIDGE.send({ kind: 'openFolder', path: path }); },
+      function (err) { pickerFailed('Open Folder', err); }
+    );
   }
   function saveAsNative() {
-    var d = tauriDialog();
-    if (!d) { balloon({ type: 'info', title: 'Save As', message: 'The native save dialog is available in the desktop app.' }); return; }
-    d.save({ defaultPath: currentFile || 'untitled.py', filters: [{ name: 'Source', extensions: ['py', 'js', 'ts', 'go', 'md'] }], title: 'Save As' })
-      .then(function (p) { if (p) BRIDGE.send({ kind: 'fsWrite', path: p, content: ta.value }); });
+    var p = nativeSave({ defaultPath: currentFile || 'untitled.py', filters: [{ name: 'Source', extensions: ['py', 'js', 'ts', 'go', 'md'] }], title: 'Save As' });
+    if (!p) { balloon({ type: 'info', title: 'Save As', message: 'The native save dialog is available in the desktop app.' }); return; }
+    p.then(
+      function (path) { if (path) BRIDGE.send({ kind: 'fsWrite', path: path, content: ta.value }); },
+      function (err) { pickerFailed('Save As', err); }
+    );
   }
 
   // ---------- language mode wiring ----------
   $('stLang').addEventListener('click', openLangPicker);
+  // Status-bar cells are navigation shortcuts in PyCharm, not decoration.
+  { var stP = $('stPerf'); if (stP) stP.addEventListener('click', function () { toggleWindow('perf'); }); }
+  { var stG = $('stGit'); if (stG) stG.addEventListener('click', function () { toggleWindow('vcs'); }); }
+  { var stB = $('stProblems'); if (stB) stB.addEventListener('click', function () { toggleWindow('problems'); }); }
   $('langClose').addEventListener('click', closeModals);
   $('langInput').addEventListener('input', function () { renderLangs(this.value); });
   $('langInput').addEventListener('keydown', function (e) {
@@ -2399,16 +3567,28 @@ export function pyCharmClientScript(d: PanelClientData): string {
   ];
   var ACTIONS = [
     { name: "Run 'main'", sc: 'Shift+F10', act: runCode },
+    { name: "Debug 'main'", sc: 'Shift+F9', act: debugCurrent },
+    { name: 'Run with Coverage', act: runCoverage },
+    { name: 'Stop', act: stopRun },
+    { name: 'Reformat Code', act: reformatCode },
+    { name: 'Optimize Imports', act: optimizeImports },
+    { name: 'Kernel Flame Graph', sc: 'Ctrl+Alt+F', act: openFlame },
     { name: 'Toggle Theme', act: function () { setTheme(document.documentElement.getAttribute('data-theme') === 'darcula' ? 'light' : 'darcula'); } },
     { name: 'Change Language Mode', act: openLangPicker },
     { name: 'Open Extensions', act: openExt }
   ];
   function openSearch() { openModal('searchModal'); renderSearch(''); setTimeout(function () { $('searchInput').focus(); }, 0); }
+  /** Run one kernel command (the list arrives in the hello frame) and show it. */
+  function runKernelCommand(id) {
+    closeModals();
+    toast('running ' + id + ' …');
+    BRIDGE.send({ kind: 'command', id: id });
+  }
   function searchResults(q) {
     q = q.toLowerCase();
     var files = Object.keys(FILES).filter(function (f) { return f.toLowerCase().indexOf(q) >= 0; }).map(function (f) { return { group: 'Files', name: f, path: 'src', icon: 'file', act: function () { openFile(f); } }; });
     var syms = SYMBOLS.filter(function (s) { return s.name.toLowerCase().indexOf(q) >= 0; }).map(function (s) { return { group: 'Symbols', name: s.name, path: s.path, icon: 'structure', act: function () { openFile(s.path.split(':')[0]); } }; });
-    var acts = KCOMMANDS.filter(function (c) { return c.id.toLowerCase().indexOf(q) >= 0; }).slice(0, 6).map(function (c) { return { group: 'Actions', name: c.title || c.id, path: c.id, icon: 'settings', act: function () { toast('command: ' + c.id); } }; });
+    var acts = KCOMMANDS.filter(function (c) { return c.id.toLowerCase().indexOf(q) >= 0; }).slice(0, 6).map(function (c) { return { group: 'Actions', name: c.title || c.id, path: c.id, icon: 'settings', act: function () { runKernelCommand(c.id); } }; });
     acts = acts.concat(ACTIONS.filter(function (a) { return a.name.toLowerCase().indexOf(q) >= 0; }).map(function (a) { return { group: 'Actions', name: a.name, path: '', icon: 'run', act: a.act }; }));
     var all = files.concat(syms, acts);
     if (searchTab !== 'all') all = all.filter(function (r) { return r.group.toLowerCase() === searchTab; });
@@ -2447,47 +3627,109 @@ export function pyCharmClientScript(d: PanelClientData): string {
 
   // ---------- toolbar wiring ----------
   $('runBtn').addEventListener('click', runCode);
-  $('debugBtn').addEventListener('click', function () { runCode(); toast('Debug (demo)'); });
-  $('covBtn').addEventListener('click', function () { toast('Coverage (demo)'); });
-  $('stopBtn').addEventListener('click', function () { appendRun('\\n[stopped]\\n', 'dim'); toast('Stopped'); });
+  $('debugBtn').addEventListener('click', debugCurrent);
+  $('covBtn').addEventListener('click', runCoverage);
+  $('stopBtn').addEventListener('click', stopRun);
   $('cfgBtn').addEventListener('click', function (e) { e.stopPropagation(); openRunConfig(); });
   $('projWidget').addEventListener('click', function () { toggleWindow('project'); });
   $('newBtn').addEventListener('click', function () { var r = $('newBtn').getBoundingClientRect(); showNewPopup(r.left, r.bottom + 3, ''); });
-  $('vcsWidget').addEventListener('click', function () { toast('Git: main · up to date'); });
+  $('vcsWidget').addEventListener('click', function () { toggleWindow('vcs'); });
   $('themeBtn').addEventListener('click', function () { setTheme(document.documentElement.getAttribute('data-theme') === 'darcula' ? 'light' : 'darcula'); });
   $('settingsBtn').addEventListener('click', openSettings);
   $('panelCloseBtn').addEventListener('click', function () { $('leftPanel').classList.add('hidden'); renderStrip(); saveLayout(); });
   $('collapseBtn').addEventListener('click', function () { if (activeLeft === 'structure') { folded = {}; renderEditor(); } toast('Collapsed'); });
   $('pinBtn').addEventListener('click', function () { pinned = !pinned; this.style.color = pinned ? '' : 'var(--text-tertiary)'; toast(pinned ? 'Pinned' : 'Unpinned'); });
   $('dockHide').addEventListener('click', function () { $('dock').classList.add('hidden'); saveLayout(); });
+  // The two header buttons that used to be decoration: both surface the same
+  // tool-window menu the right-click handler builds.
+  function panelViewMenu() {
+    return panelMenu() || [
+      {
+        label: 'Collapse All', act: function () {
+          folded = {};
+          if (activeLeft === 'structure') renderEditor();
+          else if (activeLeft === 'project') { EXPANDED = { '': true }; renderTree(); }
+        }
+      },
+      { label: 'Hide', act: function () { $('leftPanel').classList.add('hidden'); renderStrip(); saveLayout(); } },
+    ];
+  }
+  ['panelViewBtn', 'panelMoreBtn'].forEach(function (id) {
+    var b = $(id);
+    if (!b) return;
+    b.addEventListener('click', function () {
+      var r = b.getBoundingClientRect();
+      showCtx(r.left, r.bottom + 3, panelViewMenu());
+    });
+  });
 
   // ---------- Tauri window controls (the desktop app turns OS chrome off) ----------
-  if (window.__TAURI__ && window.__TAURI__.window) {
-    document.documentElement.setAttribute('data-tauri', '1');
-    var win = window.__TAURI__.window.getCurrentWindow();
-    var tbMin = $('tbMin'), tbMax = $('tbMax'), tbClose = $('tbClose');
-    if (tbMin) tbMin.addEventListener('click', function () { win.minimize(); });
-    if (tbMax) tbMax.addEventListener('click', function () { win.toggleMaximize(); });
-    if (tbClose) tbClose.addEventListener('click', function () { win.close(); });
+  // Which global to talk to matters, and the transport bridge above already
+  // documented the trap: Tauri v2 injects window.__TAURI_INTERNALS__ (invoke +
+  // transformCallback), while the friendlier window.__TAURI__ only exists when
+  // the @tauri-apps/api bundle is loaded — which this page deliberately does
+  // not do. Calling window.__TAURI__.window.getCurrentWindow() therefore either
+  // throws (global absent) or returns undefined, and every title-bar button
+  // silently does nothing: the handler was never attached. So the commands go
+  // through the internals, with the friendly API kept as a fallback.
+  var tauriInvoke = null;
+  if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+    tauriInvoke = function (cmd) { window.__TAURI_INTERNALS__.invoke(cmd); };
+  } else if (window.__TAURI__ && window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow) {
+    var win0 = window.__TAURI__.window.getCurrentWindow();
+    tauriInvoke = function (cmd) {
+      var name = cmd.split('|')[1];
+      if (typeof win0[name] === 'function') win0[name]();
+    };
   }
+  if (tauriInvoke) {
+    document.documentElement.setAttribute('data-tauri', '1');
+    var tbMin = $('tbMin'), tbMax = $('tbMax'), tbClose = $('tbClose');
+    if (tbMin) tbMin.addEventListener('click', function () { tauriInvoke('plugin:window|minimize'); });
+    if (tbMax) tbMax.addEventListener('click', function () { tauriInvoke('plugin:window|toggle_maximize'); });
+    if (tbClose) tbClose.addEventListener('click', function () { tauriInvoke('plugin:window|close'); });
+    // Dragging: -webkit-app-region:drag is a Chromium/Edge-app property that
+    // WebView2 ignores, so the shell asks the window plugin to start a drag on
+    // mousedown instead. Buttons are excluded — a drag started on them would
+    // swallow the click.
+    var tbBar = document.querySelector('.titlebar');
+    if (tbBar) {
+      tbBar.addEventListener('mousedown', function (e) {
+        if (!e || e.button !== 0) return;
+        var t = e.target;
+        while (t && t !== tbBar) {
+          if (t.tagName === 'BUTTON' || t.tagName === 'INPUT' || t.tagName === 'A') return;
+          t = t.parentNode;
+        }
+        tauriInvoke('plugin:window|start_dragging');
+      });
+    }
+  }
+
+
 
   // ---------- keyboard shortcuts ----------
   document.addEventListener('keydown', function (e) {
     // Order matters: the Alt/Ctrl combos must be tested before the bare Ctrl+S,
     // otherwise Ctrl+Alt+S is swallowed by the save shortcut.
     if (e.ctrlKey && e.altKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); openSettings(); return; }
+    if (e.ctrlKey && e.altKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFlame(); return; }
+    if (e.ctrlKey && e.altKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); reformatCode(); return; }
+    if (e.ctrlKey && e.altKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); optimizeImports(); return; }
     if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); openFindInFiles(); return; }
     if (e.ctrlKey && e.shiftKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveAsNative(); return; }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S') && !e.shiftKey && !e.altKey) { e.preventDefault(); saveFile(); return; }
     if (e.ctrlKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); openNativeFile(); return; }
     if (e.ctrlKey && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); openPalette(); return; }
-    if (e.key === 'Escape') { hideCtx(); return; }
+    if (e.shiftKey && e.key === 'F9') { e.preventDefault(); debugCurrent(); return; }
+    if (e.shiftKey && e.key === 'F10') { e.preventDefault(); runCode(); return; }
+    if (e.key === 'Escape') { if (FLAME.open) closeFlame(); hideCtx(); return; }
     if (e.key === 'Shift' && !e.repeat) {
       var now = Date.now();
       if (now - lastShift < 400) { openSearch(); lastShift = 0; } else lastShift = now;
     }
     if (!e.altKey || e.ctrlKey || e.metaKey) return;
-    var map = { '1': 'project', '9': 'vcs', 'k': 'commit', '7': 'structure', 'a': 'ai', '4': 'run', '8': 'perf', '0': 'logs' };
+    var map = { '1': 'project', '9': 'vcs', 'k': 'commit', '7': 'structure', 'a': 'ai', 'm': 'mcp', '4': 'run', '8': 'perf', '0': 'logs' };
     var k = e.key.toLowerCase();
     if (map[k]) { e.preventDefault(); toggleWindow(map[k]); }
     if (e.key === 'F12') { e.preventDefault(); toggleWindow('terminal'); }
@@ -2511,6 +3753,8 @@ export function pyCharmClientScript(d: PanelClientData): string {
   paintIcons(document);
   renderMenus();
   renderStrip();
+  applyI18n(document);
+  document.documentElement.setAttribute('lang', activeLocale() === 'zh-CN' ? 'zh-CN' : 'en');
 
   // Command palette: Enter runs, Esc closes.
   (function wirePalette() {
@@ -2533,6 +3777,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
   updateCaret();
   renderDock();
   renderPanel();
+  initFlameWindow();
 })();
 `;
 }
