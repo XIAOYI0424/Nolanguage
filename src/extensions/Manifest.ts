@@ -9,7 +9,7 @@
  * ```json
  * {
  *   "id": "demo.hello",
- *   "engines": { "kernel": "^0.6.0" },
+ *   "engines": { "kernel": "^0.7.0" },
  *   "host": "child-process",
  *   "activationEvents": ["onCommand:demo.hello"],
  *   "entry": "extension.js",
