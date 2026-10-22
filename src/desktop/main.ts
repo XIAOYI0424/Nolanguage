@@ -217,6 +217,10 @@ async function runningInstance(): Promise<string | undefined> {
 }
 
 async function main(): Promise<void> {
+  // The server writes install-receipt.json only for the packaged desktop. A
+  // source run (`nlg ide`) or a test server must never overwrite the receipt
+  // with `node.exe` — doctor would then report the wrong "installed app".
+  process.env.NOLANGUAGE_DESKTOP = '1';
   const running = await runningInstance();
   if (running) {
     // A server answering /health is not the same as a UI. A hung shutdown can

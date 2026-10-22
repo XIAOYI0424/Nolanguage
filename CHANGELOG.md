@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.1 — 2026-10-22
+
+### 发布闭环
+
+- `/health` 新增 `build`：`appVersion / pid / exePath / exeSize / startedAt`。
+- 桌面启动写 `install-receipt.json`；仅 `NOLANGUAGE_DESKTOP=1` 的打包入口写，源码/测试服务器不再用 `node.exe` 覆盖。
+- 新增 `nlg doctor [--json]`：版本、exe、sha256、receipt、session、health、端口、Edge/WebView2、Git/Python/Go，以及五态诊断（`ok / not-running / orphan-server / port-conflict / window-missing`）。
+- 新增 `verify-doctor` 10 条，接入全量（第 31 套件）。
+
+### 测试稳健性
+
+- `verify-ide` 的 `user-code` 断言改为最多 5s 轮询历史帧，消除全量并发下的漏帧。
+
+### 验证
+
+- `verify-all`：**1429/1429，31 套件，0 失败**。
+- `tsc --noEmit`：0 错误；`npm test`：9/9。
+
 ## 0.7.0 — 2026-10-22
 
 ### 桌面与稳定性

@@ -380,9 +380,20 @@ async function main(): Promise<void> {
       (m) => m.records as Array<{ scope: string; message: string; level: number }>,
     );
     check('log frames delivered', records.length > 0, `${records.length} records`);
+    // Under a full-suite run the log frame can land a beat after the run
+    // result. Poll the accumulated history instead of trusting one snapshot.
+    let userCode = records.find((r) => r.scope === 'user-code' && /answer 42/.test(r.message));
+    const userCodeDeadline = Date.now() + 5000;
+    while (!userCode && Date.now() < userCodeDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const latest = client
+        .findInHistory('log')
+        .flatMap((m) => m.records as Array<{ scope: string; message: string; level: number }>);
+      userCode = latest.find((r) => r.scope === 'user-code' && /answer 42/.test(r.message));
+    }
     check(
       'user-code records reach the UI',
-      records.some((r) => r.scope === 'user-code' && /answer 42/.test(r.message)),
+      !!userCode,
       `${records.filter((r) => r.scope === 'user-code').length} user-code record(s)`,
     );
     check(

@@ -21,11 +21,12 @@
  *       PANEL_RUN_TIMEOUT=15000 hard timeout per editor run (ms)
  *       PYTHON_BIN             interpreter to use
  */
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { Kernel } from '../kernel/Kernel.js';
+import { appDataPath } from '../util/appData.js';
 import { LogLevel } from '../log/LogLevel.js';
 import { WebSocketServer, type WebSocketConnection } from './WebSocketServer.js';
 import { PanelHub, type PanelFilter, type PanelSink } from './PanelHub.js';
@@ -233,6 +234,16 @@ export async function main(
 ): Promise<{ base: string; close: () => Promise<void>; clientCount: () => number }> {
   const port = Number(process.env.PANEL_PORT ?? 7310);
   const host = process.env.PANEL_HOST ?? '127.0.0.1';
+  /** One build identity shared by `/health`, the install receipt and doctor. */
+  const startedAt = new Date().toISOString();
+  const exePath = process.execPath;
+  const exeSize = (() => {
+    try {
+      return statSync(exePath).size;
+    } catch {
+      return 0;
+    }
+  })();
   const stdio =
     opts.transport === 'stdio' ||
     (opts.transport !== 'ws' && (process.argv.includes('--panel-stdio') || process.env.NOLANGUAGE_TRANSPORT === 'stdio'));
@@ -244,7 +255,7 @@ export async function main(
   let workspaceFailure: string | undefined;
 
   const kernel = new Kernel({
-    appVersion: '0.7.0-workspace',
+    appVersion: '0.7.1-workspace',
     slowThresholdMs: Number(process.env.PANEL_SLOW_MS ?? 60),
     logLevel: LogLevel.TRACE,
     logPretty: !stdio,
@@ -258,6 +269,23 @@ export async function main(
   // Order matters: `kernel.logger` is only populated by spine installation in
   // `start()`, and startDemo captures a logger — so start first.
   await kernel.start();
+
+  // Best-effort install receipt: one place doctor/update can read "which build
+  // is installed here". Only the packaged desktop writes it: `nlg ide` and the
+  // test servers run on node.exe and would otherwise overwrite the receipt with
+  // the interpreter path. Diagnostics must never block startup.
+  if (process.env.NOLANGUAGE_DESKTOP === '1') {
+    try {
+      await mkdir(appDataPath(), { recursive: true });
+      await writeFile(
+        appDataPath('install-receipt.json'),
+        JSON.stringify({ version: kernel.appVersion, exePath, exeSize, startedAt }, null, 2) + '\n',
+        'utf8',
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
 
   const { startDemo } = await import('./demo-commands.js');
   startDemo(kernel);
@@ -943,6 +971,7 @@ export async function main(
               status: 'ok',
               clients: hub.clientCount(),
               appVersion: kernel.appVersion,
+              build: { appVersion: kernel.appVersion, pid: process.pid, exePath, exeSize, startedAt },
               workspace: workspace.status(),
               ...(workspaceFailure ? { degraded: { workspace: workspaceFailure } } : {}),
             }),

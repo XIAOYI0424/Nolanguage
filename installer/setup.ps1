@@ -142,7 +142,7 @@ Set-ItemProperty -Path $key -Name 'DisplayName' -Value 'Nolanguage'
 Set-ItemProperty -Path $key -Name 'UninstallString' -Value $uninstCmd
 Set-ItemProperty -Path $key -Name 'QuietUninstallString' -Value $uninstCmd
 Set-ItemProperty -Path $key -Name 'DisplayIcon' -Value ('"' + $appExe + '"')
-Set-ItemProperty -Path $key -Name 'DisplayVersion' -Value '0.7.0'
+Set-ItemProperty -Path $key -Name 'DisplayVersion' -Value '0.7.1'
 Set-ItemProperty -Path $key -Name 'Publisher' -Value 'Nolanguage'
 Set-ItemProperty -Path $key -Name 'InstallLocation' -Value $InstallDir
 Set-ItemProperty -Path $key -Name 'EstimatedSize' -Value 90000
