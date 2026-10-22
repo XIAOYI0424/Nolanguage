@@ -210,8 +210,12 @@ export async function findWindowProcesses(profile: string): Promise<number[]> {
     child.stdout?.on('data', (chunk: Buffer) => {
       out += chunk.toString('utf8');
     });
+    let timer: ReturnType<typeof setTimeout> | undefined;
     child.on('error', () => resolve([]));
     child.on('close', () => {
+      // The timer is only a failure guard; leaving it armed made every healthy
+      // launch log a "window-probe-timeout" eight seconds later.
+      if (timer) clearTimeout(timer);
       resolve(
         out
           .split(/\r?\n/)
@@ -222,7 +226,7 @@ export async function findWindowProcesses(profile: string): Promise<number[]> {
     // A hung probe must not hang the launch. The timeout is deliberately
     // generous: a cold CIM query on a busy machine can exceed 4 s, and a
     // missed result is exactly what lets Edge delegate to a stale window.
-    setTimeout(() => {
+    timer = setTimeout(() => {
       try {
         child?.kill();
       } catch {
@@ -230,7 +234,66 @@ export async function findWindowProcesses(profile: string): Promise<number[]> {
       }
       logDesktop('window-probe-timeout', { profile });
       resolve([]);
-    }, 8000).unref?.();
+    }, 8000);
+    timer.unref?.();
+  });
+}
+
+/**
+ * Pids among `pids` that own a visible top-level window.
+ *
+ * `findWindowProcesses` proves a browser *process* carries our `--app` command
+ * line; it cannot prove a window exists. Some Edge builds create the whole
+ * process tree (browser, GPU, renderers) and never show the app window — the
+ * "网页进程在跑，但窗口没出现" report. `MainWindowHandle === 0` is the
+ * difference, and it is what lets the launcher fall back to a browser tab
+ * instead of trusting an invisible process.
+ */
+export async function findVisibleWindows(pids: number[]): Promise<number[]> {
+  if (process.platform !== 'win32' || !pids.length) return [];
+  const ids = pids.filter((pid) => Number.isFinite(pid) && pid > 0).join(',');
+  if (!ids) return [];
+  const script =
+    `Get-Process -Id ${ids} -ErrorAction SilentlyContinue | ` +
+    `Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.Id }`;
+  return await new Promise<number[]>((resolve) => {
+    let out = '';
+    let child;
+    try {
+      child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      resolve([]);
+      return;
+    }
+    child.stdout?.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    child.on('error', () => resolve([]));
+    child.on('close', () => {
+      if (timer) clearTimeout(timer);
+      resolve(
+        out
+          .split(/\r?\n/)
+          .map((line) => Number(line.trim()))
+          .filter((pid) => Number.isFinite(pid) && pid > 0),
+      );
+    });
+    // A window check is cheaper than a CIM sweep but still a child process;
+    // a hung probe must not hold the launch. Four seconds is enough for a
+    // warm query and short enough that the browser fallback stays snappy.
+    timer = setTimeout(() => {
+      try {
+        child?.kill();
+      } catch {
+        /* ignore */
+      }
+      resolve([]);
+    }, 4000);
+    timer.unref?.();
   });
 }
 

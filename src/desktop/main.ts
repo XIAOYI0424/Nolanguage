@@ -40,6 +40,7 @@ import {
   clearSession,
   closeRecordedWindow,
   closeStaleWindows,
+  findVisibleWindows,
   findWindowProcesses,
   isAlive,
   killTree,
@@ -222,9 +223,13 @@ async function main(): Promise<void> {
     // leave the server (and a stale WebSocket) behind with no window; blindly
     // exiting here is what produced "a process is running but nothing renders".
     const session = readSession();
-    const windowAlive =
-      isAlive(session?.browserPid) ||
-      (session?.browserPid === undefined && (await findWindowProcesses(webViewProfileDir())).length > 0);
+    // A live *process* is not a live *window*: an Edge tree that never showed
+    // its app window used to make this branch exit silently, so the second
+    // double-click did nothing at all ("有进程，没窗口"). Confirm a handle.
+    const recorded = session?.browserPid;
+    const windowAlive = recorded
+      ? (await findVisibleWindows([recorded])).length > 0
+      : (await findVisibleWindows(await findWindowProcesses(webViewProfileDir()))).length > 0;
     if (windowAlive) {
       // Nothing to open: the user already has this workspace. Saying so is all
       // a GUI build can do without native window-focus APIs.
@@ -346,24 +351,35 @@ async function main(): Promise<void> {
    */
   async function discoverWindow(profile: string, allowFallback = true): Promise<number | undefined> {
     const deadline = Date.now() + 8000;
+    let candidates: number[] = [];
+    let loggedInvisible = false;
     while (Date.now() < deadline) {
-      const pids = await findWindowProcesses(profile);
-      if (pids.length > 0) {
-        logDesktop('window-discovered', { pid: pids[0], pids });
-        patchSession({ browserPid: pids[0], profile });
-        return pids[0];
+      if (!candidates.length) candidates = await findWindowProcesses(profile);
+      if (candidates.length) {
+        // The command line proves a process; only a window handle proves a UI.
+        const visible = await findVisibleWindows(candidates);
+        if (visible.length) {
+          logDesktop('window-discovered', { pid: visible[0], pids: candidates, visible });
+          patchSession({ browserPid: visible[0], profile });
+          return visible[0];
+        }
+        if (!loggedInvisible) {
+          loggedInvisible = true;
+          logDesktop('window-invisible', { pids: candidates });
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    // A tree that never showed a window is not a UI: kill it so the profile is
+    // released, then give the user a browser tab (the page itself is fine).
+    for (const pid of candidates) killTree(pid);
+    logDesktop('window-missing', { profile, invisible: candidates.length, fallback: allowFallback });
     if (allowFallback) {
-      logDesktop('window-missing', { profile });
-      // A window that never appears is worse than a browser tab: give the user
-      // something to click.
       openSystemBrowser(`${base}/`);
     } else {
-      // Delegation retry: the caller will sweep and respawn; opening the
-      // system browser here would add the very extra window we are removing.
-      logDesktop('window-missing', { profile, fallback: false });
+      // Delegation retry: the caller sweeps and respawns; a tab here would be
+      // the very extra window that retry is removing.
+      logDesktop('window-missing-retry', { profile });
     }
     return undefined;
   }
@@ -401,7 +417,9 @@ async function main(): Promise<void> {
           logDesktop('watchdog-check', { windowsAlive: 1, pids: [windowPid] });
           return;
         }
-        const alive = windowProfile ? await findWindowProcesses(windowProfile) : [];
+        const alive = windowProfile
+          ? await findVisibleWindows(await findWindowProcesses(windowProfile))
+          : [];
         logDesktop('watchdog-check', { windowsAlive: alive.length, pids: alive });
         if (alive.length === 0) shutdown('no-window');
       })();

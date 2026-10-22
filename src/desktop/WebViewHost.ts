@@ -292,7 +292,14 @@ export function openWebView(opts: WebViewOptions): WebViewHandle {
     const child: ChildProcess = spawn(edge, appSwitches(opts.url, profile, opts.size), {
       stdio: 'ignore',
       detached: true,
-      windowsHide: true,
+      // Deliberately *no* `windowsHide: true` here. Node implements that option
+      // by setting `STARTF_USESHOWWINDOW` + `SW_HIDE` in the child's
+      // `STARTUPINFO`, and Chromium uses that startup value as the initial
+      // visibility of its first window. The result is a complete Edge process
+      // tree (browser + GPU + renderers) with `MainWindowHandle == 0`: "网页
+      // 进程在跑，但窗口没出现". Edge is a GUI program, so hiding a console is
+      // not even useful — leave its startup show state alone.
+      windowsHide: false,
     });
     // A detached child that cannot start reports through `error`, asynchronously.
     child.on('error', () => undefined);
