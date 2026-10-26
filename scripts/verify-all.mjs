@@ -32,6 +32,9 @@ const stages = [
   { name: 'Workspace · PyCharm shell (mount + self-containment)', script: 'scripts/verify-pycharm.ts' },
   { name: 'MCP · client (config + stdio lifecycle)', script: 'scripts/verify-mcp.ts' },
   { name: 'Doctor · diagnostics (pure)', script: 'scripts/verify-doctor.ts' },
+  // Launch-time build handshake: liveness is not identity. A freshly installed
+  // exe that finds the *previous* build on 7310 must replace it, not exit.
+  { name: 'Desktop · version handshake', script: 'scripts/verify-handshake.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts' },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.

@@ -183,9 +183,14 @@ class FakeSocket {
   }
 }
 
-function mountPage(markup: string, seed?: string, bridge: 'ws' | 'tauri' = 'ws'): { window: any; socket?: FakeSocket } {
+function mountPage(
+  markup: string,
+  seed?: string,
+  bridge: 'ws' | 'tauri' = 'ws',
+  url = 'http://localhost/',
+): { window: any; socket?: FakeSocket } {
   const vc = new VirtualConsole();
-  const dom = new JSDOM(markup, { runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc, url: 'http://localhost/' });
+  const dom = new JSDOM(markup, { runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc, url });
   const w = dom.window as any;
   if (bridge === 'tauri') FakeTauri.install(w);
   else w.WebSocket = FakeSocket;
@@ -1202,6 +1207,30 @@ async function testMcp(): Promise<void> {
   w.close();
 }
 
+// ---------------------------------------------------------- update hand-off
+
+/**
+ * A launch that replaced an older build opens the window on
+ * `/?updated=<old version>` (see `src/desktop/handshake.ts`). The shell has to
+ * say so exactly once and then drop the parameter — otherwise the upgrade is
+ * invisible and a reload repeats the message forever.
+ */
+async function testUpdateNotice(): Promise<void> {
+  const replaced = mountPage(html, undefined, 'ws', 'http://localhost/?updated=0.7.1-workspace');
+  const w = replaced.window;
+  await settle(w, 900);
+  const text = (q(w, '#toast')?.textContent ?? '') as string;
+  check('update: the replaced version is announced', text.indexOf('Updated from 0.7.1-workspace') !== -1, text);
+  check('update: the query is stripped so a reload is quiet', w.location.search === '', w.location.search);
+  w.close();
+
+  const plain = mountPage(html, undefined, 'ws', 'http://localhost/');
+  await settle(plain.window, 900);
+  const quiet = (q(plain.window, '#toast')?.textContent ?? '') as string;
+  check('update: a plain launch says nothing', quiet.indexOf('Updated from') === -1, quiet);
+  plain.window.close();
+}
+
 // ---------------------------------------------------------- run
 
 await testBoot();
@@ -1219,6 +1248,8 @@ console.log('');
 await testI18n();
 console.log('');
 await testMcp();
+console.log('');
+await testUpdateNotice();
 console.log('');
 await testInteractions();
 console.log('');

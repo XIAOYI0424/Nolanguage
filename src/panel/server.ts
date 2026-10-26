@@ -48,6 +48,7 @@ import { ProfilerService } from '../profiler/ProfilerService.js';
 import type { SandboxLanguage } from '../exec/types.js';
 import { FsService, FsError } from './FsService.js';
 import { McpManager } from '../mcp/McpManager.js';
+import { APP_VERSION } from '../version.js';
 import { ExtensionManager } from '../extensions/ExtensionManager.js';
 import { materializeAssets } from '../desktop/embeddedAssets.js';
 import { StdioTransport, WsTransport, parseFrame, type Transport } from './Transport.js';
@@ -255,7 +256,7 @@ export async function main(
   let workspaceFailure: string | undefined;
 
   const kernel = new Kernel({
-    appVersion: '0.7.1-workspace',
+    appVersion: APP_VERSION,
     slowThresholdMs: Number(process.env.PANEL_SLOW_MS ?? 60),
     logLevel: LogLevel.TRACE,
     logPretty: !stdio,

@@ -33,9 +33,11 @@ process.env.NOLANGUAGE_QUIET ??= '1';
 process.env.PANEL_HOST ??= '127.0.0.1';
 process.env.PANEL_NO_DEMO ??= '1';
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { openSystemBrowser, openWebView, webViewProfileDir, type WebViewHandle } from './WebViewHost.js';
+import { decideLaunch, launchUrl, type BuildIdentity } from './handshake.js';
+import { APP_VERSION } from '../version.js';
 import {
   clearSession,
   closeRecordedWindow,
@@ -194,6 +196,12 @@ function serverPort(): number {
   return Number(process.env.PANEL_PORT ?? 7310);
 }
 
+interface RunningServer {
+  base: string;
+  /** `/health` build block; absent on builds older than 0.7.1. */
+  build?: BuildIdentity;
+}
+
 /**
  * The address of an already-running instance, or `undefined`.
  *
@@ -204,16 +212,31 @@ function serverPort(): number {
  * adds one more window to it, which is exactly the "several windows every
  * time" report.
  */
-async function runningInstance(): Promise<string | undefined> {
+async function runningInstance(): Promise<RunningServer | undefined> {
   const base = `http://127.0.0.1:${serverPort()}`;
   try {
     const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1200) });
     if (!res.ok) return undefined;
-    const body = (await res.json()) as { status?: string };
-    return body?.status === 'ok' ? base : undefined;
+    const body = (await res.json()) as { status?: string; build?: BuildIdentity };
+    if (body?.status !== 'ok') return undefined;
+    // `build` is absent on servers older than 0.7.1. Reporting it as
+    // `undefined` (rather than assuming a match) is what lets the handshake
+    // notice that the answering instance cannot prove it is this build.
+    return { base, build: body.build };
   } catch {
     return undefined;
   }
+}
+
+/** Identity of the executable that is running right now. */
+function ownBuild(): BuildIdentity {
+  let exeSize = 0;
+  try {
+    exeSize = statSync(process.execPath).size;
+  } catch {
+    /* stat can fail on a locked/replaced exe; version alone still compares */
+  }
+  return { appVersion: APP_VERSION, exeSize };
 }
 
 async function main(): Promise<void> {
@@ -222,6 +245,8 @@ async function main(): Promise<void> {
   // with `node.exe` — doctor would then report the wrong "installed app".
   process.env.NOLANGUAGE_DESKTOP = '1';
   const running = await runningInstance();
+  /** Build this launch replaced; shown once in the new window. */
+  let updatedFrom: string | undefined;
   if (running) {
     // A server answering /health is not the same as a UI. A hung shutdown can
     // leave the server (and a stale WebSocket) behind with no window; blindly
@@ -234,15 +259,35 @@ async function main(): Promise<void> {
     const windowAlive = recorded
       ? (await findVisibleWindows([recorded])).length > 0
       : (await findVisibleWindows(await findWindowProcesses(webViewProfileDir()))).length > 0;
-    if (windowAlive) {
-      // Nothing to open: the user already has this workspace. Saying so is all
-      // a GUI build can do without native window-focus APIs.
-      process.stdout.write(`\n  Nolanguage is already running -> ${running}/\n\n`);
+
+    // Liveness is not identity. The instance that answers may be the *previous*
+    // build — the freshly installed exe then exits and the user keeps looking
+    // at the old UI, with nothing on screen saying so. Decide on build
+    // identity, not on whether /health replied.
+    const decision = decideLaunch({ runningBuild: running.build, ownBuild: ownBuild(), windowAlive });
+    logDesktop('handshake', {
+      action: decision.action,
+      reason: decision.reason,
+      running: running.build?.appVersion ?? null,
+      own: APP_VERSION,
+      windowAlive,
+    });
+
+    if (decision.action === 'reuse') {
+      // Nothing to open: the user already has this workspace, on this build.
+      // Saying so is all a GUI build can do without native window-focus APIs.
+      process.stdout.write(`\n  Nolanguage is already running -> ${running.base}/\n\n`);
       return;
     }
 
-    // Orphan server: take the port back instead of exiting with no UI.
-    logDesktop('orphan-server', { pid: session?.serverPid ?? null, base: running });
+    if (decision.action === 'takeover-update') {
+      updatedFrom = decision.replacedVersion;
+      process.stdout.write(`  Replacing the running build (${updatedFrom ?? 'unknown'}) with ${APP_VERSION}\n`);
+    } else {
+      // Orphan server: take the port back instead of exiting with no UI.
+      logDesktop('orphan-server', { pid: session?.serverPid ?? null, base: running.base });
+    }
+
     if (session?.serverPid && isAlive(session.serverPid)) {
       killTree(session.serverPid);
       const deadline = Date.now() + 6000;
@@ -251,9 +296,13 @@ async function main(): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
-    if (await runningInstance()) {
+    const still = await runningInstance();
+    if (still) {
+      // The old server would not die (or a foreign process owns the port).
+      // Name the build that is actually serving, so the message is actionable.
       process.stdout.write(
-        `\n  Nolanguage is already running -> ${running}/ (no window; end it from Task Manager)\n\n`,
+        `\n  Nolanguage is already running -> ${still.base}/` +
+          ` (build ${still.build?.appVersion ?? 'unknown'}; end it from Task Manager)\n\n`,
       );
       return;
     }
@@ -264,6 +313,9 @@ async function main(): Promise<void> {
   const { main: startServer } = await import('../panel/server.js');
   const server = await startServer();
   const base = server.base;
+  // `?updated=` is only present when this launch replaced an older build: the
+  // first frame then says so instead of looking identical to the old one.
+  const entryUrl = launchUrl(base, updatedFrom);
 
   // The window is a *managed* child: it is opened after the server is
   // listening, and torn down when this process exits.
@@ -274,7 +326,7 @@ async function main(): Promise<void> {
   let windowPid: number | undefined;
 
   if (openBrowser) {
-    openSystemBrowser(`${base}/`);
+    openSystemBrowser(entryUrl);
   } else if (!noWindow) {
     const profile = webViewProfileDir();
     windowProfile = profile;
@@ -301,21 +353,21 @@ async function main(): Promise<void> {
     // second sweep so the user is not left with a window that closes itself.
     let fastExit = false;
     view = openWebView({
-      url: `${base}/`,
+      url: entryUrl,
       size: '1280,860',
       quiet: true,
       onClosed: (info) => {
         if (info.elapsedMs < 1500) fastExit = true;
       },
     });
-    if (view.engine === 'none') openSystemBrowser(`${base}/`);
+    if (view.engine === 'none') openSystemBrowser(entryUrl);
     else {
       windowPid = await discoverWindow(profile, !fastExit);
       if (fastExit) {
         logDesktop('delegation-retry', { pid: windowPid ?? null });
         view.close();
         await closeStaleWindows(profile);
-        view = openWebView({ url: `${base}/`, size: '1280,860', quiet: true });
+        view = openWebView({ url: entryUrl, size: '1280,860', quiet: true });
         windowPid = await discoverWindow(profile);
       }
     }

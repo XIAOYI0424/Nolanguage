@@ -411,6 +411,21 @@ export function pyCharmClientScript(d: PanelClientData): string {
     toast('Workspace disconnected');
   });
 
+  // A launch that replaced an older build arrives as ?updated=<old version>.
+  // Without this the upgrade is invisible: the window looks exactly like the
+  // one it just replaced, so "I installed it and nothing changed" is the only
+  // possible reading. Announce once, then strip the param so a reload is quiet.
+  (function announceUpdate() {
+    var m = /[?&]updated=([^&]*)/.exec(location.search || '');
+    if (!m) return;
+    var from = '';
+    try { from = decodeURIComponent(m[1]); } catch (e) { from = ''; }
+    setTimeout(function () {
+      toast(from && from !== 'unknown' ? 'Updated from ' + from + ' - new build loaded' : 'Updated to a new build');
+    }, 700);
+    try { history.replaceState({}, '', location.pathname); } catch (e) { /* file: URLs */ }
+  })();
+
   // True inside the Tauri shell. It matters because the shell has **no HTTP
   // server**: its engine runs over a pipe (--panel-stdio), so URLs like
   // /plugins and /profile do not exist there — those views are rendered

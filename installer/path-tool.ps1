@@ -22,7 +22,7 @@ param(
   [Parameter(Mandatory = $true)][ValidateSet('add', 'remove', 'inspect')][string]$Action,
   [string]$InstallDir = "$env:LOCALAPPDATA\Programs\Nolanguage",
   [string]$Receipt,
-  [string]$Version = '0.7.1',
+  [string]$Version = '0.7.2',
   [switch]$DryRun
 )
 

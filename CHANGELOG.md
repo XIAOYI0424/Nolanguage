@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.2 — 2026-10-27
+
+### 启动版本握手
+
+- 新增 `src/desktop/handshake.ts`：启动时不再以「`/health` 有响应」判定自己多余，而是比较**构建身份**（`appVersion` + `exeSize`）：
+  - 同构建 + 有窗口 → `reuse`（不重复开窗）；
+  - 同构建 + 无窗口 → `takeover-orphan`（抢回端口重启）；
+  - 不同构建 → `takeover-update`（替换旧实例），不再静默退出让用户继续看旧 UI。
+- 旧于 0.7.1 的服务器不返回 `build`，按 `unknown-build` 处理为需要替换，而不是「大概是同一个」。
+- 新增 `src/version.ts`：`APP_VERSION` 单一真相源，`server.ts` 不再硬编码 `0.7.x-workspace`。
+
+### 自动更新提示
+
+- 替换旧构建时窗口地址带 `?updated=<旧版本>`；页面首帧 toast「Updated from 0.7.1-workspace - new build loaded」，随后 `history.replaceState` 去掉参数，刷新不再重复。
+- 普通启动仍是干净 `/`，不带参数。
+
+### 验证
+
+- 新增 `verify-handshake` 33 条（判定表 + 接线断言 + 版本一致性），接入全量（第 32 套件）。
+- `verify-pycharm` 新增 3 条：`?updated=` 会提示、参数被清除、普通启动不提示（jsdom 实测 toast 文本）。
+- `verify-all`：**1465/1465，32 套件，0 失败**；`tsc` 0 错误。
+- 真机：0.7.1 在跑时启动 0.7.2 → 日志 `handshake takeover-update version-mismatch 0.7.1-workspace → 0.7.2-workspace`，窗口 URL 带 `?updated=0.7.1-workspace`；同构建再次启动 → `handshake reuse same-build`，窗口数保持 1。
+
 ## 0.7.1 — 2026-10-22
 
 ### 发布闭环
