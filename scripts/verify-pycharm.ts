@@ -1231,6 +1231,120 @@ async function testUpdateNotice(): Promise<void> {
   plain.window.close();
 }
 
+// ---------------------------------------------------------- keymap + migration
+
+/**
+ * The P1 threshold, as a user experiences it: the keys they already press and
+ * the run setups they already have.
+ *
+ * Ctrl+F must not reach the browser's find bar, a match must be *selected* so
+ * Replace acts on it, and an imported `.idea` configuration must end up in the
+ * same preference store the run widget reads.
+ */
+async function testKeymap(): Promise<void> {
+  FakeSocket.instances = [];
+  const { window: w, socket } = mountPage(html);
+  await settle(w);
+  const ed = q(w, '#ta') as any;
+
+  // ---- find ----
+  ed.value = 'alpha beta alpha';
+  ed.setSelectionRange(0, 0);
+  const ctrlF = fire(w, ed, 'keydown', { key: 'f', ctrlKey: true });
+  check('keymap: Ctrl+F opens the in-editor find bar', !!q(w, '.findbar') && q(w, '.findbar').classList.contains('open'));
+  check('keymap: Ctrl+F suppresses the browser find', (ctrlF as any).defaultPrevented === true);
+
+  const input = q(w, '.findbar .fb-in') as any;
+  input.value = 'alpha';
+  fire(w, input, 'input', {});
+  await settle(w, 30);
+  check('keymap: matches are counted', (q(w, '.findbar .fb-count')?.textContent ?? '') === '1/2', q(w, '.findbar .fb-count')?.textContent);
+  check('keymap: the first match is selected', ed.selectionStart === 0 && ed.selectionEnd === 5, `${ed.selectionStart}-${ed.selectionEnd}`);
+
+  fire(w, input, 'keydown', { key: 'Enter' });
+  check('keymap: Enter jumps to the next match', ed.selectionStart === 11 && ed.selectionEnd === 16, `${ed.selectionStart}-${ed.selectionEnd}`);
+  check('keymap: the counter follows', (q(w, '.findbar .fb-count')?.textContent ?? '') === '2/2');
+  fire(w, input, 'keydown', { key: 'Enter', shiftKey: true });
+  check('keymap: Shift+Enter goes back', ed.selectionStart === 0);
+
+  // ---- replace ----
+  fire(w, ed, 'keydown', { key: 'h', ctrlKey: true });
+  check('keymap: Ctrl+H switches the bar to replace', q(w, '.findbar').classList.contains('replace'));
+  const rep = q(w, '.findbar .fb-rep') as any;
+  rep.value = 'ALPHA';
+  (q(w, '.findbar [data-a="all"]') as any).click();
+  await settle(w, 10);
+  check('keymap: Replace All rewrites every match', ed.value === 'ALPHA beta ALPHA', JSON.stringify(ed.value));
+  check('keymap: Replace All reports the count', /Replaced 2/.test(q(w, '#toast')?.textContent ?? ''), q(w, '#toast')?.textContent);
+
+  fire(w, input, 'keydown', { key: 'Escape' });
+  check('keymap: Escape closes the bar', !q(w, '.findbar').classList.contains('open'));
+
+  // ---- line editing ----
+  ed.value = 'one\ntwo\nthree';
+  ed.setSelectionRange(4, 4);
+  fire(w, ed, 'keydown', { key: 'd', ctrlKey: true });
+  check('keymap: Ctrl+D duplicates the line', ed.value === 'one\ntwo\ntwo\nthree', JSON.stringify(ed.value));
+  check('keymap: the caret follows the copy', ed.selectionStart === 8, String(ed.selectionStart));
+  fire(w, ed, 'keydown', { key: 'y', ctrlKey: true });
+  check('keymap: Ctrl+Y deletes the line', ed.value === 'one\ntwo\nthree', JSON.stringify(ed.value));
+
+  ed.value = 'x = 1\ny = 2';
+  ed.setSelectionRange(0, 0);
+  fire(w, ed, 'keydown', { key: '/', ctrlKey: true });
+  check('keymap: Ctrl+/ comments with the language prefix', ed.value === '# x = 1\ny = 2', JSON.stringify(ed.value));
+  fire(w, ed, 'keydown', { key: '/', ctrlKey: true });
+  check('keymap: Ctrl+/ toggles the comment back off', ed.value === 'x = 1\ny = 2', JSON.stringify(ed.value));
+
+  // ---- go to line ----
+  ed.value = 'one\ntwo\nthree';
+  ed.setSelectionRange(0, 0);
+  fire(w, ed, 'keydown', { key: 'g', ctrlKey: true });
+  const dlg = q(w, '.dlg');
+  check('keymap: Ctrl+G opens the line dialog', !!dlg && /Go to Line/.test(dlg.textContent ?? ''));
+  const lineInput = dlg.querySelector('input[data-f="line"]') as any;
+  lineInput.value = '3';
+  const go = Array.from(dlg.querySelectorAll('.dlg-btn')).find((b: any) => b.textContent === 'Go') as any;
+  go.click();
+  check('keymap: Go places the caret on that line', ed.selectionStart === 8, String(ed.selectionStart));
+
+  // ---- interpreter picker ----
+  socket!.deliver({
+    kind: 'interpreters', language: 'python', root: '/proj', active: '/proj/.venv/Scripts/python.exe', pinned: null,
+    candidates: [
+      { path: '/proj/.venv/Scripts/python.exe', label: 'Python 3.13.14 (.venv)', kind: 'venv', source: '.venv' },
+      { path: '/usr/bin/python3', label: 'Python 3.11.9 (PATH)', kind: 'path', source: 'PATH' },
+    ],
+  });
+  await settle(w);
+  const radios = qa(w, '.dlg input[data-r="bin"]');
+  check('migration: the picker lists candidates plus "auto"', radios.length === 3, String(radios.length));
+  check('migration: the active interpreter is preselected', radios[0].checked === true);
+  const apply = Array.from(q(w, '.dlg').querySelectorAll('.dlg-btn')).find((b: any) => b.textContent === 'Apply') as any;
+  apply.click();
+  const setMsg = socket!.lastSentOf('setInterpreter');
+  check('migration: Apply sends the chosen path', !!setMsg && setMsg.path === '/proj/.venv/Scripts/python.exe', JSON.stringify(setMsg));
+  check('migration: the language travels with it', setMsg?.language === 'python', String(setMsg?.language));
+
+  // ---- .idea import ----
+  socket!.deliver({
+    kind: 'ideaImport', root: '/proj', missing: false, projectSdk: 'Python 3.13 (proj)', modules: ['proj'], warnings: [],
+    configurations: [
+      { name: 'web', type: 'NodeJSConfigurationType', factory: 'Node.js', script: 'web/index.js', scriptPath: '/proj/web/index.js', parameters: 'serve', workdir: '.', env: {}, source: '.run/web.xml', language: 'javascript' },
+      { name: 'main', type: 'PythonConfigurationType', factory: 'Python', script: 'main.py', scriptPath: '/proj/main.py', parameters: '--fast', workdir: '.', env: { MODE: 'dev' }, source: '.idea/runConfigurations/main.xml', language: 'python' },
+    ],
+  });
+  await settle(w);
+  const prefs = JSON.parse(w.localStorage.getItem('nolanguage.pycharm.v1') || '{}');
+  const names = (prefs.runConfigs || []).map((c: any) => c.name);
+  check('migration: imported configurations reach the run store', names.indexOf('web') !== -1 && names.indexOf('main') !== -1, names.join(','));
+  check('migration: the script path is carried over', (prefs.runConfigs || []).some((c: any) => c.name === 'web' && c.path === 'web/index.js'));
+  check('migration: the import is announced', /Imported \d+ run configuration/.test(q(w, '#toast')?.textContent ?? ''), q(w, '#toast')?.textContent);
+  check('migration: an existing name is not duplicated', (prefs.runConfigs || []).filter((c: any) => c.name === 'main').length === 1, String((prefs.runConfigs || []).length));
+
+  w.close();
+}
+
 // ---------------------------------------------------------- run
 
 await testBoot();
@@ -1250,6 +1364,8 @@ console.log('');
 await testMcp();
 console.log('');
 await testUpdateNotice();
+console.log('');
+await testKeymap();
 console.log('');
 await testInteractions();
 console.log('');

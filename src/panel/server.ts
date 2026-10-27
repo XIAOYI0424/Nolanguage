@@ -22,7 +22,7 @@
  *       PYTHON_BIN             interpreter to use
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { Kernel } from '../kernel/Kernel.js';
@@ -49,6 +49,9 @@ import type { SandboxLanguage } from '../exec/types.js';
 import { FsService, FsError } from './FsService.js';
 import { McpManager } from '../mcp/McpManager.js';
 import { APP_VERSION } from '../version.js';
+import { discoverInterpreters, pickInterpreter } from '../langs/interpreters.js';
+import { importIdeaProject } from '../langs/ideaImport.js';
+import { attribute } from '../perf/Attribution.js';
 import { ExtensionManager } from '../extensions/ExtensionManager.js';
 import { materializeAssets } from '../desktop/embeddedAssets.js';
 import { StdioTransport, WsTransport, parseFrame, type Transport } from './Transport.js';
@@ -114,7 +117,167 @@ function envToolchains(): Record<string, string> {
     ['javascript', process.env.NODE_BIN],
     ['markdown', process.env.MARKSMAN_BIN],
   ];
-  return Object.fromEntries(pins.filter((p): p is [string, string] => !!p[1]));
+  const env = Object.fromEntries(pins.filter((p): p is [string, string] => !!p[1]));
+  // The interpreter picker's pins sit *under* the environment: an explicit
+  // `PYTHON_BIN` is a developer's override for this run and must win.
+  return { ...readToolchainPins(), ...env };
+}
+
+/**
+ * Interpreter candidates for one language — migration threshold 1.
+ *
+ * The answer always names an `active` interpreter: the pin when one is set,
+ * otherwise the project's own environment. Leaving it empty would push the
+ * decision back to "whatever PATH has", which is the behaviour the picker
+ * exists to replace.
+ */
+async function handleInterpreters(
+  workspace: WorkspaceService,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const language = asLanguage(msg.language, workspace);
+  const pinned = workspace.toolchains()[language];
+  try {
+    const candidates = await discoverInterpreters(workspace.root, language, {
+      sdkName: typeof msg.sdkName === 'string' && msg.sdkName ? msg.sdkName : undefined,
+    });
+    const picked = pickInterpreter(candidates, { pinned });
+    reply({
+      kind: 'interpreters',
+      language,
+      root: workspace.root,
+      candidates,
+      active: picked?.path ?? null,
+      pinned: pinned ?? null,
+    });
+  } catch (err) {
+    reply({
+      kind: 'interpreters',
+      language,
+      root: workspace.root,
+      candidates: [],
+      active: null,
+      pinned: pinned ?? null,
+      error: (err as Error).message,
+    });
+  }
+}
+
+/** Pin (or unpin) a language's interpreter and rebuild its slot. */
+async function handleSetInterpreter(
+  workspace: WorkspaceService,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const language = asLanguage(msg.language, workspace);
+  const path = typeof msg.path === 'string' ? msg.path : undefined;
+  try {
+    const result = await workspace.setToolchain(language, path);
+    if (result.ok) await saveToolchainPins(workspace.toolchains());
+    reply({ kind: 'interpreterSet', language, ...result });
+  } catch (err) {
+    reply({ kind: 'interpreterSet', language, ok: false, error: (err as Error).message });
+  }
+}
+
+/** Import `.idea/runConfigurations` — migration threshold 2. */
+async function handleImportIdea(
+  workspace: WorkspaceService,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const root = typeof msg.root === 'string' && msg.root.trim() ? msg.root.trim() : workspace.root;
+  try {
+    const result = await importIdeaProject(root);
+    reply({ kind: 'ideaImport', ...result });
+  } catch (err) {
+    reply({
+      kind: 'ideaImport',
+      root,
+      missing: true,
+      projectSdk: undefined,
+      modules: [],
+      configurations: [],
+      warnings: [(err as Error).message],
+    });
+  }
+}
+
+/**
+ * Stage 11 — attribute a metric's shift to a point in time.
+ *
+ * Samples come from the hot perf ring (the same records the Performance tab
+ * shows), so the answer is about *this* session, not a stored baseline. The
+ * split defaults to the midpoint of the window; `splitAt` pins it to a moment
+ * (a deploy, a commit checkout).
+ */
+function handleAttribute(
+  kernel: Kernel,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): void {
+  const metric = String(msg.metric ?? '');
+  const values: number[] = [];
+  const times: number[] = [];
+  for (const r of kernel.recentPerf(5000)) {
+    const v =
+      r.type === 'metric'
+        ? r.name === metric
+          ? r.value
+          : undefined
+        : r.type === 'sample'
+          ? r.profileType === metric
+            ? r.value
+            : undefined
+          : r.name === metric
+            ? r.duration
+            : undefined;
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      values.push(v);
+      times.push(r.timestamp);
+    }
+  }
+
+  const splitAt = Number(msg.splitAt);
+  let cut = Number.isFinite(splitAt) && splitAt > 0 ? times.findIndex((t) => t >= splitAt) : Math.floor(values.length / 2);
+  if (cut <= 0 || cut >= values.length) cut = Math.floor(values.length / 2);
+
+  const result = attribute({
+    before: values.slice(0, cut),
+    after: values.slice(cut),
+    series: values,
+  });
+  reply({ kind: 'attribution', metric, ...result, samples: { before: cut, after: values.length - cut } });
+}
+
+/**
+ * Pins chosen in the interpreter picker, persisted across restarts.
+ *
+ * Kept out of the workspace directory on purpose: the interpreter belongs to
+ * the *machine*, and a project checked out twice should not disagree with
+ * itself about which python it uses.
+ */
+function toolchainPinPath(): string {
+  return appDataPath('toolchains.json');
+}
+
+function readToolchainPins(): Record<string, string> {
+  try {
+    const raw = JSON.parse(readFileSync(toolchainPinPath(), 'utf8')) as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(raw).filter((e): e is [string, string] => typeof e[1] === 'string'));
+  } catch {
+    return {};
+  }
+}
+
+async function saveToolchainPins(pins: Record<string, string>): Promise<void> {
+  try {
+    await mkdir(appDataPath(), { recursive: true });
+    await writeFile(toolchainPinPath(), JSON.stringify(pins, null, 2) + '\n', 'utf8');
+  } catch {
+    /* best-effort: a pin that cannot be saved still applies to this session */
+  }
 }
 
 /**
@@ -802,6 +965,24 @@ export async function main(
 
         case 'mdRender':
           void handleMdRender(workspace, msg, reply);
+          break;
+
+        // ---------- P1 · migration thresholds ----------
+        case 'interpreters':
+          void handleInterpreters(workspace, msg, reply);
+          break;
+
+        case 'setInterpreter':
+          void handleSetInterpreter(workspace, msg, reply);
+          break;
+
+        case 'importIdea':
+          void handleImportIdea(workspace, msg, reply);
+          break;
+
+        // ---------- Stage 11 · attribution ----------
+        case 'attribute':
+          handleAttribute(kernel, msg, reply);
           break;
 
         // ---------- Stage 10 · user-code profiler ----------

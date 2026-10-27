@@ -202,6 +202,14 @@ check(
   'an abnormal exit drops the record instead of marking it clean',
   /if\s*\(!shuttingDown\)\s*clearSession\(\)/.test(mainSource),
 );
+// Edge's EdgeCore ships a *newer* WebView2 than the Evergreen Runtime. Reading
+// the newest folder made doctor claim WebView2 151 while the runtime an embedded
+// app actually loads was 143 — the exact difference between "works" and "blank".
+check(
+  'the WebView2 version prefers the Evergreen runtime over EdgeCore',
+  /const WEBVIEW2_CANDIDATES: string\[\]\[\]/.test(source) &&
+    /EdgeWebView\\\\Application[\s\S]{0,120}EdgeCore/.test(source),
+);
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

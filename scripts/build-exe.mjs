@@ -21,7 +21,7 @@
  * `node_modules`, so building adds no project dependencies.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, rmSync, statSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, rmSync, statSync, readdirSync, openSync, readSync, writeSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -252,6 +252,49 @@ const entry = await bundle();
 const blob = seaBlob(entry);
 inject(blob);
 setGuiSubsystem(EXE);
+
+// A SEA is `node.exe` plus a blob, and it **inherits node.exe's Authenticode
+// entry** — which now points into the middle of the file. Authenticode then
+// refuses to sign the build at all ("%1 is not a valid Win32 application"), so
+// the artifact looks signed to a header check and is unsignable in practice.
+// Clearing the entry makes it honestly unsigned and signable again.
+//
+// Kept inline (not imported from src/cli/signature.ts) because this script runs
+// as plain ESM without the TypeScript loader; the algorithm is the same
+// `certificateTableOffset` logic and the signing round-trip test proves it.
+function clearInheritedSignature(exe) {
+  let fd;
+  try {
+    fd = openSync(exe, 'r+');
+    const head = Buffer.alloc(4096);
+    const read = readSync(fd, head, 0, head.length, 0);
+    const buf = head.subarray(0, read);
+    if (buf.length < 0x40 || buf[0] !== 0x4d || buf[1] !== 0x5a) return false;
+    const peOff = buf.readUInt32LE(0x3c);
+    if (peOff <= 0 || buf.readUInt32LE(peOff) !== 0x00004550) return false;
+    const optOff = peOff + 24;
+    const magic = buf.readUInt16LE(optOff);
+    const is64 = magic === 0x20b;
+    if (!is64 && magic !== 0x10b) return false;
+    const dirOff = optOff + (is64 ? 112 : 96) + 4 * 8; // data directory 4
+    if (dirOff + 8 > buf.length) return false;
+    if (buf.readUInt32LE(dirOff + 4) === 0) return false;
+    writeSync(fd, Buffer.alloc(8), 0, 8, dirOff);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+if (clearInheritedSignature(EXE)) log('cleared the inherited node.exe signature (stale certificate table)');
 
 // Files that must live next to the exe rather than inside the blob.
 const readme = join(ROOT, 'README.md');

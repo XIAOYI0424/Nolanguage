@@ -67,11 +67,20 @@ import { isPackaged } from './embeddedAssets.js';
 import { killTree, logDesktop, patchSession } from './session.js';
 
 /** Where the WebView engine binaries typically live on Windows. */
-const WEBVIEW2_CANDIDATES = [
-  'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application',
-  'C:\\Program Files\\Microsoft\\EdgeWebView\\Application',
-  'C:\\Program Files (x86)\\Microsoft\\EdgeCore',
-  'C:\\Program Files\\Microsoft\\EdgeCore',
+/**
+ * Where the WebView2 **runtime** lives, in priority order.
+ *
+ * `EdgeWebView\Application` is the Evergreen Runtime — the thing an embedded
+ * WebView2 app actually loads. `EdgeCore` is Edge's own internal copy: it is
+ * usually *newer* than the runtime, and reporting it as "the runtime" made
+ * doctor claim WebView2 151 was installed while the runtime was still 143.
+ */
+const WEBVIEW2_CANDIDATES: string[][] = [
+  [
+    'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application',
+    'C:\\Program Files\\Microsoft\\EdgeWebView\\Application',
+  ],
+  ['C:\\Program Files (x86)\\Microsoft\\EdgeCore', 'C:\\Program Files\\Microsoft\\EdgeCore'],
 ];
 
 const EDGE_CANDIDATES = [
@@ -89,25 +98,30 @@ const EDGE_CANDIDATES = [
  * segment rather than lexicographic.
  */
 export function webView2Version(): string | undefined {
-  let best: { name: string; parts: number[] } | undefined;
-  for (const root of WEBVIEW2_CANDIDATES) {
-    if (!existsSync(root)) continue;
-    let entries: string[];
-    try {
-      entries = readdirNames(root);
-    } catch {
-      continue;
+  // First group that has any installed runtime wins: the Evergreen Runtime is
+  // what WebView2 hosts load, and Edge's EdgeCore is only a fallback signal.
+  for (const group of WEBVIEW2_CANDIDATES) {
+    let best: { name: string; parts: number[] } | undefined;
+    for (const root of group) {
+      if (!existsSync(root)) continue;
+      let entries: string[];
+      try {
+        entries = readdirNames(root);
+      } catch {
+        continue;
+      }
+      for (const name of entries) {
+        if (!/^\d+(\.\d+)*$/.test(name)) continue;
+        // The runtime ships its own msedgewebview2.exe; require it so a stray
+        // version-shaped folder cannot be reported as an installed runtime.
+        if (!existsSync(join(root, name, 'msedgewebview2.exe'))) continue;
+        const parts = name.split('.').map((n) => Number(n) || 0);
+        if (!best || compareVersions(parts, best.parts) > 0) best = { name, parts };
+      }
     }
-    for (const name of entries) {
-      if (!/^\d+(\.\d+)*$/.test(name)) continue;
-      // The runtime ships its own msedgewebview2.exe; require it so a stray
-      // version-shaped folder cannot be reported as an installed runtime.
-      if (!existsSync(join(root, name, 'msedgewebview2.exe'))) continue;
-      const parts = name.split('.').map((n) => Number(n) || 0);
-      if (!best || compareVersions(parts, best.parts) > 0) best = { name, parts };
-    }
+    if (best) return best.name;
   }
-  return best?.name;
+  return undefined;
 }
 
 /** True when the WebView2 runtime is installed (i.e. the engine is guaranteed). */
@@ -120,17 +134,19 @@ export function findEdgeBinary(): string | undefined {
   const direct = EDGE_CANDIDATES.find((p) => existsSync(p));
   if (direct) return direct;
   // Some installs only expose Edge through the WebView2/EdgeCore tree.
-  for (const root of WEBVIEW2_CANDIDATES) {
-    if (!existsSync(root)) continue;
-    let entries: string[];
-    try {
-      entries = readdirNames(root);
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      const exe = join(root, name, 'msedge.exe');
-      if (existsSync(exe)) return exe;
+  for (const group of WEBVIEW2_CANDIDATES) {
+    for (const root of group) {
+      if (!existsSync(root)) continue;
+      let entries: string[];
+      try {
+        entries = readdirNames(root);
+      } catch {
+        continue;
+      }
+      for (const name of entries) {
+        const exe = join(root, name, 'msedge.exe');
+        if (existsSync(exe)) return exe;
+      }
     }
   }
   return undefined;

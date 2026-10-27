@@ -35,6 +35,12 @@ const stages = [
   // Launch-time build handshake: liveness is not identity. A freshly installed
   // exe that finds the *previous* build on 7310 must replace it, not exit.
   { name: 'Desktop · version handshake', script: 'scripts/verify-handshake.ts' },
+  // P1 migration thresholds: interpreter discovery + `.idea` run configurations.
+  { name: 'Migration · interpreter + .idea import', script: 'scripts/verify-migration.ts' },
+  // Stage 11: CUSUM + Welch t + Cohen's d + bisect.
+  { name: 'Stage 11 · attribution engine', script: 'scripts/verify-attribution.ts' },
+  // Code signing: PE header read, script wiring, doctor report.
+  { name: 'Release · code signing', script: 'scripts/verify-sign.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts' },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.

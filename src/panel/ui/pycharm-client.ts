@@ -199,6 +199,15 @@ export function pyCharmClientScript(d: PanelClientData): string {
     (o.checkboxes || []).forEach(function (c) {
       html += '<label class="dlg-check"><input type="checkbox" data-c="' + esc(c.name) + '"' + (c.def ? ' checked' : '') + ' />' + esc(c.label) + '</label>';
     });
+    // Single-choice rows. Used by the interpreter picker: a select would hide
+    // the versions, and the version is the whole reason to look.
+    if (o.radios && o.radios.length) {
+      html += '<div class="dlg-radios">' + o.radios.map(function (r) {
+        return '<label class="dlg-check"><input type="radio" name="r-' + esc(r.name) + '" data-r="' + esc(r.name) +
+          '" value="' + esc(r.value == null ? '' : r.value) + '"' + (r.def ? ' checked' : '') + ' />' +
+          esc(r.label) + '</label>';
+      }).join('') + '</div>';
+    }
     if (o.detail) html += '<div class="dlg-detail">' + esc(o.detail) + '</div>';
     html += '</div><div class="dlg-foot"></div>';
     card.innerHTML = html;
@@ -220,6 +229,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
       var v = {};
       inputs.forEach(function (i) { v[i.getAttribute('data-f')] = i.value; });
       card.querySelectorAll('input[data-c]').forEach(function (c) { v[c.getAttribute('data-c')] = c.checked; });
+      card.querySelectorAll('input[data-r]:checked').forEach(function (r) { v[r.getAttribute('data-r')] = r.value; });
       return v;
     }
     function validate() {
@@ -2838,6 +2848,23 @@ export function pyCharmClientScript(d: PanelClientData): string {
         MCP_OUT = 'ERROR ' + (m.id ? m.id + ': ' : '') + String(m.error || '');
         if (activeLeft === 'mcp') renderPanel();
         break;
+      case 'interpreters':
+        showInterpreters(m);
+        break;
+      case 'interpreterSet':
+        if (m.ok) {
+          toast('Interpreter: ' + (m.toolchain || 'auto'));
+          renderStLang();
+        } else {
+          toast('Interpreter error: ' + String(m.error || 'unknown'));
+        }
+        break;
+      case 'ideaImport':
+        applyIdeaImport(m);
+        break;
+      case 'attribution':
+        paintAttribution(m);
+        break;
       case 'metrics':
         lastMetrics = m; if (activeBottom === 'perf') renderPerf(m);
         break;
@@ -3020,6 +3047,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
       { label: 'Save', sc: 'Ctrl+S', act: saveFile },
       { label: 'Save As...', sc: 'Ctrl+Shift+S', act: saveAsNative },
       { sep: true },
+      { label: 'Import PyCharm Run Configurations...', act: importIdeaConfigs },
       { label: 'Open Recent', act: openRecent }
     ],
     'Edit': [
@@ -3039,7 +3067,14 @@ export function pyCharmClientScript(d: PanelClientData): string {
     ],
     'Code': [
       { label: 'Reformat Code', sc: 'Ctrl+Alt+L', act: reformatCode },
-      { label: 'Optimize Imports', sc: 'Ctrl+Alt+O', act: optimizeImports }
+      { label: 'Optimize Imports', sc: 'Ctrl+Alt+O', act: optimizeImports },
+      { sep: true },
+      { label: 'Duplicate Line', sc: 'Ctrl+D', act: duplicateLine },
+      { label: 'Delete Line', sc: 'Ctrl+Y', act: deleteLine },
+      { label: 'Comment Line', sc: 'Ctrl+/', act: toggleComment },
+      { label: 'Find...', sc: 'Ctrl+F', act: function () { openFindBar(false); } },
+      { label: 'Replace...', sc: 'Ctrl+H', act: function () { openFindBar(true); } },
+      { label: 'Go to Line...', sc: 'Ctrl+G', act: openGotoLine }
     ],
     'Run': [
       { label: "Run 'main'", sc: 'Shift+F10', act: runCode },
@@ -3049,10 +3084,12 @@ export function pyCharmClientScript(d: PanelClientData): string {
       { label: 'Stop', act: stopRun }
     ],
     'Tools': [
+      { label: 'Project Interpreter...', act: openInterpreter },
       { label: 'Extensions', act: openExt },
       { label: 'Language Plugins', act: openPlugins },
       { sep: true },
       { label: 'Profile current file', sc: 'Alt+9', act: profileCurrent },
+      { label: 'Explain Performance Change...', act: openAttribution },
       { label: 'Command Palette…', sc: 'Ctrl+P', act: openPalette },
       { sep: true },
       { label: 'Kernel Flame Graph', sc: 'Ctrl+Alt+F', act: openFlame },
@@ -3723,6 +3760,328 @@ export function pyCharmClientScript(d: PanelClientData): string {
 
 
 
+  // ---------- find & replace (Ctrl+F / Ctrl+H) ----------
+  // PyCharm's bar, not the browser's: Ctrl+F must not open Chrome's find, and a
+  // match has to be *selected in the document* so Replace acts on what the user
+  // sees. Case sensitivity follows PyCharm's implicit rule — an all-lowercase
+  // query is case-insensitive, any capital makes it exact.
+  var FIND = { bar: null, input: null, rep: null, count: null, hits: [], idx: -1, replace: false };
+  function findCaseSensitive(q) { return q !== q.toLowerCase(); }
+  function escapeRe(s) { return String(s).replace(/[.*+?^$()|[\]{}\\-]/g, '\\$&'); }
+  function findMatches(q) {
+    if (!q) return [];
+    var text = ta.value;
+    var sensitive = findCaseSensitive(q);
+    var hay = sensitive ? text : text.toLowerCase();
+    var needle = sensitive ? q : q.toLowerCase();
+    var out = [], i = 0;
+    while (i <= hay.length) {
+      var k = hay.indexOf(needle, i);
+      if (k === -1) break;
+      out.push(k);
+      i = k + needle.length;
+    }
+    return out;
+  }
+  function ensureFindBar() {
+    if (FIND.bar) return FIND.bar;
+    var bar = document.createElement('div');
+    bar.className = 'findbar';
+    bar.innerHTML =
+      '<input class="fb-in" type="text" placeholder="Find" spellcheck="false" />' +
+      '<span class="fb-count"></span>' +
+      '<button class="fb-btn" data-a="prev" title="Previous (Shift+Enter)">&#8593;</button>' +
+      '<button class="fb-btn" data-a="next" title="Next (Enter)">&#8595;</button>' +
+      '<input class="fb-rep" type="text" placeholder="Replace" spellcheck="false" />' +
+      '<button class="fb-btn" data-a="rep">Replace</button>' +
+      '<button class="fb-btn" data-a="all">All</button>' +
+      '<button class="fb-btn" data-a="close" title="Close (Esc)">&#215;</button>';
+    document.body.appendChild(bar);
+    FIND.bar = bar;
+    FIND.input = bar.querySelector('.fb-in');
+    FIND.rep = bar.querySelector('.fb-rep');
+    FIND.count = bar.querySelector('.fb-count');
+    bar.addEventListener('click', function (e) {
+      var b = e.target && e.target.closest ? e.target.closest('[data-a]') : null;
+      if (!b) return;
+      var a = b.getAttribute('data-a');
+      if (a === 'next') findStep(1);
+      else if (a === 'prev') findStep(-1);
+      else if (a === 'rep') replaceCurrent();
+      else if (a === 'all') replaceAll();
+      else if (a === 'close') closeFindBar();
+    });
+    FIND.input.addEventListener('input', function () {
+      FIND.idx = -1;
+      refreshHits();
+      paintCount();
+      if (FIND.input.value) findStep(1);
+    });
+    [FIND.input, FIND.rep].forEach(function (inp) {
+      inp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (e.shiftKey) findStep(-1);
+          else if (FIND.replace) replaceCurrent();
+          else findStep(1);
+        } else if (e.key === 'Escape') { e.preventDefault(); closeFindBar(); }
+      });
+    });
+    return bar;
+  }
+  function refreshHits() {
+    FIND.hits = findMatches(FIND.input ? FIND.input.value : '');
+    if (FIND.idx >= FIND.hits.length) FIND.idx = FIND.hits.length - 1;
+    return FIND.hits;
+  }
+  function paintCount() {
+    if (!FIND.count) return;
+    if (!FIND.input.value) { FIND.count.textContent = ''; return; }
+    FIND.count.textContent = FIND.hits.length ? ((FIND.idx + 1) + '/' + FIND.hits.length) : 'no results';
+  }
+  function selectHit(i) {
+    var hits = FIND.hits;
+    if (!hits.length) { FIND.idx = -1; paintCount(); return; }
+    if (i < 0) i = hits.length - 1;
+    if (i >= hits.length) i = 0;
+    FIND.idx = i;
+    var q = FIND.input.value;
+    ta.focus();
+    ta.selectionStart = hits[i];
+    ta.selectionEnd = hits[i] + q.length;
+    updateCaret();
+    paintCount();
+  }
+  function findStep(dir) {
+    var hits = refreshHits();
+    if (!hits.length) { FIND.idx = -1; paintCount(); return; }
+    if (FIND.idx < 0) {
+      var from = ta.selectionStart, pick = -1;
+      for (var i = 0; i < hits.length; i++) {
+        if (dir > 0 ? hits[i] >= from : hits[i] < from) { pick = i; break; }
+      }
+      selectHit(pick < 0 ? (dir > 0 ? 0 : hits.length - 1) : pick);
+      return;
+    }
+    selectHit(FIND.idx + dir);
+  }
+  function replaceCurrent() {
+    var q = FIND.input.value, rep = FIND.rep.value;
+    if (!q) return;
+    var s = ta.selectionStart, e = ta.selectionEnd;
+    var sel = ta.value.slice(s, e);
+    var same = findCaseSensitive(q) ? sel === q : sel.toLowerCase() === q.toLowerCase();
+    if (!same) { FIND.idx = -1; findStep(1); return; }
+    replaceRange(s, e, rep);
+    renderEditor(); updateCaret();
+    FIND.idx = -1;
+    refreshHits(); paintCount();
+    findStep(1);
+  }
+  function replaceAll() {
+    var q = FIND.input.value, rep = FIND.rep.value;
+    if (!q) return;
+    var text = ta.value;
+    var sensitive = findCaseSensitive(q);
+    var hay = sensitive ? text : text.toLowerCase();
+    var needle = sensitive ? q : q.toLowerCase();
+    var out = '', i = 0, n = 0;
+    while (true) {
+      var k = hay.indexOf(needle, i);
+      if (k === -1) break;
+      out += text.slice(i, k) + rep;
+      i = k + needle.length;
+      n++;
+    }
+    if (!n) { toast('No matches'); return; }
+    out += text.slice(i);
+    ta.value = out;
+    renderEditor(); updateCaret();
+    FIND.idx = -1;
+    refreshHits(); paintCount();
+    toast('Replaced ' + n + ' occurrence' + (n === 1 ? '' : 's'));
+  }
+  function openFindBar(replace) {
+    var bar = ensureFindBar();
+    FIND.replace = !!replace;
+    bar.classList.add('open');
+    if (replace) bar.classList.add('replace'); else bar.classList.remove('replace');
+    var sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    if (sel && sel.indexOf('\\n') === -1 && sel.length < 120) FIND.input.value = sel;
+    FIND.idx = -1;
+    refreshHits(); paintCount();
+    FIND.input.focus();
+    if (FIND.input.select) FIND.input.select();
+  }
+  function closeFindBar() {
+    if (!FIND.bar) return;
+    FIND.bar.classList.remove('open');
+    FIND.idx = -1;
+    ta.focus();
+  }
+
+  // ---------- line editing (PyCharm keymap) ----------
+  function lineBounds() {
+    var v = ta.value, s = ta.selectionStart, e = ta.selectionEnd;
+    var start = v.lastIndexOf('\\n', s - 1) + 1;
+    var end = v.indexOf('\\n', e);
+    if (end === -1) end = v.length;
+    return { start: start, end: end };
+  }
+  function duplicateLine() {
+    if (!CAN_EDIT()) { toast('Read-only buffer'); return; }
+    var v = ta.value, s = ta.selectionStart, e = ta.selectionEnd;
+    var b = lineBounds();
+    var block = v.slice(b.start, b.end);
+    ta.value = v.slice(0, b.end) + '\\n' + block + v.slice(b.end);
+    ta.selectionStart = b.end + 1 + (s - b.start);
+    ta.selectionEnd = b.end + 1 + (e - b.start);
+    renderEditor(); updateCaret();
+  }
+  function deleteLine() {
+    if (!CAN_EDIT()) { toast('Read-only buffer'); return; }
+    var v = ta.value, s = ta.selectionStart, e = ta.selectionEnd;
+    var b = lineBounds();
+    if (b.end >= v.length) {
+      // Last line: drop the separator before it, not the line's own newline.
+      var cut = b.start > 0 ? b.start - 1 : 0;
+      ta.value = v.slice(0, cut) + v.slice(b.end);
+      ta.selectionStart = ta.selectionEnd = Math.min(cut, ta.value.length);
+    } else {
+      ta.value = v.slice(0, b.start) + v.slice(b.end + 1);
+      ta.selectionStart = ta.selectionEnd = Math.min(b.start, ta.value.length);
+    }
+    renderEditor(); updateCaret();
+  }
+  var COMMENT_PREFIX = { python: '#', javascript: '//', go: '//', cpp: '//', c: '//', rust: '//', java: '//', kotlin: '//' };
+  function toggleComment() {
+    if (!CAN_EDIT()) { toast('Read-only buffer'); return; }
+    var prefix = COMMENT_PREFIX[currentLang];
+    if (!prefix) { toast('No line comment for ' + currentLang); return; }
+    var v = ta.value, b = lineBounds();
+    var block = v.slice(b.start, b.end);
+    var lines = block.split('\\n');
+    var allCommented = lines.every(function (l) {
+      return !l.trim() || l.replace(/^\\s+/, '').indexOf(prefix) === 0;
+    });
+    var out = lines.map(function (l) {
+      if (!l.trim()) return l;
+      if (allCommented) return l.replace(new RegExp('^(\\\\s*)' + escapeRe(prefix) + ' ?'), '$1');
+      return l.replace(/^(\\s*)/, '$1' + prefix + ' ');
+    }).join('\\n');
+    ta.value = v.slice(0, b.start) + out + v.slice(b.end);
+    ta.selectionStart = b.start;
+    ta.selectionEnd = b.start + out.length;
+    renderEditor(); updateCaret();
+  }
+  function openGotoLine() {
+    showModal({
+      title: 'Go to Line', icon: 'file',
+      fields: [{ name: 'line', label: 'Line', value: '1', validator: function (v) { return /^\\d+$/.test(v) ? null : 'Enter a line number'; } }],
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Go', primary: true, onClick: function (v) { gotoLine(Math.max(0, Number(v.line) - 1), 0); } }
+      ]
+    });
+  }
+
+  // ---------- project interpreter (migration threshold 1) ----------
+  /** Project SDK name last seen in .idea/misc.xml; used to break ties. */
+  var LAST_SDK = '';
+  function openInterpreter() {
+    var lang = currentLang || 'python';
+    toast('Scanning ' + lang + ' interpreters…');
+    BRIDGE.send({ kind: 'interpreters', language: lang, sdkName: LAST_SDK });
+  }
+  function showInterpreters(m) {
+    var list = m.candidates || [];
+    if (!list.length) {
+      toast('No ' + m.language + ' interpreter found');
+      return;
+    }
+    var radios = list.map(function (c) {
+      return {
+        name: 'bin', value: c.path, def: c.path === m.active,
+        label: c.label + (c.sdkMatch ? '  · SDK' : '') + (c.path === m.active ? '  · active' : '')
+      };
+    });
+    // Only one radio in the group may start checked — the HTML parser keeps the
+    // *last* checked one, so "Auto" must stay unchecked while an interpreter is
+    // active, or the dialog would silently apply the unpinned state.
+    radios.push({ name: 'bin', value: '', label: 'Auto (discovered, no pin)', def: !m.active && !m.pinned });
+    showModal({
+      title: 'Project interpreter — ' + m.language, icon: 'settings',
+      message: m.root,
+      sub: list.length + ' candidate' + (list.length === 1 ? '' : 's'),
+      radios: radios,
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Apply', primary: true, onClick: function (v) {
+          BRIDGE.send({ kind: 'setInterpreter', language: m.language, path: v.bin || undefined });
+        } }
+      ]
+    });
+  }
+
+  // ---------- Stage 11 · attribution ----------
+  /** Ask the engine to attribute a metric's shift (CUSUM + Welch t + Cohen's d). */
+  function openAttribution() {
+    var names = lastMetrics && lastMetrics.metrics ? Object.keys(lastMetrics.metrics) : [];
+    showModal({
+      title: 'Explain a performance change', icon: 'perf',
+      message: 'Compares the first half of the hot window with the second half.',
+      fields: [{
+        name: 'metric', label: 'Metric', value: names[0] || 'command.duration',
+        validator: function (v) { return v ? null : 'Metric name required'; }
+      }],
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Analyse', primary: true, onClick: function (v) { BRIDGE.send({ kind: 'attribute', metric: v.metric }); } }
+      ]
+    });
+  }
+  function paintAttribution(m) {
+    var parts = ['verdict: ' + String(m.verdict || 'unknown')];
+    if (m.relativeChange != null) parts.push('change: ' + (m.relativeChange * 100).toFixed(1) + '%');
+    if (m.pValue != null) parts.push('p: ' + String(m.pValue));
+    if (m.effectSize != null) parts.push("Cohen's d: " + String(m.effectSize) + (m.magnitude ? ' (' + m.magnitude + ')' : ''));
+    if (m.samples) parts.push('samples: ' + m.samples.before + ' / ' + m.samples.after);
+    if (m.changePoint) parts.push('change point: sample ' + m.changePoint.index + ' (' + m.changePoint.direction + ')');
+    showModal({
+      title: 'Attribution — ' + String(m.metric || ''), icon: 'perf',
+      message: String(m.summary || ''),
+      detail: parts.join(' · '),
+      buttons: [{ label: 'Close', primary: true }]
+    });
+  }
+
+  // ---------- .idea import (migration threshold 2) ----------
+  function importIdeaConfigs() {
+    BRIDGE.send({ kind: 'importIdea' });
+  }
+  function applyIdeaImport(m) {
+    if (m.missing) { toast('No .idea folder in ' + m.root); return; }
+    LAST_SDK = m.projectSdk || LAST_SDK;
+    var cfgs = m.configurations || [];
+    if (!cfgs.length) {
+      toast('No run configurations in .idea' + (m.warnings && m.warnings.length ? ' (' + m.warnings.length + ' warning)' : ''));
+      return;
+    }
+    var taken = {};
+    RUN_CONFIGS.forEach(function (c) { taken[c.name] = true; });
+    var added = 0;
+    cfgs.forEach(function (c) {
+      if (taken[c.name]) return;
+      taken[c.name] = true;
+      RUN_CONFIGS.push({ name: c.name, path: c.script, params: c.parameters || '', workdir: c.workdir || '', env: c.env || {} });
+      added++;
+    });
+    savePrefs({ runConfigs: RUN_CONFIGS });
+    renderCfgLabel();
+    toast('Imported ' + added + ' run configuration' + (added === 1 ? '' : 's') +
+      (m.projectSdk ? ' · SDK ' + m.projectSdk : ''));
+  }
+
   // ---------- keyboard shortcuts ----------
   document.addEventListener('keydown', function (e) {
     // Order matters: the Alt/Ctrl combos must be tested before the bare Ctrl+S,
@@ -3731,6 +4090,15 @@ export function pyCharmClientScript(d: PanelClientData): string {
     if (e.ctrlKey && e.altKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFlame(); return; }
     if (e.ctrlKey && e.altKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); reformatCode(); return; }
     if (e.ctrlKey && e.altKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); optimizeImports(); return; }
+    // PyCharm's editor keys. Ctrl+F must win over the browser's find bar, which
+    // is why every one of these prevents the default.
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFindBar(false); return; }
+    if (e.ctrlKey && !e.altKey && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); openFindBar(true); return; }
+    if (e.ctrlKey && !e.altKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateLine(); return; }
+    if (e.ctrlKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); deleteLine(); return; }
+    if (e.ctrlKey && !e.altKey && e.key === '/') { e.preventDefault(); toggleComment(); return; }
+    if (e.ctrlKey && !e.altKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); openGotoLine(); return; }
+    if (e.ctrlKey && e.shiftKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); docCmd('redo'); return; }
     if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); openFindInFiles(); return; }
     if (e.ctrlKey && e.shiftKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveAsNative(); return; }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S') && !e.shiftKey && !e.altKey) { e.preventDefault(); saveFile(); return; }

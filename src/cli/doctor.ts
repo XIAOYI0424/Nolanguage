@@ -18,6 +18,7 @@ import { appDataPath } from '../util/appData.js';
 import { findWindowProcesses, findVisibleWindows, isAlive, readSession } from '../desktop/session.js';
 import { findEdgeBinary, webView2Version, webViewProfileDir } from '../desktop/WebViewHost.js';
 import { gitVersion, probeGit } from '../git/GitProbe.js';
+import { verifySignature, type SignatureInfo } from './signature.js';
 import { discoverBinary, probeVersion } from '../langs/discover.js';
 import type { BinaryDiscoverySpec } from '../runtimes/types.js';
 
@@ -40,6 +41,8 @@ export interface InstallReceipt {
 export interface DoctorReport {
   diagnosis: Diagnosis;
   app: { version: string; exePath: string; exeSize: number; sha256?: string; receipt?: InstallReceipt };
+  /** Authenticode state of the installed exe; absent when there is no exe. */
+  signature?: SignatureInfo;
   session: {
     serverPid?: number;
     serverAlive: boolean;
@@ -153,6 +156,9 @@ function buildHints(r: Omit<DoctorReport, 'hints'>): string[] {
   if (r.diagnosis === 'not-running') hints.push('Nolanguage is not running; launch the installed app.');
   if (r.diagnosis === 'window-missing') hints.push('the session says the server is alive but no window is visible; relaunch the app.');
   if (!r.app.receipt) hints.push('no install-receipt.json yet — the app has not started from this build.');
+  if (r.signature && r.signature.status === 'NotSigned') {
+    hints.push('the executable is not code-signed; SmartScreen warns on first run (npm run sign -- -SelfSigned for local builds).');
+  }
   if (!r.edge.path) hints.push('Edge was not found; the desktop falls back to the system browser.');
   if (!r.git.available) hints.push('git was not found; baselines/correlation degrade to "unknown".');
   if (!r.python) hints.push('Python was not discovered; Python run/LSP are unavailable.');
@@ -212,6 +218,9 @@ export async function collectDoctorReport(): Promise<DoctorReport> {
     health,
     port: { port, open: portOpen, healthy: !!health },
     edge: { path: findEdgeBinary(), webview2: webView2Version() },
+    // Reading the PE header is free; the CryptoAPI check only runs when a
+    // signature blob actually exists, so an unsigned build costs nothing.
+    ...(exePath ? { signature: await verifySignature(exePath) } : {}),
     git,
     python: await toolchainVersion('python@1.0.0', ['--version']),
     go: await toolchainVersion('go@1.0.0', ['version']),
@@ -237,6 +246,10 @@ export function formatDoctor(r: DoctorReport): string {
   lines.push(`  diagnosis  ${LABEL[r.diagnosis]}`);
   lines.push(`  app        ${r.app.version} · ${r.app.exePath} (${mib(r.app.exeSize)})`);
   if (r.app.sha256) lines.push(`  sha256     ${r.app.sha256}`);
+  if (r.signature) {
+    const sig = r.signature;
+    lines.push(`  signature  ${sig.status}${sig.signer ? ` · ${sig.signer}` : ''}${sig.error ? ` (${sig.error})` : ''}`);
+  }
   if (r.app.receipt) {
     lines.push(
       `  receipt    ${r.app.receipt.version ?? '?'} · ${r.app.receipt.startedAt ?? '?'} · ${r.app.receipt.exePath ?? '?'}`,

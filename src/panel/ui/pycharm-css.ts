@@ -391,6 +391,8 @@ export const PYCHARM_CSS = `
   .dlg-field input:focus { border-color:var(--accent); }
   .dlg-field .err { font-size:11px; color:var(--error); min-height:13px; }
   .dlg-check { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-secondary); }
+  .dlg-radios { display:flex; flex-direction:column; gap:4px; margin:2px 0 4px; max-height:240px; overflow:auto; }
+  .dlg-radios .dlg-check { font-family:var(--mono); font-size:11.5px; }
   .dlg-detail { background:var(--bg-primary); border:1px solid var(--border-soft); border-radius:6px;
     padding:8px 10px; font:11.5px/1.5 var(--mono); white-space:pre-wrap; max-height:180px; overflow:auto; }
   .dlg-foot { display:flex; justify-content:flex-end; gap:8px; padding:10px 14px; border-top:1px solid var(--border-soft); }
@@ -576,4 +578,24 @@ export const PYCHARM_CSS = `
   .fnode.k-gc { background:#8a5a2b; color:#fbeee2; }
   .fnode.k-kernel { background:#2f7d6b; color:#e6fbf5; }
   .fnode:hover { outline:1px solid #fff; }
+  /* In-editor find & replace (Ctrl+F / Ctrl+H). Floats over the editor so the
+     caret and the match stay visible, the way PyCharm's bar does. */
+  .findbar { position:fixed; right:26px; top:86px; z-index:70; display:none;
+    align-items:center; gap:4px; padding:5px 6px; border-radius:6px;
+    background:var(--bg-secondary); border:1px solid var(--border);
+    box-shadow:0 6px 22px rgba(0,0,0,.28); }
+  .findbar.open { display:flex; }
+  .findbar input { height:22px; padding:0 6px; font:12px var(--mono); color:var(--text-primary);
+    background:var(--bg-primary); border:1px solid var(--border); border-radius:4px; outline:none; }
+  .findbar input:focus { border-color:var(--accent); }
+  .findbar .fb-in { width:150px; }
+  .findbar .fb-rep { width:130px; display:none; }
+  .findbar.replace .fb-rep { display:block; }
+  .findbar .fb-count { font:11px var(--mono); color:var(--text-tertiary); min-width:52px; text-align:center; }
+  .findbar .fb-btn { height:22px; min-width:22px; padding:0 6px; font:11px var(--ui);
+    color:var(--text-secondary); background:transparent; border:1px solid transparent;
+    border-radius:4px; cursor:pointer; }
+  .findbar .fb-btn:hover { background:var(--bg-hover); color:var(--text-primary); }
+  .findbar .fb-btn[data-a="all"], .findbar .fb-btn[data-a="rep"] { display:none; }
+  .findbar.replace .fb-btn[data-a="all"], .findbar.replace .fb-btn[data-a="rep"] { display:inline-block; }
 `;

@@ -454,6 +454,49 @@ export class WorkspaceService {
     this.resources.forget(id);
   }
 
+  /**
+   * Pin one language's interpreter at runtime (the migration interpreter
+   * picker).
+   *
+   * The slot is **rebuilt**, not patched: the runner and the language server are
+   * both assembled from the binary at construction time, so a half-updated slot
+   * would report the new interpreter while still executing the old one — the
+   * exact failure the picker exists to prevent. An unknown path is rejected
+   * instead of silently kept, because a typo must not look like a switch.
+   */
+  async setToolchain(
+    id: string,
+    bin: string | undefined,
+  ): Promise<{ ok: boolean; error?: string; toolchain?: string; toolchainSource?: string }> {
+    const slot = this.slots.get(id);
+    if (!slot) return { ok: false, error: `unknown language: ${id}` };
+
+    if (bin !== undefined) {
+      const clean = bin.trim();
+      if (!clean || !existsSync(clean)) return { ok: false, error: `not found: ${clean || '(empty)'}` };
+      this.opts.toolchain = { ...(this.opts.toolchain ?? {}), [id]: clean };
+    } else {
+      const next = { ...(this.opts.toolchain ?? {}) };
+      delete next[id];
+      this.opts.toolchain = next;
+    }
+
+    const lspWasUp = !!slot.lsp;
+    const code = existsSync(slot.docPath) ? await readFile(slot.docPath, 'utf8') : '';
+    await this.removeSlot(id);
+    const rebuilt = await this.addSlot(slot.manifest, code);
+    if (lspWasUp) await this.ensureLsp(id).catch(() => undefined);
+    this.kernel.logger
+      .forComponent('ide.workspace')
+      .info('Toolchain switched', { language: id, bin: rebuilt.toolchain ?? null, source: rebuilt.toolchainSource });
+    return { ok: true, toolchain: rebuilt.toolchain, toolchainSource: rebuilt.toolchainSource };
+  }
+
+  /** Current toolchain pins, for the interpreter picker's "active" marker. */
+  toolchains(): Record<string, string> {
+    return { ...(this.opts.toolchain ?? {}) };
+  }
+
   /** Resolves once every queued plugin sync has finished. */
   pluginsSynced(): Promise<void> {
     return this.syncChain.then(
