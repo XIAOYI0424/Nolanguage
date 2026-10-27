@@ -91,6 +91,12 @@ pub fn run() {
                 PageLoadEvent::Finished => {
                     loaded.store(true, std::sync::atomic::Ordering::SeqCst);
                     shell_log("page-load", "finished");
+                    // Harden *after* the page exists: `with_webview` touches
+                    // CoreWebView2 on the UI thread, and doing that from `setup`
+                    // races the browser process (the window then stays blank with
+                    // no crash dump — see the 20 s watchdog line in the log).
+                    #[cfg(windows)]
+                    harden_webview(webview);
                     let _ = webview.window().show();
                 }
             }
@@ -108,10 +114,6 @@ pub fn run() {
             {
                 match app.get_webview_window("main") {
                     Some(window) => {
-                        // Apply the WebView2 hardening (disable default context
-                        // menu, DevTools, browser accelerators, …) to the main
-                        // window. Best-effort; a failure must not stop the app.
-                        harden_webview(&window);
                         // The window is created hidden (no white flash). The page
                         // calls show() once fonts/first paint are ready, and this
                         // safety net guarantees it appears even if that never runs
@@ -213,7 +215,7 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 ///
 /// Everything is best-effort: a setting that fails must never stop the app.
 #[cfg(windows)]
-fn harden_webview(win: &tauri::WebviewWindow) {
+fn harden_webview(win: &tauri::Webview) {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
     use windows_core::Interface;
 
