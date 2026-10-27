@@ -17,7 +17,7 @@
  * and volatile), inspections profiles, and anything under `_temp`. Importing
  * editor state would make the first launch look like someone else's desktop.
  */
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { child, children, findAll, options, parseXml, type XmlNode } from '../util/xml.js';
@@ -218,13 +218,4 @@ export async function importIdeaProject(rootDir: string): Promise<IdeaImport> {
 
   result.configurations.sort((a, b) => a.name.localeCompare(b.name));
   return result;
-}
-
-/** Directory size guard used by tests: cheap existence check. */
-export async function isDirectory(p: string): Promise<boolean> {
-  try {
-    return (await stat(p)).isDirectory();
-  } catch {
-    return false;
-  }
 }

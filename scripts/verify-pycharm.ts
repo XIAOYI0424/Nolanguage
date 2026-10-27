@@ -16,6 +16,7 @@
 import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { renderPyCharmHtml, PY_PATTERN } from '../src/panel/pycharm-ui.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
@@ -156,6 +157,18 @@ function scriptBlocks(markup: string): string[] {
 check('shell: inline script parses', (() => {
   const code = scriptBlocks(html).sort((a, b) => b.length - a.length)[0] ?? '';
   try { new Function(code); return true; } catch { return false; }
+})());
+
+// The whole shell is one template literal. A backtick *inside* it — even in a
+// comment — ends the string early, and the file still "looks" fine: tsc reports
+// a parse error dozens of lines later, or the page boots half a script. This has
+// happened twice; assert it instead of relying on review.
+check('shell: no stray backtick inside the inline-script template', (() => {
+  const src = readFileSync(join(ROOT, 'src', 'panel', 'ui', 'pycharm-client.ts'), 'utf8');
+  const open = src.indexOf('return `');
+  const close = src.lastIndexOf('`;');
+  if (open === -1 || close <= open) return false;
+  return src.slice(open + 8, close).indexOf('`') === -1;
 })());
 
 // ---------------------------------------------------------- jsdom helpers
@@ -1330,7 +1343,7 @@ async function testKeymap(): Promise<void> {
   socket!.deliver({
     kind: 'ideaImport', root: '/proj', missing: false, projectSdk: 'Python 3.13 (proj)', modules: ['proj'], warnings: [],
     configurations: [
-      { name: 'web', type: 'NodeJSConfigurationType', factory: 'Node.js', script: 'web/index.js', scriptPath: '/proj/web/index.js', parameters: 'serve', workdir: '.', env: {}, source: '.run/web.xml', language: 'javascript' },
+      { name: 'web', type: 'NodeJSConfigurationType', factory: 'Node.js', script: 'web/index.js', scriptPath: '/proj/web/index.js', parameters: 'serve --port 3000', workdir: 'web', env: {}, source: '.run/web.xml', language: 'javascript' },
       { name: 'main', type: 'PythonConfigurationType', factory: 'Python', script: 'main.py', scriptPath: '/proj/main.py', parameters: '--fast', workdir: '.', env: { MODE: 'dev' }, source: '.idea/runConfigurations/main.xml', language: 'python' },
     ],
   });
@@ -1339,8 +1352,33 @@ async function testKeymap(): Promise<void> {
   const names = (prefs.runConfigs || []).map((c: any) => c.name);
   check('migration: imported configurations reach the run store', names.indexOf('web') !== -1 && names.indexOf('main') !== -1, names.join(','));
   check('migration: the script path is carried over', (prefs.runConfigs || []).some((c: any) => c.name === 'web' && c.path === 'web/index.js'));
+  const webCfg = (prefs.runConfigs || []).find((c: any) => c.name === 'web') || {};
+  check('migration: program arguments are carried over (not just the script)', webCfg.args === 'serve --port 3000', JSON.stringify(webCfg.args));
+  check('migration: the working directory is carried over', webCfg.cwd === 'web', JSON.stringify(webCfg.cwd));
   check('migration: the import is announced', /Imported \d+ run configuration/.test(q(w, '#toast')?.textContent ?? ''), q(w, '#toast')?.textContent);
   check('migration: an existing name is not duplicated', (prefs.runConfigs || []).filter((c: any) => c.name === 'main').length === 1, String((prefs.runConfigs || []).length));
+
+  // The configuration the debugger would use must actually see those args.
+  // Seeding the store and pressing Shift+F9 exercises the real path
+  // (`activeConfig` -> `normCfg` -> `debug`), not a copy of the splitter.
+  const seeded = mountPage(
+    html,
+    JSON.stringify({
+      runConfigs: [{ name: 'web', path: 'web/index.js', args: 'serve --data "C:/My Data"', cwd: 'web' }],
+      activeConfig: 'web',
+    }),
+  );
+  await settle(seeded.window);
+  fire(seeded.window, q(seeded.window, '#ta'), 'keydown', { key: 'F9', shiftKey: true });
+  await settle(seeded.window);
+  const dbg = seeded.socket!.lastSentOf('debug');
+  check(
+    'migration: the debugger receives the imported args (quotes preserved)',
+    JSON.stringify(dbg?.args) === JSON.stringify(['serve', '--data', 'C:/My Data']),
+    JSON.stringify(dbg?.args),
+  );
+  check('migration: the debugger receives the working directory', dbg?.cwd === 'web', String(dbg?.cwd));
+  seeded.window.close();
 
   w.close();
 }

@@ -32,7 +32,6 @@ tmp/
 .verify-run*
 .stdio-*
 .build-exe.*
-tests/phase1.test.ts
 .workbuddy-ai/memory/2026-10-15.md
 .workbuddy-ai/memory/2026-10-17.md
 .gitignore
@@ -44,7 +43,9 @@ tests/phase1.test.ts
 .obsidian/workspace.json
 逻辑文档/20261016_PyCharm功能差距.md
 逻辑文档/20261016_Tauri化UI架构设计.md
-docs/添加新语言指南.md
+docs/
+# Agent workspace data (memory/logs), never project source.
+.workbuddy-ai/
 项目现状报告.md
 语言插件化设计.md
 installer/build-nsis.bat

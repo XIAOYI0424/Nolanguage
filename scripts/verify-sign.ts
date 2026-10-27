@@ -12,11 +12,11 @@
  *      system exe with a self-signed certificate and confirm Windows agrees.
  *      Gated because it writes to the user's certificate store.
  */
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { hasEmbeddedSignature, readSignaturePresence, verifySignature } from '../src/cli/signature.js';
+import { clearEmbeddedSignature, hasEmbeddedSignature, readSignaturePresence, verifySignature } from '../src/cli/signature.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -57,9 +57,23 @@ check('pe: a corrupt PE offset is rejected', (() => {
   return hasEmbeddedSignature(buf) === false;
 })());
 
+// `clearEmbeddedSignature` is what `build-exe.mjs` mirrors inline (that script
+// runs without the TypeScript loader). Testing it on a real file keeps the two
+// implementations honest: if the algorithm drifts, signing breaks again.
+const peDir = mkdtempSync(join(tmpdir(), 'nlg-pe-'));
+const fakeExe = join(peDir, 'fake.exe');
+try {
+  writeFileSync(fakeExe, fakePe({ certSize: 1024 }));
+  check('pe: a synthetic signed image reads as signed', readSignaturePresence(fakeExe) === true);
+  check('clear: the certificate entry is removed', clearEmbeddedSignature(fakeExe) === true);
+  check('clear: the file then reads as unsigned', readSignaturePresence(fakeExe) === false);
+  check('clear: a second call is a no-op', clearEmbeddedSignature(fakeExe) === false);
+} finally {
+  rmSync(peDir, { recursive: true, force: true });
+}
+
 const dist = join(here, '..', 'dist', 'Nolanguage.exe');
 if (existsSync(dist)) {
-  check('pe: the real build parses', readSignaturePresence(dist) === (statSync(dist).size > 0 ? readSignaturePresence(dist) : false));
   const info = await verifySignature(dist);
   check('signature: an unsigned build reports NotSigned', info.status === 'NotSigned' || info.status === 'Valid', info.status);
 } else {

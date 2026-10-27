@@ -175,8 +175,3 @@ export function options(node: XmlNode | undefined): Record<string, string> {
   }
   return out;
 }
-
-/** Every element in the tree whose `name` attribute equals `name`. */
-export function byAttr(node: XmlNode | undefined, tag: string, attr: string, value: string): XmlNode[] {
-  return findAll(node, tag).filter((n) => n.attrs[attr] === value);
-}

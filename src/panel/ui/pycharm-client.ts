@@ -3451,6 +3451,27 @@ export function pyCharmClientScript(d: PanelClientData): string {
   // Mirrors VS Code's launch.json shape: the active configuration (not the open
   // tab) drives both Run and Debug. Every field is optional and falls back to a
   // sensible default, so old { name, path } configs keep working.
+  /**
+   * Split a PyCharm parameter string into argv.
+   *
+   * Whitespace-only splitting breaks the moment a path contains a space
+   * (--data "C:/My Data"), which is exactly what imported .idea
+   * configurations look like. Double quotes group; everything else is literal.
+   */
+  function splitArgs(s) {
+    var out = [], cur = '', quoted = false;
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === '"') { quoted = !quoted; continue; }
+      if (!quoted && (ch === ' ' || ch === '\\t' || ch === '\\n')) {
+        if (cur) { out.push(cur); cur = ''; }
+        continue;
+      }
+      cur += ch;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
   function normCfg(c) {
     c = c || {};
     return {
@@ -3458,7 +3479,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
       path: c.path || 'main.py',
       language: c.language || langOfName(c.path || 'main.py') || '',
       cwd: c.cwd || '',
-      args: Array.isArray(c.args) ? c.args : (typeof c.args === 'string' && c.args ? c.args.split(/\s+/).filter(Boolean) : []),
+      args: Array.isArray(c.args) ? c.args : (typeof c.args === 'string' && c.args ? splitArgs(c.args) : []),
       env: (c.env && typeof c.env === 'object') ? c.env : {},
       stopOnEntry: c.stopOnEntry !== false,
       request: c.request || 'launch'
@@ -3490,7 +3511,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
     function draw() {
       showModal({
         title: 'Run/Debug Configurations', icon: 'run',
-        message: 'Mirrors VS Code launch.json: the active configuration drives Run and Debug, not the open tab.',
+        message: 'Debug follows the active configuration (program, args, env, cwd); Run executes the open file.',
         buttons: [
           { label: 'Add', onClick: function () { dirty.push({ name: 'config' + (dirty.length + 1), path: 'main.py', language: '', cwd: '', args: '', env: '', stopOnEntry: true, request: 'launch' }); draw(); } },
           { label: 'Cancel', onClick: function () {} },
@@ -3499,7 +3520,7 @@ export function pyCharmClientScript(d: PanelClientData): string {
               var o = { name: c.name || 'main', path: c.path || 'main.py' };
               if (c.language) o.language = c.language;
               if (c.cwd) o.cwd = c.cwd;
-              if (c.args) o.args = String(c.args).split(/\s+/).filter(Boolean);
+              if (c.args) o.args = splitArgs(String(c.args));
               if (c.env) {
                 var envObj = {};
                 String(c.env).split(/\s+/).filter(Boolean).forEach(function (kv) {
@@ -4073,7 +4094,16 @@ export function pyCharmClientScript(d: PanelClientData): string {
     cfgs.forEach(function (c) {
       if (taken[c.name]) return;
       taken[c.name] = true;
-      RUN_CONFIGS.push({ name: c.name, path: c.script, params: c.parameters || '', workdir: c.workdir || '', env: c.env || {} });
+      // args/cwd are the names the run/debug pipeline actually reads
+      // (normCfg). Storing PyCharm's params/workdir here would import the
+      // configuration and then silently drop its arguments.
+      RUN_CONFIGS.push({
+        name: c.name,
+        path: c.script,
+        args: c.parameters || '',
+        cwd: c.workdir && c.workdir !== '.' ? c.workdir : '',
+        env: c.env || {}
+      });
       added++;
     });
     savePrefs({ runConfigs: RUN_CONFIGS });

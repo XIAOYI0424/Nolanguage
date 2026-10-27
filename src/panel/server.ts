@@ -1532,7 +1532,12 @@ async function handleDebug(
       ? msg.args.split(/\s+/).filter(Boolean)
       : [];
   const cfgEnv = msg.env && typeof msg.env === 'object' ? (msg.env as Record<string, string>) : undefined;
-  const cfgCwd = typeof msg.cwd === 'string' && msg.cwd ? msg.cwd : undefined;
+  // A debug adapter's `cwd` must be absolute — debugpy/dlv spawn the target with
+  // it verbatim. Imported `.idea` configurations carry a *project-relative*
+  // working directory (`$PROJECT_DIR$/src` -> `src`), so resolve it here rather
+  // than handing the adapter a path that does not exist.
+  const rawCwd = typeof msg.cwd === 'string' && msg.cwd.trim() ? msg.cwd.trim() : undefined;
+  const cfgCwd = rawCwd ? resolve(workspace.root, rawCwd) : undefined;
 
   const dap = new DapClient(
     kernel,
