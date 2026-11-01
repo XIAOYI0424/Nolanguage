@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.7.5 — 2026-10-27
+
+### 结构：客户端脚本拆分（P0）
+
+- `pycharm-client.ts` 从 **4,196 行单模板字符串**拆成 8 个纯 `.js` 分片（`src/panel/ui/client/00-core … 70-shell`），用 `?raw` 文本导入后由 `client-assets.ts` 按序拼接。**没有模板字面量，就没有"注释里一个反引号截断整页"这个失效模式**。
+- 拆分**逐字节等价**：改前/改后各生成一次 `pyCharmClientScript()` 输出，`cmp` 一致（200,278 bytes / 4,168 行）。插值改成 `${name}` 令牌 + 运行期替换（`split/join`，避免 JSON 里的 `$&`）。
+- 守卫升级为 5 条：分片数 6–8、磁盘分片与装配表一一对应、分片内无反引号、只允许 7 个已知令牌、装配后无残留令牌。
+
+### 结构：server.ts 按域拆分
+
+- 新增 `src/panel/handlers/`：`languages`（校验/诊断/补全/hover/markdown）、`migration`（解释器 + `.idea` + pin 持久化）、`attribution`（阶段 11）、`plugins`（插件页 payload + 扫描根）。`server.ts` **1,810 → 1,424 行**，`main()` 未动（避免动闭包）。
+
+### CI 入库
+
+- `.github/workflows/ci.yml` 之前被 `.gitignore` 排除，现在入库并拆成两个作业：
+  - `pure`（约 2 分钟）：`tsc` + `vitest` + `verify-all --pure`（10 个不需要服务器/工具链/浏览器/exe 的套件）；
+  - `integration`（依赖 `pure`）：构建 exe → 全量套件 → 构建安装包 → 静默安装 + `/health` 冒烟 → 卸载校验 → 可选 Tauri 打包。
+- `verify-all` 新增 `--pure` / `--skip-exe` / `--only <substr>` 过滤。
+
+### 纯函数进 vitest
+
+- `tests/pure.test.ts`：38 个用例覆盖归因（t 分布 / welch / cohen / cusum / verdict / 二分）、解释器选择与发现、XML、启动握手、`.idea` 导入。`npm test` 从 9 → 38 用例，秒级反馈。
+
+### 阶段 11 接进 /perf
+
+- `/perf` 选中指标后出现 `explain change`：向引擎发 `attribute`，在趋势图下方渲染判定卡片（verdict / 置信度 / 相对变化 / p / Cohen's d / 样本数 / 变点位置），可 dismiss。6 条断言守住"页面真的会发这个消息、真的显示证据而不只是一句话"。
+
+### WebView2 / Tauri：正式搁置
+
+- `webView2Version()` 增加 **per-user 安装路径**（`%LOCALAPPDATA%\Microsoft\EdgeWebView\Application`），否则按用户安装的新运行时会看不见。
+- 升级运行时失败且原因明确：本机运行时 **143.0.3650.139 为机器级安装**，当前会话非管理员；Evergreen bootstrapper 与 204.9 MiB 离线独立安装包都返回 **`0x80040828`（已安装、无权限替换）**。
+- 用 `src-tauri/examples/probe.rs`（最小 wry 探针：一个窗口 + 内联 `data:` 页面，无 IPC / 无配置 / 无 hardening）做对照实验：**WebView2 能拉起 13 个宿主进程，但页面永远加载不完**；`--disable-gpu`、`--no-sandbox`、`--disable-dev-shm-usage` 均无效。结论：**故障在环境（运行时 143），不在我们的壳**。
+- 决定：**Tauri 桌面壳正式搁置**（代码保留、不发布、不投入），桌面形态继续用 Edge `--app`。解除条件见 `docs/Tauri搁置说明.md`：管理员权限升级 Evergreen 运行时，或随包携带 fixed-version 运行时（+150MB）。
+
+### 验证
+
+- `verify-all`：**1616/1616，35 套件，0 失败**；`tsc` 0 错误；`npm test` 38/38。
+- `verify-pycharm` 246/246（含 5 条拆分守卫）；`check-perf-html` 53/53（含 6 条归因断言）；`verify-webview` 51/51。
+- 纯逻辑闸门（CI 第一作业）：10 套件全绿，约 2 分钟。
+
+## 0.7.4 — 2026-10-27
+
+### 体检修复
+
+- **`.idea` 导入丢参数**：导入存的是 `params`/`workdir`，而运行/调试读的是 `args`/`cwd` → 参数与工作目录被静默丢弃。改存 `args`/`cwd`，并加引号感知的 `splitArgs`（`--data "C:/My Data"` 不再被拆碎）。
+- **相对 cwd 指向不存在目录**：调试 `cwd` 直接透传给 DAP，`.idea` 的 `$PROJECT_DIR$/src` 会失败。服务端改为按 `workspace.root` 解析。
+- **单测文件未入库**：`tests/phase1.test.ts` 在 `.gitignore` 里，新克隆跑 `npm test` 没有测试。移出忽略并入库；`docs/`、`.workbuddy-ai/` 加入忽略。
+- 删除死代码 `ideaImport.isDirectory`、`xml.byAttr`；给 `clearEmbeddedSignature` 补真实文件测试（`build-exe` 内联版本的对偶实现）。
+- `verify-pycharm` 增加"模板内不得有反引号"守卫（同类事故已两次）。
+- 版本 0.7.3 → 0.7.4；全量 1606/1606。
+
 ## 0.7.3 — 2026-10-27
 
 ### 代码签名

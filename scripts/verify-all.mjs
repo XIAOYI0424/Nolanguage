@@ -25,27 +25,29 @@ const NODE_FLAGS = [
 const stages = [
   { name: 'Stage 1 · minimal kernel', script: 'scripts/verify-stage1.ts' },
   { name: 'Stage 2 · dev panel (WebSocket + UI)', script: 'scripts/verify-panel.ts' },
-  { name: 'Stage 2 · panel UI self-containment', script: 'scripts/check-panel-html.ts' },
-  { name: 'Stage 2 · LSP log collector parsing', script: 'scripts/test-logcollector.ts' },
+  { name: 'Stage 2 · panel UI self-containment', script: 'scripts/check-panel-html.ts', pure: true },
+  { name: 'Stage 2 · LSP log collector parsing', script: 'scripts/test-logcollector.ts', pure: true },
   { name: 'Stage 3 · Python + pyright closed loop', script: 'scripts/verify-stage3.ts' },
   { name: 'Stage 4 · Python workspace (backend)', script: 'scripts/verify-ide.ts' },
   { name: 'Workspace · PyCharm shell (mount + self-containment)', script: 'scripts/verify-pycharm.ts' },
   { name: 'MCP · client (config + stdio lifecycle)', script: 'scripts/verify-mcp.ts' },
-  { name: 'Doctor · diagnostics (pure)', script: 'scripts/verify-doctor.ts' },
+  { name: 'Doctor · diagnostics (pure)', script: 'scripts/verify-doctor.ts', pure: true },
   // Launch-time build handshake: liveness is not identity. A freshly installed
   // exe that finds the *previous* build on 7310 must replace it, not exit.
-  { name: 'Desktop · version handshake', script: 'scripts/verify-handshake.ts' },
+  { name: 'Desktop · version handshake', script: 'scripts/verify-handshake.ts', pure: true },
   // P1 migration thresholds: interpreter discovery + `.idea` run configurations.
-  { name: 'Migration · interpreter + .idea import', script: 'scripts/verify-migration.ts' },
+  { name: 'Migration · interpreter + .idea import', script: 'scripts/verify-migration.ts', pure: true },
   // Stage 11: CUSUM + Welch t + Cohen's d + bisect.
-  { name: 'Stage 11 · attribution engine', script: 'scripts/verify-attribution.ts' },
+  { name: 'Stage 11 · attribution engine', script: 'scripts/verify-attribution.ts', pure: true },
   // Code signing: PE header read, script wiring, doctor report.
-  { name: 'Release · code signing', script: 'scripts/verify-sign.ts' },
-  { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts' },
+  { name: 'Release · code signing', script: 'scripts/verify-sign.ts', pure: true },
+  // Debug observatory (M0): protocol/serializer/sampler + a real Python probe.
+  { name: 'Debug · observatory (protocol + channel)', script: 'scripts/verify-debugtool.ts' },
+  { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.
-  { name: 'Plugins · page self-containment', script: 'scripts/check-plugins-html.ts' },
-  { name: 'Profile · flamegraph page self-containment', script: 'scripts/check-profile-html.ts' },
+  { name: 'Plugins · page self-containment', script: 'scripts/check-plugins-html.ts', pure: true },
+  { name: 'Profile · flamegraph page self-containment', script: 'scripts/check-profile-html.ts', pure: true },
   // script-host OS-level memory cap: human-string parsing, env-wins-over-
   // manifest precedence, the 256MB default, and the [64MB, 4GB] clamp.
   { name: 'Runtimes · script-host memory cap', script: 'scripts/verify-script-host.ts' },
@@ -135,7 +137,27 @@ function run(script, env = {}) {
 const summary = [];
 let failed = 0;
 
-for (const [i, stage] of stages.entries()) {
+// Filters, so CI can run the fast gate before the expensive one.
+//   --pure        suites that need no server, toolchain, browser or exe
+//   --skip-exe    everything that does not require dist/Nolanguage.exe
+//   --only <s>    substring match on the suite name
+const argv = process.argv.slice(2);
+const onlyIdx = argv.indexOf('--only');
+const only = onlyIdx >= 0 ? argv[onlyIdx + 1] : undefined;
+const pureOnly = argv.includes('--pure');
+const skipExe = argv.includes('--skip-exe');
+const selected = stages.filter((stage) => {
+  if (only && !stage.name.toLowerCase().includes(String(only).toLowerCase())) return false;
+  if (pureOnly && !stage.pure) return false;
+  if (skipExe && stage.requiresExe) return false;
+  return true;
+});
+if (pureOnly || skipExe || only) {
+  console.log(`  filter: ${selected.length}/${stages.length} suites` +
+    (pureOnly ? ' (pure)' : '') + (skipExe ? ' (no exe)' : '') + (only ? ` (matching "${only}")` : ''));
+}
+
+for (const [i, stage] of selected.entries()) {
   console.log(`\n${'='.repeat(72)}\n  ${stage.name}\n${'='.repeat(72)}`);
   if (stage.requiresExe && !existsSync(join(root, 'dist', 'Nolanguage.exe'))) {
     console.log('  SKIP  dist/Nolanguage.exe not built (run build-to-exe.bat)');

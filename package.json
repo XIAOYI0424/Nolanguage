@@ -1,6 +1,6 @@
 {
   "name": "nolanguage",
-  "version": "0.7.4",
+  "version": "0.7.6",
   "private": true,
   "type": "module",
   "description": "Unified multi-language dev & execution platform — stages 1–6: minimal kernel (three buses + performance & log spines), live dev panel (WebSocket + UI), a Python + LSP closed loop (RPC instrumentation + LSP log collection), an interactive multi-language workspace (write, run, check, complete), Go support (toolchain discovery + GoRunner + gopls), and a baseline system (git commit 打点 + SQLite warm tier + long-term metric baselines).",
@@ -41,6 +41,7 @@
     "verify:migration": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-migration.ts",
     "verify:attribution": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-attribution.ts",
     "verify:sign": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-sign.ts",
+    "verify:debugtool": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-debugtool.ts",
     "sign": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/sign.ps1",
     "sign:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/sign.ps1 -Verify",
     "build:sign": "npm run build:exe && npm run build:setup && npm run sign -- -SelfSigned",
