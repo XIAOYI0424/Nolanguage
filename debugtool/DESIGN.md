@@ -1,7 +1,21 @@
 # 实时调试观测台（Debug Observatory）设计方案
 
-> 版本 0.1 · 2026-11-01 · 状态：设计已定，M0 骨架已落地
+> 版本 0.2 · 2026-11-01 · 状态：M0 + M1 已交付，**独立应用形态**
 > 目标读者：维护这个仓库的人（不是评审委员会）
+
+---
+
+## 零、交付形态：独立应用（0.7.7 决定）
+
+这个工具**不是** IDE 里的一个页面，而是独立软件：
+
+- 入口是命令行 `ndebug <script.py>`，产物是 `dist/NDebug.exe`（Node SEA 单文件，约 84 MB，零依赖）；
+- 界面是它自己起在 `127.0.0.1:<port>` 上的自包含页面，跟着目标程序生灭；
+- Nolanguage 内置的那套调试保持"基础"不变（断点/单步/变量面板走 DAP），两者**互不依赖**：ndebug 不 import 面板、面板不 import ndebug。
+
+理由：观测台的价值在于"随时开着"。绑在 IDE 上意味着必须先开 IDE、先打开项目；独立 CLI 意味着 `ndebug app.py` 一行就能看，也能挂在别人的脚本里。
+
+代价：多一个 84 MB 的产物、多一条发布链。接受。
 
 ---
 
@@ -229,11 +243,11 @@ type SNode =
 
 | 里程碑 | 内容 | 验收（可测） |
 |---|---|---|
-| **M0**（已做） | 目录、方案、`protocol`/`serializer`/`sampler` 纯逻辑 + 套件 + Python 通道探针 | 套件全绿；探针能把真实 Python 进程的栈写到 NDJSON |
-| M1 | Python agent 完整（栈+快照+监视）、`/debug` 页面骨架、WS 接入 | 页面能看示例程序的热栈；监视表达式变化可见 |
+| **M0**（已交付） | `protocol`/`serializer`/`sampler` 纯逻辑 + 套件 + Python 通道探针 | 36/36；探针把真实 Python 进程的栈写到 NDJSON |
+| **M1**（已交付） | 完整 Python agent（栈 + 实时局部变量 + 监视 + 按需快照 + 异常）、`session`、三栏页面、WS 接入、**独立 CLI + 单文件 exe** | 33/33 端到端：attach → 热栈 → 局部变量 → 页面加 watch 拿到真实值 `3` |
 | M2 | JS agent（inspector 窗口采样）、快照 diff | JS 示例同样可见；diff 正确标出 `+ - ~` |
-| M3 | Go（编译期 agent 或明确降级）、异常流、perf traceId 互跳 | Go 要么有栈要么有明确的"不支持"提示 |
-| M4 | 限额/背压/脱敏收口、文档、`nlg debugtool <script>` 一行启动 | 100 MB 对象不炸；`redact` 生效；CLI 可用 |
+| M3 | Go（编译期 agent 或明确降级）、perf traceId 互跳 | Go 要么有栈要么有明确的"不支持"提示 |
+| M4 | 大对象压测、脱敏白名单配置、会话录制回放 | 100 MB 对象不炸；`redact` 可配；`.ndlog` 能回放 |
 
 **M1 的验收线是硬的**：用 `debugtool/samples/py/app.py`（含递归结构 + 慢函数 + 循环引用），页面必须能同时显示"热栈前三"和"该栈的局部变量"，且 60 秒内引擎 RSS 增长 < 30 MB。
 
@@ -260,14 +274,21 @@ type SNode =
 
 ---
 
-## 十二、下一步（等你点头）
+## 十二、已交付与下一步
 
-M1 的实现顺序（每步都能独立验证）：
+M1 实际交付的内容（与上面的计划有两处偏差，都是对的）：
 
-1. `session.ts`：监听 + 握手 + 环形缓冲（先不接页面，用 `scripts/verify-debugtool.ts` 驱动）
-2. `agents/python/agent.py`：栈采样 + 快照 + 监视（对着 `samples/py/app.py` 跑）
-3. `debugtool-ui.ts` + `debug-app.js`：三栏骨架，先只接"热栈"
-4. WS 接入 `/debug` 路由 + 广播
-5. 套件扩到端到端（起 Python 进程 → 页面数据可见）
+1. `session.ts` —— 监听 + token 握手 + 环形缓冲 + 按需聚合（页面拿到的是折叠后的视图，不是原始样本流）。
+2. Python agent —— 栈、实时局部变量、监视、按需快照、异常钩子。
+3. `ui.ts` + `assets/debug-app.js` —— 三栏页面（Watch / Live stacks / Inspector）。
+4. `main.ts`（库）+ `cli.ts`（入口）+ `build-ndebug.mjs`（单文件 exe）。
 
-如果只做一件事，就做 1+2：**通道和 agent 通了，页面只是画图**。
+**偏差一**：原计划把页面挂在 Nolanguage 的 `/debug` 路由上；改成了独立应用（见第零节）。
+**偏差二**：原计划监视只在"最内层帧"求值；实测发现 `order.items` 在 `work()` 里会 `NameError`，改成**沿调用链合并命名空间**（内层优先）——这才是用户对"变量"的直觉。
+
+下一步（按价值排序）：
+
+1. **JS agent**（inspector 500 ms 窗口）——覆盖前端与 Node 项目，是最大的一块空白。
+2. **快照 diff** —— 两次快照之间哪些字段变了，回归排查时最有用。
+3. **大对象压测** —— 现在有预算截断，但没测过"真的喂 100 MB"的端到端表现。
+4. **会话录制** —— 把 NDJSON 落盘，事后回放；崩溃现场只能靠它。

@@ -1,54 +1,178 @@
-# debugtool — 实时调试观测台
+# ndebug — 实时调试观测台
 
-跑着的程序里正在发生什么：调用栈、数据结构、变量。不停程序。
+看**正在跑**的程序：调用栈、局部变量、任意表达式的值。不停程序、不加断点、不改代码。
 
-> 设计见 [DESIGN.md](./DESIGN.md)。这里是"怎么用/现在到哪一步"。
+```
+ndebug app.py
+```
 
-## 现在能做什么（M0）
+一行命令，浏览器打开一个三栏观测台，程序照常运行、照常输出。
 
-- `src/debugtool/` 里的三块纯逻辑已经可用且有测试：协议（NDJSON v1）、安全序列化（深度/宽度/循环/脱敏/不调用 getter）、采样聚合（热栈 + 卡顿窗口）。
-- **注入通道已打通并实测**：一个普通 Python 程序，只加 `PYTHONPATH` 和两个环境变量，就会把主线程的栈以 10 Hz 推到本机 socket；程序自己的 stdout 完全不受影响。
+---
 
-还没做（M1 起）：`/debug` 页面、快照与监视的 agent 侧、JS/Go agent。见 DESIGN.md 第九节。
+## 它和普通调试器不一样的地方
 
-## 自己验一遍
+| | 普通调试器（pdb / debugpy / DAP） | ndebug |
+|---|---|---|
+| 看栈 | 停在断点上才能看 | **一直在看**，10 次/秒 |
+| 看变量 | 停下才刷新 | **实时刷新**（局部变量 2 次/秒） |
+| 影响程序 | 停下、单步、改变时序 | 只采样，程序继续跑 |
+| 适合 | "这里为什么错了" | "它现在到底在干什么" |
+
+它不是替代调试器，是补上调试器**没有的那个视角**：程序不中断的时候，时间花在哪、变量在怎么变。
+
+---
+
+## 快速开始
 
 ```bash
-# 纯逻辑 + 真实进程（约 3 秒）
-npm run verify:debugtool
+# 1. 观测示例程序（自带：嵌套调用 + sleep + 循环引用 + 密钥字段）
+ndebug debugtool/samples/py/app.py -- 80
+
+# 2. 观测你自己的程序
+ndebug /path/to/app.py
+
+# 3. 换个端口 / 采样率，不自动开浏览器
+ndebug app.py --port 7400 --hz 20 --no-open
 ```
 
-看单条通道是否通（不经过套件）：
+`--` 之后的一切原样传给被观测的程序（上例里 `80` 是示例的循环次数）。
+
+首次使用不用构建：`ndebug` 会优先用 `dist/NDebug.exe`，没有就从源码跑。
+
+### 打包成独立 exe
 
 ```bash
-# 1. 起一个监听端（随便什么能收 TCP 的都行，这里用 node）
-node -e "require('net').createServer(s=>{s.setEncoding('utf8');s.on('data',d=>process.stdout.write(d))}).listen(7391,'127.0.0.1',()=>console.log('listening'))"
-
-# 2. 另开一个终端，用探针注入示例程序
-cd debugtool/samples/py
-PYTHONPATH=../../probes NLG_DEBUG_PORT=7391 NLG_DEBUG_TOKEN=dev NLG_DEBUG_HZ=10 python -u app.py
+npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 ```
 
-第一行应该是 `hello`，之后每 100 ms 一行 `stack`，里面能看到 `main > work > step` 这样的帧。
+单文件、零依赖，目标机器只要有 Python 就能观测 Python 程序。
 
-## 目录
+---
+
+## 界面怎么读
 
 ```
-debugtool/
-  DESIGN.md                     方案（含协议、限额、里程碑、风险）
-  README.md                     本文件
-  samples/py/app.py             示例目标：嵌套调用 + sleep + 循环引用 + 密钥字段
-  probes/nlg_agent_probe.py     M0 探针 agent（栈采样）
-  probes/sitecustomize.py       注入点（解释器启动即执行）
-src/debugtool/                  引擎（要进 exe，所以放在 src 内）
-  protocol.ts                   线上格式 + 校验
-  serializer.ts                 安全序列化
-  sampler.ts                    热栈 / 卡顿
-scripts/verify-debugtool.ts     套件
+┌────────────────┬──────────────────────────┬──────────────────────┐
+│ Watch          │ Live stacks              │ Inspector            │
+│                │                          │                      │
+│ order.items[0] │ <module>›main›work  62%   │ dict                 │
+│   Item{2}      │ ████████████             │  order: Order        │
+│                │ main›work›sleep     38%  │   id: 12             │
+│ [snapshot]     │ ███████                  │   items: list[3]     │
+│                │                          │    ▸ [0] Item        │
+│ Exceptions     │ 3 stalls                 │    … 38 more         │
+└────────────────┴──────────────────────────┴──────────────────────┘
 ```
 
-## 三条硬规则（改动前先读）
+**左栏 Watch** —— 你输入的表达式，实时求值。
 
-1. **观测不能拖慢或搞崩被测程序**：agent 里任何异常都必须吞掉；采样率与深度都有上限。
-2. **不执行用户代码**：序列化只读数据描述符，`__repr__`/`toString`/getter 一律不调；只有用户手动添加的监视表达式才求值。
-3. **省略必须可见**：截断要说原因（depth/size/unsupported/redacted），并给出被省略的数量。
+- 输入框回车即可添加，`×` 删除。
+- 求值发生在**被观测程序的调用链**上（不是最内层帧），所以程序在 `work()` 里时，`order.items` 依然能取到 `main()` 里的 `order`。
+- 表达式出错不会中断任何东西，红字显示错误类型。
+- `snapshot` 按钮 = 立刻抓一次当前可见变量（不依赖采样节奏）。
+
+**中栏 Live stacks** —— 采样出来的调用栈，按占比排序。
+
+- 每行是一次**折叠后的栈**（函数名路径），百分比 = 该栈占全部采样的比例，可以直接和火焰图对照。
+- 黄色进度条 = 这段栈**连续出现了 0.5 秒以上**（卡住了，或者在等 IO）。
+- 底部 `N stalls` 列出每次卡顿的时长。
+- 点一行可以选中（用于对照右栏）。
+
+**右栏 Inspector** —— 结构化地看一个值。
+
+- 展开/折叠树节点；`[getter]`、`[depth]`、`[size]`、`[redacted]` 是**明确的截断标记**，不是"这里没有东西"。
+- `↺ $` 表示循环引用回到某个路径——对象里真的有个环，不是显示错误。
+- 末尾 `… 38 more` 表示被省略的数量。
+
+**页脚** —— 观测台自己的开销：连接状态、目标、pid、实际采样率、丢弃计数。**观测工具必须承认自己的成本。**
+
+---
+
+## 它是怎么做到的
+
+```
+你的程序 ──(进程内 agent)──TCP 127.0.0.1──> 引擎 ──WebSocket──> 页面
+```
+
+- **注入不改代码**：Python 解释器启动时会自动 import `sitecustomize`。ndebug 把 agent 写进临时目录，用 `PYTHONPATH` 指过去——argv、`__main__`、源码全都不动。
+- **采样不是插桩**：后台线程每 100 ms 读一次主线程的栈（`sys._current_frames()`）。固定开销，不会因为程序逻辑变复杂而变慢。
+- **独立通道不是 stdout**：程序自己的输出通道必须干净，所以走 loopback TCP + 一次性 token。
+- **序列化不执行代码**：只读 `__dict__`/`__slots__`/内置容器，绝不调 `repr()`、property、`__getattr__`。名字里带 `token`/`secret`/`password` 的字段在**离开进程之前**就被替换成 `[redacted]`。
+
+完整设计（协议、限额、里程碑、风险）在 [DESIGN.md](./DESIGN.md)。
+
+---
+
+## 安全与限额
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| 监听 | 只 `127.0.0.1` | 不做远程调试 |
+| 握手 | 32 位 hex 一次性 token | 同机其它进程不能随便连 |
+| 采样 | 默认 10 Hz，可 `--hz` 1–100 | 观测开销可见、可控 |
+| 栈深 | 12 帧 | 够用，且传输量恒定 |
+| 序列化 | 深 6 / 宽 50 / 单串 512 字符 / 总节点 4000 | 一个巨大对象不该拖死程序 |
+| 局部变量 | 每次最多 24 个名字，2 Hz | 变量多的函数不会刷屏 |
+| 表达式 | **只执行你手动输入的** | 不自动跑任何线上来的东西 |
+| 脱敏 | token/secret/password/apikey/... | 在进程内完成，不依赖 UI 遮挡 |
+
+**注意**：监视表达式是 `eval`，它会**真的执行代码**。写 `x.append(1)` 就会改变程序状态。工具不阻止你，但你需要知道。
+
+---
+
+## 现在支持什么
+
+| 语言 | 状态 |
+|---|---|
+| Python | 已支持：栈 / 局部变量 / 监视 / 按需快照 / 异常 |
+| JavaScript | 计划中（需要 inspector 窗口采样，会有间隙，界面会标注） |
+| Go | 需要编译期 agent；在此之前明确提示"用 /profile" |
+
+不支持的语言会**直接拒绝**并说明原因，不会"挂上去但什么都不显示"。
+
+---
+
+## 排查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 页脚 `waiting for agent` | agent 没连上 | 看终端：程序是否启动失败？`PYTHONPATH` 是否被程序自己覆盖了？ |
+| `rejected` | token 不匹配或协议版本不符 | 通常是端口被别的进程占了；换 `--port` |
+| 中栏一直空 | 程序在 agent 启动前就结束了 | 程序要活过 ~200 ms 才有样本 |
+| 采样率远低于设定 | 程序在 GIL 上长时间占用 | 正常现象；降低 `--hz` 反而更稳 |
+| `dropped` 在涨 | 事件产生快于消费 | 降低 `--hz` |
+
+---
+
+## 开发
+
+```bash
+npm run verify:debugtool   # 协议 / 序列化 / 采样聚合 + 真实进程通道（36 条）
+npm run verify:ndebug      # 会话 / 页面 / 端到端 attach + watch（33 条）
+npm run build:ndebug       # 打 dist/NDebug.exe
+```
+
+目录：
+
+```
+debugtool/                     门面：设计、说明、示例、探针
+src/debugtool/                 应用代码
+  protocol.ts                  线上格式（NDJSON v1）+ 校验
+  serializer.ts                安全序列化（TS 侧规范实现）
+  sampler.ts                   热栈折叠 / 卡顿检测
+  session.ts                   一个被观测程序：socket + 环形缓冲 + 聚合
+  ui.ts                        自包含页面
+  assets/debug-app.js          页面逻辑（Vue 3，内联）
+  agents/python/               注入的 agent（文本内嵌进 exe）
+  main.ts                      库：startDebugApp()
+  cli.ts                       唯一入口：ndebug 命令行
+scripts/build-ndebug.mjs       单文件 exe 构建
+scripts/verify-{debugtool,ndebug}.ts
+```
+
+三条不能破的规则：
+
+1. **观测不能拖慢或搞崩被测程序**——agent 里所有异常都吞掉，限额全有上限。
+2. **不执行用户代码**——除了用户手写的表达式；序列化只读数据。
+3. **省略必须可见**——截断要说原因、给数量，不能让 UI 撒谎。

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.7.7 — 2026-11-01
+
+### 新应用：ndebug（实时调试观测台，独立软件）
+
+把 debugtool 的设计做成了**独立应用**，不是 IDE 的一个页面。Nolanguage 内置调试保持基础（DAP：断点/单步/变量），ndebug 补的是另一个视角：**程序不中断的时候在做什么**。
+
+- 入口：`ndebug app.py`（`ndebug.cmd` / `ndebug` 启动器；优先 `dist/NDebug.exe`，没有则从源码跑）。
+- 产物：`npm run build:ndebug` → `dist/NDebug.exe`，Node SEA 单文件 **83.6 MiB**，零第三方依赖，保留控制台（它要打印 URL 和程序输出）。
+- 三栏页面（自包含，Vue 内联）：
+  - **Watch**：用户输入的表达式实时求值 + 变化历史 + 错误红字；
+  - **Live stacks**：折叠后的热栈 + 占比条 + 卡顿（连续 ≥0.5s）标记 + 卡顿列表；
+  - **Inspector**：结构化值树（展开/折叠、循环引用 `↺`、`[depth]/[size]/[redacted]` 明确截断、`… N more`）。
+- Python agent：栈采样（默认 10 Hz）、**实时局部变量**（2 Hz）、监视表达式、按需快照、未捕获异常钩子。
+- 注入方式：`sitecustomize.py` + `PYTHONPATH`——不改 argv、不改 `__main__`、不改源码；agent 源码以文本内嵌进 exe，运行时写入临时目录。
+- 通道：loopback TCP + 32 位一次性 token；握手校验失败即断开。
+- 安全：序列化只读 `__dict__`/`__slots__`/内置容器（不调 `repr()`/property/`__getattr__`）；名字含 token/secret/password 的字段**在进程内**脱敏；深 6 / 宽 50 / 串 512 / 节点 4000 硬上限。
+
+**两个实测发现并修掉的问题**
+
+- 监视表达式原先只在**最内层帧**求值：程序停在 `work()` 里时，`order.items` 必然 `NameError`（`order` 在 `main()` 的帧里）。改成沿调用链合并命名空间（内层优先），这才是用户对"变量"的直觉。
+- 启动瞬间采到的是 **agent 自己**（`sitecustomize > boot > start > wait`），会霸占"最热栈"。现在这类样本直接丢弃——"还没有数据"是诚实的，"agent 是最热路径"不是。
+
+**其它**
+
+- `WebSocketServer` 增加 `broadcast()`（逐连接隔离，一个半关闭的客户端不会打断整轮广播）。
+- 新增套件 `Debug · observatory app (ndebug)` 33 条（会话 / 页面 / 端到端 attach + watch）；`verify-all` 增至 37 套件。
+
+### 验证
+
+- `verify-ndebug` **33/33**：真实 Python 进程 attach → 热栈 → 实时局部变量 → 页面加 `len(order.items)` 拿到 `3`。
+- `verify-debugtool` 36/36；`verify-all` **1708/1708 · 37 套件**全绿；`tsc` 0 错误。
+
+## 0.7.6 — 2026-11-01
+
+### 实时调试观测台：设计与 M0
+
+- `debugtool/DESIGN.md`：补 DAP / profiler 之间的空档——程序跑着的时候在做什么。采样而非插桩（10 Hz，<1% 开销）；loopback TCP 而非 stdout；Python 用 `sitecustomize` + `PYTHONPATH` 注入；JS 计划 `--require` + inspector 窗口；Go 编译期（在此之前明确降级）。
+- `src/debugtool/`：`protocol.ts`（NDJSON v1，版本不符致命 / 未知类型丢弃不致命 / 256 KiB 上限）、`serializer.ts`（只读数据描述符、循环检测、序列化前脱敏、节点预算硬截断）、`sampler.ts`（热栈折叠 + 卡顿窗口 + 实测采样率）。
+- `debugtool/probes/` + `samples/py/app.py`：真实 Python 进程 10 Hz 上报主线程栈，程序 stdout 不受影响。
+- `npm run verify:debugtool` 36/36。
+
 ## 0.7.5 — 2026-10-27
 
 ### 结构：客户端脚本拆分（P0）

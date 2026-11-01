@@ -372,6 +372,22 @@ export class WebSocketServer extends EventEmitter {
     });
   }
 
+  /**
+   * Send one text frame to every connected client.
+   *
+   * A dead client must not stop the rest: each send is isolated, because one
+   * half-closed socket otherwise turns every broadcast into a partial update.
+   */
+  broadcast(data: string): void {
+    for (const c of this.connections) {
+      try {
+        c.send(data);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   async close(): Promise<void> {
     if (this.pingTimer) clearInterval(this.pingTimer);
     for (const c of this.connections) c.close(1001, 'server shutting down');

@@ -7,8 +7,9 @@ Deliberately contains the four things the tool has to survive:
   - a cycle        order.parent is order        (serializer must not hang)
   - a secret       api_token                    (redaction before it leaves the process)
 
-Run it under the observatory, or plainly: `python -u app.py`.
+Run it under the observatory, or plainly: `python -u app.py [rounds]`.
 """
+import sys
 import time
 
 
@@ -47,9 +48,17 @@ def work(rounds):
 
 
 def main():
+    # Rounds are an argument so the observatory can keep the program alive long
+    # enough to poke at it: `python app.py 60` runs for ~3 s.
+    rounds = 20
+    if len(sys.argv) > 1:
+        try:
+            rounds = max(1, int(sys.argv[1]))
+        except ValueError:
+            pass
     order = Order(12)
     order.parent = order  # cycle
-    total = work(20)
+    total = work(rounds)
     print("total", total, "items", len(order.items), "token-prefix", order.api_token[:3])
 
 

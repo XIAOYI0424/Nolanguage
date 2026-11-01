@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# ndebug - the standalone debug observatory (bash launcher).
+# Prefers the packaged binary; falls back to running the TypeScript entry.
+set -euo pipefail
+cd "$(dirname "$0")"
+if [ -x dist/NDebug.exe ]; then
+  exec ./dist/NDebug.exe "$@"
+fi
+exec node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs src/debugtool/cli.ts "$@"

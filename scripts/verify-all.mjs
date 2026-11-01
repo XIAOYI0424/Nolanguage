@@ -43,6 +43,8 @@ const stages = [
   { name: 'Release · code signing', script: 'scripts/verify-sign.ts', pure: true },
   // Debug observatory (M0): protocol/serializer/sampler + a real Python probe.
   { name: 'Debug · observatory (protocol + channel)', script: 'scripts/verify-debugtool.ts' },
+  // The standalone app: session, page, and a real attach through the CLI path.
+  { name: 'Debug · observatory app (ndebug)', script: 'scripts/verify-ndebug.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.
