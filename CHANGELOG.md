@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.8 — 2026-11-10
+
+### 仓库完整性修复（本轮最重要的一件事）
+
+`v0.7.5` 的结构性改动与 11-07 的缺陷修复**从未进入历史**——它们一直停在暂存区：
+
+- `v0.7.5`（客户端 8 分片、`server.ts` 按域拆出 `handlers/`、CI 入库、纯函数进 vitest、阶段 11 接 `/perf`）**没有对应的 commit，也没有 tag**；
+- 11-07 的三个 P0 修复（`profileResult` 重复 case、DAP 断点在 `configurationDone` 之后下发、终端 cwd 不跟随工作区）也只 `git add` 了，没有 commit。
+
+后果：`v0.7.7` 那棵树里**没有** `client-assets.ts`、`handlers/`、`ci.yml`，而 `CHANGELOG` 写着它们存在——tag 与文档不符，clone 出来跑的不是文档描述的东西，CI 也从未执行过。
+
+本轮把它们一次性补提交，并**重新对齐版本号**：0.7.7 → 0.7.8 之后，tag 与树、文档三者一致。
+
+### 修掉的三个真问题
+
+- **vitest 会静默丢测试文件**：Vite 的转换缓存默认写在系统临时目录，写失败（沙箱/策略/占用）时 vitest 只是把该文件从运行里去掉，摘要仍显示"通过"。实测出现过"1 个文件通过、另一个文件从未运行"。缓存目录改为仓库内 `.tmp/vitest`。
+- **ndebug 的 e2e 用例有竞态**：示例程序 4 秒结束，在 `verify-all` 里机器更忙时 watch 还没求值程序就退了 → 改成 20 秒目标，连跑三次稳定。
+- **Windows 上临时 agent 目录删不掉**：被 kill 的解释器会短暂持有 `sitecustomize.py`，`rmSync` 抛 EBUSY，每次运行都残留一个临时目录 → 改成带退避的重试，且清理失败不影响会话。
+
+### 清理
+
+- 移除唯一一个"声明了但零引用"的运行时依赖 `@tauri-apps/plugin-dialog`；`dependencies` 现在真的是空的。
+- 新增 `docs/README.md` 索引（7 份评估/评审/指南不再靠猜文件名找）。
+- 补 `docs/评估_20261110.md`（本轮评估）。
+
+### 验证
+
+- `verify-all`：**1731/1731 · 37 套件**；`tsc` 0；`npm test` 38/38（沙箱内外一致）。
+- 产物：`Nolanguage.exe` 92.3 MiB · `Setup.exe` 22.5 MiB · `NDebug.exe` 83.6 MiB。
+
 ## 0.7.7 — 2026-11-01
 
 ### 新应用：ndebug（实时调试观测台，独立软件）

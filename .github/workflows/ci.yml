@@ -1,0 +1,155 @@
+name: CI
+
+# Windows-first platform (Node SEA exe, system WebView2, Go discovery), so CI
+# runs on windows-latest. Python is preinstalled on that image; Go is added
+# explicitly so the packaged-exe smoke test exercises it.
+#
+# Two jobs, deliberately: the fast gate answers "is the logic still correct?"
+# in ~2 minutes, the integration job answers "does the system still work?" in
+# ~10. A single job that only runs the expensive one gets skipped by habit; a
+# single job that only runs the cheap one never tests the artifact.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Gate 1-3 — types, unit tests, and every suite that needs no server, no
+  # toolchain, no browser and no packaged exe. This is the loop a developer
+  # waits for, so it must stay short.
+  pure:
+    name: Types + unit + pure suites
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      # 10 suites: statistics, migration readers, handshake table, signing
+      # wiring, page self-containment. No ports, no spawns, no exe.
+      - name: Pure suites
+        run: node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-all.mjs --pure
+
+  # Gate 4-7 — everything that boots a server, spawns a toolchain, mounts a DOM
+  # or runs the packaged binary. Depends on `pure` so a logic failure stops the
+  # expensive work before it starts.
+  integration:
+    name: Integration + packaged exe
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: pure
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      # Runtime dependency (1) + dev toolchain (5). `npm ci` is exact and fast;
+      # package-lock.json is committed.
+      - name: Install dependencies
+        run: npm ci
+
+      # Build + DOM-test tooling, installed transiently (NOT saved to
+      # package.json): esbuild + postject build the SEA exe, jsdom drives the
+      # UI-DOM suites.
+      - name: Install build + DOM-test tools (transient)
+        run: npm install --no-save esbuild postject jsdom
+
+      # `build:exe` runs `postbuild:exe`, which mirrors dist/Nolanguage.exe into
+      # src-tauri/binaries via scripts/sync-sidecar.mjs — the shell can no
+      # longer ship a stale engine.
+      - name: Build packaged exe
+        run: npm run build:exe
+
+      - name: Verify sidecar mirror
+        run: npm run verify:sidecar
+
+      # The whole regression: kernel, panel, Python/Go loops, baseline,
+      # extension host, explorer, WebView host, PyCharm shell, Dev Panel DOM,
+      # packaged-exe smoke. The pure suites run again here on purpose — they are
+      # cheap, and a suite that passes without the exe but fails with it is
+      # exactly the regression this job exists to catch.
+      - name: Verify all suites
+        run: node scripts/verify-all.mjs --no-warnings
+
+      # Gate — the artifact users actually run: build the NSIS installer,
+      # install it silently, start the app, and probe /health.
+      - name: Build installer
+        run: npm run build:setup
+
+      - name: Silent install + health smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = 'installer/Nolanguage-Setup.exe'
+          if (-not (Test-Path $setup)) { throw "installer missing: $setup" }
+
+          # `/D` overrides InstallDirRegKey, so the target does not depend on
+          # whatever a previous install on this machine remembered. It must be
+          # the last argument.
+          $dir = Join-Path $env:RUNNER_TEMP 'nl-smoke'
+          if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+          Start-Process -FilePath $setup -ArgumentList '/S', "/D=$dir" -Wait
+
+          $exe = Join-Path $dir 'Nolanguage.exe'
+          if (-not (Test-Path $exe)) { throw "install did not produce $exe" }
+
+          # Consoleless build: no window, so probe the HTTP surface instead.
+          Start-Process -FilePath $exe -ArgumentList '--no-open'
+
+          $health = $null
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $health = Invoke-RestMethod 'http://127.0.0.1:7310/health' -TimeoutSec 2
+              if ($health.status -eq 'ok') { break }
+            } catch { }
+          }
+          if (-not $health -or $health.status -ne 'ok') { throw 'health check failed' }
+          Write-Host "health: status=$($health.status) version=$($health.appVersion) signature=$($health.build.sha256.Substring(0,12))"
+
+          Get-Process Nolanguage -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+          Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 2
+          if (Test-Path (Join-Path $dir 'Nolanguage.exe')) { throw 'uninstall left the executable behind' }
+
+      # Gate — Tauri shell package. Optional: it compiles Rust and may need to
+      # download NSIS/WiX on a cold runner, so a network hiccup must not fail the
+      # job (the NSIS package above is already verified end to end). While the
+      # WebView2 runtime question is open (see CHANGELOG 0.7.3), this gate is
+      # informational only.
+      - name: Build Tauri package (optional)
+        run: npm run tauri -- build --bundles nsis
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          if-no-files-found: warn
+          path: |
+            installer/Nolanguage-Setup.exe
+            src-tauri/target/release/bundle/nsis/*.exe

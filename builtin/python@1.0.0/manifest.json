@@ -145,6 +145,7 @@
     "serverName": "debugpy",
     "memoryHint": "60MB",
     "degradedNote": "debugpy not installed - debugging is unavailable for Python",
-    "install": "pip install debugpy"
+    "install": "pip install debugpy",
+    "supportsAttach": true
   }
 }

@@ -10,7 +10,7 @@
  *
  * Session lifecycle (mirrors what every DAP adapter expects):
  *
- *   initialize → launch → configurationDone → setBreakpoints →
+ *   initialize → launch → setBreakpoints → configurationDone →
  *   (stopped → stackTrace → scopes → variables)* → continue → disconnect
  *
  * The client only kicks off the requests that keep the adapter moving; the
@@ -58,6 +58,15 @@ export interface DapLaunch {
   adapterId: string;
   /** Extra `launch` arguments the adapter needs (program, stopOnEntry …). */
   launchArgs?: Record<string, unknown>;
+  /**
+   * Attach to an already-running target instead of launching one. DAP keeps
+   * the two apart for a reason: an attach has no program to start, no
+   * `stopOnEntry` to honour, and its arguments are a connection (port / host /
+   * processId), not a command line.
+   */
+  attach?: boolean;
+  /** Extra `attach` arguments (port, host, processId …). */
+  attachArgs?: Record<string, unknown>;
   /** Working directory for the adapter process. */
   cwd?: string;
   /** How long to wait for `initialize` before giving up. */
@@ -126,8 +135,11 @@ export class DapClient {
    * `stopOnEntry` defaults to true: a debugger that runs to completion before
    * the UI attaches is a debugger that never breaks, which is the most
    * confusing failure mode this client could have.
+   *
+   * `breakpoints` (optional) are sent before `configurationDone`, since the
+   * adapter does not start the target until that request arrives.
    */
-  async start(): Promise<DapCapabilities> {
+  async start(breakpoints?: { file: string; lines: number[] }): Promise<DapCapabilities> {
     const log = this.kernel.logger.forComponent('dap.client');
     this.running = true;
     const child = spawn(this.opts.command, this.opts.args ?? [], {
@@ -166,12 +178,26 @@ export class DapClient {
         supportsVariableType: true,
       });
       this.session.capabilities = init?.capabilities ?? {};
-      await this.request('launch', {
+      // launch vs attach is a protocol-level fork, not a flag the adapter can
+      // infer: sending `launch` to an adapter asked to attach makes it start a
+      // program of its own (or fail with "no program"), which looks like the
+      // debugger is broken rather than misconfigured.
+      const attaching = this.opts.attach === true;
+      await this.request(attaching ? 'attach' : 'launch', {
         type: this.opts.adapterId,
-        ...(this.opts.launchArgs ?? {}),
-        stopOnEntry: this.opts.launchArgs?.stopOnEntry ?? true,
+        ...(attaching ? (this.opts.attachArgs ?? {}) : (this.opts.launchArgs ?? {})),
+        // `stopOnEntry` only means something for a program *we* start; an
+        // already-running target cannot be caught at its first line.
+        ...(attaching ? {} : { stopOnEntry: this.opts.launchArgs?.stopOnEntry ?? true }),
       });
       await this.notify('initialized');
+      // Breakpoints must land before `configurationDone`: the adapter does not
+      // resume the target until that request arrives, so a setBreakpoints sent
+      // afterwards is too late for a target that runs to completion when
+      // `stopOnEntry` is false.
+      if (breakpoints && breakpoints.lines.length) {
+        await this.setBreakpoints(breakpoints.file, breakpoints.lines);
+      }
       await this.request('configurationDone');
       this.handshakeDone = true;
       log.info('DAP session ready', { adapter: this.opts.adapterId });
@@ -274,6 +300,32 @@ export class DapClient {
 
   async stepOut(threadId = 1): Promise<void> {
     await this.request('stepOut', { threadId });
+  }
+
+  /**
+   * Evaluate an expression in a frame's context — the Watch list and the
+   * debugger console both go through here. Adapters answer with a rendered
+   * `result` and, for structured values, a `variablesReference` the UI can
+   * expand into children.
+   */
+  async evaluate(
+    expression: string,
+    frameId?: number,
+  ): Promise<{ result: string; type?: string; variablesReference: number }> {
+    const r = await this.request<{ result?: string; type?: string; variablesReference?: number }>(
+      'evaluate',
+      { expression, context: 'watch', ...(frameId == null ? {} : { frameId }) },
+    );
+    return {
+      result: String(r.result ?? ''),
+      type: typeof r.type === 'string' ? r.type : undefined,
+      variablesReference: Number(r.variablesReference ?? 0),
+    };
+  }
+
+  /** Ask a running program to stop at the next opportunity (the Pause button). */
+  async pause(threadId = 1): Promise<void> {
+    await this.request('pause', { threadId });
   }
 
   async stop(): Promise<void> {

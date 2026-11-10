@@ -139,6 +139,11 @@
         selected: '',
         slowFilter: '',
         scopeFilter: 'all',
+        // Stage 11: the last attribution verdict, and which metric is being
+        // analysed. Kept on the page rather than in a modal so the trend chart
+        // stays visible next to the verdict.
+        attr: null,
+        attrBusy: '',
       });
 
       var socket = null;
@@ -330,6 +335,33 @@
 
       function clockOf(ts) { return NL.clockOf(ts); }
 
+      // ---------------- Stage 11 · attribution ----------------
+      //
+      // The engine answers with a verdict, a p-value, an effect size and the
+      // sample index where the series shifted. Asking for it is explicit
+      // (a button) because the server walks the hot ring: doing it on every
+      // digest would turn a diagnostic into background load.
+      function explain(name) {
+        if (!name || !socket) return;
+        st.attrBusy = name;
+        st.attr = null;
+        socket.send({ kind: 'attribute', metric: name });
+      }
+
+      function closeAttr() { st.attr = null; st.attrBusy = ''; }
+
+      /** 0.93 -> "93%" */
+      function pct(v) {
+        if (typeof v !== 'number' || !isFinite(v)) return '—';
+        return Math.round(v * 100) + '%';
+      }
+
+      /** 0.42 -> "+42.0%", -0.1 -> "-10.0%" */
+      function signedPct(v) {
+        if (typeof v !== 'number' || !isFinite(v)) return '—';
+        return (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%';
+      }
+
       // ---------------- websocket ----------------
       function handle(msg) {
         if (msg.kind === 'hello') {
@@ -376,6 +408,11 @@
           if (st.slow.length > MAX_SLOW) st.slow.splice(0, st.slow.length - MAX_SLOW);
           return;
         }
+        if (msg.kind === 'attribution') {
+          st.attr = msg;
+          st.attrBusy = '';
+          return;
+        }
         if (msg.kind === 'error') console.warn('perf page:', msg.message);
       }
 
@@ -413,6 +450,10 @@
         clockOf: clockOf,
         togglePause: function () { st.paused = !st.paused; },
         clearSlow: function () { st.slow = []; },
+        explain: explain,
+        closeAttr: closeAttr,
+        pct: pct,
+        signedPct: signedPct,
       };
     },
   });

@@ -78,7 +78,9 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
   const child = spawnTarget(language, script, opts.args ?? [], session, agentDir);
 
   const port = opts.port ?? 7320;
-  const html = renderDebugHtml({ port, target: basename(script), lang: language });
+  // Rendered lazily so the footer shows the port the OS actually bound (port 0
+  // means "pick one"), not the one that was requested.
+  let boundPort = port;
   const ws = new WebSocketServer({
     port,
     host: '127.0.0.1',
@@ -89,7 +91,7 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
       const url = (req.url ?? '/').split('?')[0];
       if (url === '/' || url === '/index.html') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-        res.end(html);
+        res.end(renderDebugHtml({ port: boundPort, target: basename(script), lang: language }));
         return true;
       }
       if (url === '/health') {
@@ -101,7 +103,22 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
       return false;
     },
   });
-  const bound = await ws.listen();
+  let bound: { port: number; host: string };
+  try {
+    bound = await ws.listen();
+  } catch (err) {
+    // The child is already running at this point: a busy port must not leave an
+    // orphaned program and a temp agent directory behind.
+    try {
+      child.kill();
+    } catch {
+      /* ignore */
+    }
+    await session.close();
+    removeAgentDir(agentDir);
+    throw new Error(`cannot serve the page on port ${port}: ${(err as Error).message}`);
+  }
+  boundPort = bound.port;
 
   // One aggregate at 4 Hz: cheap to compute, small on the wire, and the page
   // never has to merge partial updates.
@@ -145,7 +162,7 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
     }
     await ws.close();
     await session.close();
-    rmSync(agentDir, { recursive: true, force: true });
+    removeAgentDir(agentDir);
   };
 
   return {
@@ -192,6 +209,22 @@ function handleCommand(session: DebugSession, text: string): void {
   }
 }
 
+/**
+ * Delete the agent directory, tolerating Windows' short-lived file locks.
+ *
+ * A killed interpreter can still hold `sitecustomize.py` open for a few
+ * milliseconds after exit (the module is memory-mapped), so an immediate
+ * `rmSync` fails with EBUSY and the directory survives every run. Retrying is
+ * the fix; failing to clean up must never surface as an error.
+ */
+function removeAgentDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 });
+  } catch {
+    /* best effort: a leftover temp directory is not worth failing a session */
+  }
+}
+
 /** Write the embedded agent into a temp dir; returns its path. */
 function materialiseAgent(): string {
   const dir = mkdtempSync(resolve(tmpdir(), 'ndebug-agent-'));
@@ -221,7 +254,11 @@ function spawnTarget(
     cwd: process.cwd(),
     env,
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // stdin is **inherited**, not ignored: a program that calls `input()` must
+    // still work under the observatory, otherwise attaching changes behaviour
+    // (and `input()` on a closed stdin raises EOFError immediately).
+    // stdout/stderr stay piped so we can forward them unchanged.
+    stdio: ['inherit', 'pipe', 'pipe'],
   });
   child.stdout?.on('data', (d: Buffer) => process.stdout.write(d));
   child.stderr?.on('data', (d: Buffer) => process.stderr.write(d));

@@ -524,6 +524,37 @@ export const PYCHARM_CSS = `
   .prob { cursor:pointer; }
   .prob:hover { background: var(--bg-hover); }
 
+  /* ---------- Debug window: frames / variables / watches ---------- */
+  .dbg-wrap { display:flex; flex:1; min-height:0; gap:1px; background:var(--border-soft); }
+  .dbg-col { flex:1 1 0; min-width:0; display:flex; flex-direction:column; background:var(--bg-secondary); }
+  .dbg-h { padding:5px 8px; font-size:11px; font-weight:600; color:var(--text-secondary);
+    border-bottom:1px solid var(--border-soft); background:var(--bg-tertiary); }
+  .dbg-list { flex:1; overflow:auto; font:12px/1.6 var(--mono); }
+  .dbg-row { display:flex; gap:8px; align-items:baseline; padding:2px 8px; white-space:nowrap; }
+  .dbg-row:hover { background:var(--bg-hover); }
+  .dbg-row .vn { color:var(--syn-func, var(--text-primary)); flex:0 0 auto; }
+  .dbg-row .vv { color:var(--text-secondary); flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; }
+  .dbg-frame { cursor:pointer; }
+  .dbg-frame.cur { background:rgba(53,116,240,.16); }
+  .dbg-frame .fn { color:var(--text-primary); }
+  .dbg-frame .fl { color:var(--text-tertiary); }
+  .dbg-scope { padding:3px 8px; font-size:11px; font-weight:600; color:var(--text-tertiary); }
+  .dbg-var.expandable { cursor:pointer; }
+  .dbg-var .vt { flex:0 0 12px; color:var(--text-tertiary); }
+  .dbg-watch .vx { flex:0 0 auto; color:var(--text-tertiary); cursor:pointer; }
+  .dbg-watch .vx:hover { color:var(--error); }
+  .dbg-eval { display:flex; gap:4px; padding:5px 6px; border-bottom:1px solid var(--border-soft); }
+  .dbg-eval input { flex:1; min-width:0; background:var(--bg-tertiary); color:var(--text-primary);
+    border:1px solid var(--border); border-radius:4px; padding:2px 6px; font:12px var(--mono); }
+  .dbg-console { flex:0 0 38%; border-top:1px solid var(--border-soft); overflow:auto; }
+  .dbg-evalrow .vn { color:var(--text-tertiary); }
+
+  /* ---------- the line the program is stopped on ---------- */
+  .CodeMirror .dbgcur { background:rgba(53,116,240,.22); }
+  .CodeMirror .CodeMirror-gutter.dbgcur { background:rgba(53,116,240,.35); }
+  .gline.dbgcur { background:rgba(53,116,240,.22); }
+  .gline.dbgcur .num { color:#fff; font-weight:700; }
+
   /* ---------- kernel flame graph window ---------- */
   .flame-win { position:fixed; z-index:95; left:50%; top:10%; transform:translateX(-50%);
     width:min(980px,94vw); height:min(760px,88vh); display:none; flex-direction:column;

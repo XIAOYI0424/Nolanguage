@@ -10,7 +10,7 @@
  * The second half checks the wiring that makes the verdict visible: the
  * `?updated=` hand-off and the one-shot toast in the client.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { decideLaunch, launchUrl, sameBuild, type BuildIdentity } from '../src/desktop/handshake.js';
 import { APP_VERSION } from '../src/version.js';
@@ -25,7 +25,13 @@ const here = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$
 const read = (rel: string): string => readFileSync(join(here, '..', rel), 'utf8');
 const mainSource = read('src/desktop/main.ts');
 const serverSource = read('src/panel/server.ts');
-const clientSource = read('src/panel/ui/pycharm-client.ts');
+// The shell's client code lives in text fragments now (0.7.5 split); read the
+// assembled source, not the thin assembler.
+const clientSource = readdirSync(join(here, '..', 'src', 'panel', 'ui', 'client'))
+  .filter((f) => f.endsWith('.js'))
+  .sort()
+  .map((f) => readFileSync(join(here, '..', 'src', 'panel', 'ui', 'client', f), 'utf8'))
+  .join('\n');
 
 const OWN: BuildIdentity = { appVersion: '0.7.2-workspace', exeSize: 96_000_000 };
 
@@ -99,6 +105,13 @@ check('main: window URL comes from launchUrl', /launchUrl\(base, updatedFrom\)/.
 check('main: no bare base URL left in the window spawn', !/openWebView\(\{\s*url: `\$\{base\}\/`/.test(mainSource));
 
 check('server: version comes from the shared constant', /appVersion: APP_VERSION/.test(serverSource));
+// The receipt must describe the installed app. A node process (`nlg desktop`,
+// or any suite) writing it makes doctor report the interpreter as the build —
+// 0.7.5 found exactly that leftover.
+check(
+  'server: the install receipt is never written by a node process',
+  /packagedImage/.test(serverSource) && /NOLANGUAGE_DESKTOP === '1' && packagedImage/.test(serverSource),
+);
 check(
   'server: no hardcoded -workspace literal',
   !/'[0-9]+\.[0-9]+\.[0-9]+-workspace'/.test(serverSource),
@@ -116,8 +129,8 @@ check('client: reads the updated param', /\[\?&\]updated=\(\[\^&\]\*\)/.test(cli
 check('client: announces the update', /function announceUpdate\(\)/.test(clientSource));
 check('client: strips the param so a reload stays quiet', /history\.replaceState\(\{\}, '', location\.pathname\)/.test(clientSource));
 check(
-  'client: no backtick inside the template (would truncate the script)',
-  !/announceUpdate[\s\S]{0,600}`/.test(clientSource),
+  'client: the update notice lives in a fragment, not a template literal',
+  clientSource.indexOf('function announceUpdate') !== -1 && clientSource.indexOf('`') === -1,
 );
 
 const passed = results.filter((r) => r.ok).length;

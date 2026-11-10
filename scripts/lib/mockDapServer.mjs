@@ -81,6 +81,17 @@ function handle(msg) {
     notify('stopped', { threadId: 1, reason: 'entry' });
     return;
   }
+  if (msg.method === 'attach') {
+    // DAP keeps attach and launch apart, and so must the client: an attach has
+    // no program to start. The mock echoes which request it received (via the
+    // output event and the stopped reason) so the suite can prove the client
+    // sent `attach` rather than quietly falling back to `launch`.
+    launched = true;
+    respond(msg.id, {});
+    notify('output', { category: 'console', output: 'attached ' + JSON.stringify(msg.params || {}) });
+    notify('stopped', { threadId: 1, reason: 'attach' });
+    return;
+  }
   if (msg.method === 'configurationDone') {
     respond(msg.id, {});
     return;

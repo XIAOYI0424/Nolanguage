@@ -127,6 +127,29 @@ export function renderPerfHtml(port: number): string {
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #detail .head .spacer { flex:1; }
   #detail .head .hint { font-size:11px; color:var(--text-secondary); }
+  #detail .head button.attr { font-size:11px; padding:1px 8px; border-radius:5px;
+    border:1px solid var(--border); background:var(--bg-elevated); color:var(--accent);
+    cursor:pointer; font-family:var(--sans); }
+  #detail .head button.attr:hover:not(:disabled) { border-color:var(--accent); }
+  #detail .head button.attr:disabled { color:var(--text-secondary); cursor:default; }
+  /* Stage 11 verdict: numbers first, sentence second — the sentence is a
+     convenience, the p-value and effect size are the evidence. */
+  .attrCard { margin:0 12px 10px; padding:8px 10px; border-radius:6px;
+    border:1px solid var(--border); border-left-width:3px; background:var(--bg-secondary); }
+  .attrCard.v-regression { border-left-color:var(--bad); }
+  .attrCard.v-improvement { border-left-color:var(--ok); }
+  .attrCard.v-no-change { border-left-color:var(--border); }
+  .attrCard.v-insufficient-data { border-left-color:var(--warning); }
+  .attrCard .row1 { display:flex; align-items:center; gap:8px; }
+  .attrCard .verdict { font-family:var(--mono); font-size:12px; font-weight:600; }
+  .attrCard.v-regression .verdict { color:var(--bad); }
+  .attrCard.v-improvement .verdict { color:var(--ok); }
+  .attrCard .row1 .spacer { flex:1; }
+  .attrCard .row1 button { font-size:11px; border:1px solid var(--border); border-radius:5px;
+    background:var(--bg-elevated); color:var(--text-secondary); cursor:pointer; padding:1px 7px; }
+  .attrCard .summary { margin-top:4px; font-size:12px; color:var(--text-primary); }
+  .attrCard .stats { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px 14px;
+    font-family:var(--mono); font-size:11px; color:var(--text-secondary); }
   .trendWrap { padding:8px 12px 4px; }
   .trend { display:block; width:100%; height:auto; }
   .trend rect { fill:var(--accent); opacity:.55; }
@@ -286,11 +309,30 @@ export function renderPerfHtml(port: number): string {
         <span class="t">{{ selectedRow ? selectedRow.name : 'no metric selected' }}</span>
         <span class="badge" v-if="selectedRow">{{ selectedRow.scope.title }}</span>
         <span class="spacer"></span>
+        <button class="attr" v-if="selectedRow" :disabled="st.attrBusy === selectedRow.name"
+          @click="explain(selectedRow.name)">{{ st.attrBusy === selectedRow.name ? 'analysing…' : 'explain change' }}</button>
         <span class="hint" v-if="selectedRow">count {{ selectedRow.count }} · avg {{ fmtCell(selectedRow.avg, selectedRow.unit) }} · p50 {{ fmtCell(selectedRow.p50, selectedRow.unit) }} · p95 {{ fmtCell(selectedRow.p95, selectedRow.unit) }} · p99 {{ fmtCell(selectedRow.p99, selectedRow.unit) }} · max {{ fmtCell(selectedRow.max, selectedRow.unit) }}</span>
         <span class="hint" v-else>select a metric row to plot its history</span>
       </div>
       <div v-if="selectedRow">
         <trend-chart :values="selectedRow.series" :p95="selectedRow.p95" :unit="selectedRow.unit"></trend-chart>
+      </div>
+      <div class="attrCard" v-if="st.attr" :class="'v-' + st.attr.verdict">
+        <div class="row1">
+          <span class="verdict">{{ st.attr.verdict }}</span>
+          <span class="badge">{{ st.attr.metric }}</span>
+          <span class="spacer"></span>
+          <button @click="closeAttr()">dismiss</button>
+        </div>
+        <div class="summary">{{ st.attr.summary }}</div>
+        <div class="stats">
+          <span v-if="st.attr.confidence != null">confidence {{ pct(st.attr.confidence) }}</span>
+          <span v-if="st.attr.relativeChange != null">change {{ signedPct(st.attr.relativeChange) }}</span>
+          <span v-if="st.attr.pValue != null">p {{ st.attr.pValue }}</span>
+          <span v-if="st.attr.effectSize != null">Cohen's d {{ st.attr.effectSize }}<span v-if="st.attr.magnitude"> ({{ st.attr.magnitude }})</span></span>
+          <span v-if="st.attr.samples">samples {{ st.attr.samples.before }} / {{ st.attr.samples.after }}</span>
+          <span v-if="st.attr.changePoint">shift at sample {{ st.attr.changePoint.index }} ({{ st.attr.changePoint.direction }})</span>
+        </div>
       </div>
       <div class="empty" v-else>Each row plots the average latency of the last 60 digests, with a p95 marker.</div>
     </div>

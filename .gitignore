@@ -20,8 +20,6 @@ frontend/dist/
 .codebudy/workspace.json
 .workbuddy-ai/memory/2026-10-14.md
 .workbuddy-ai/memory/MEMORY.md
-build-to-exe.bat
-方案.md
 .test-out.txt
 # Scratch space for the verification suites (packaged-exe sandbox, explorer
 # workspace, ad-hoc probes). Never committed.
@@ -35,19 +33,13 @@ tmp/
 .workbuddy-ai/memory/2026-10-15.md
 .workbuddy-ai/memory/2026-10-17.md
 .gitignore
-.github/workflows/ci.yml
 .cargo/config.toml
 .obsidian/app.json
 .obsidian/appearance.json
 .obsidian/core-plugins.json
 .obsidian/workspace.json
-逻辑文档/20261016_PyCharm功能差距.md
-逻辑文档/20261016_Tauri化UI架构设计.md
-docs/
 # Agent workspace data (memory/logs), never project source.
 .workbuddy-ai/
-项目现状报告.md
-语言插件化设计.md
 installer/build-nsis.bat
 .gitignore
 installer/payload/Nolanguage.exe

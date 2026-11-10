@@ -45,6 +45,8 @@
           badLines: 0,
         },
         draft: '',
+        /** Freeze the view: sampling keeps running, the panel stops moving. */
+        paused: false,
         selected: '',
         /** Snapshot id the user pinned by pressing "snapshot now". */
         pin: '',
@@ -83,6 +85,9 @@
             return;
           }
           if (msg.kind === 'view') {
+            // Pausing is a *view* concern only: the engine keeps sampling and the
+            // agent keeps sending, so resuming shows the present, not a backlog.
+            if (st.paused) return;
             st.view = msg.view;
             return;
           }
@@ -184,6 +189,10 @@
       function refresh() {
         st.pin = '';
         send({ kind: 'snapshot', path: 'locals' });
+      }
+
+      function togglePause() {
+        st.paused = !st.paused;
       }
 
       function pct(share) {

@@ -165,6 +165,39 @@ async function testContract(): Promise<void> {
   check('contract: a non-array debug.discovery is rejected', !v2.ok && v2.issues.some((i) => i.field === 'debug.discovery.commands'), JSON.stringify(v2.issues));
 }
 
+// ============================================================ attach
+
+/**
+ * Attaching must not be a launch in disguise: the request is `attach`, the
+ * connection (port / host / processId) is what travels, and `stopOnEntry`
+ * is meaningless for a target that is already running.
+ */
+async function testAttach(kernel: Kernel): Promise<void> {
+  const stopped: Array<{ threadId: number; reason: string }> = [];
+  const output: string[] = [];
+  const client = new DapClient(
+    kernel,
+    {
+      command: process.execPath,
+      args: [MOCK],
+      adapterId: 'mock',
+      attach: true,
+      attachArgs: { port: 1234, host: 'localhost' },
+    },
+    { onStopped: (i) => stopped.push(i), onOutput: (t) => output.push(t) },
+  );
+  await client.start();
+  // The mock answers attach with reason 'attach' and launch with 'entry', so
+  // the reason is what proves the request was not silently downgraded.
+  check('dap: attach sends an attach request, not a launch',
+    stopped.length > 0 && stopped[0].reason === 'attach',
+    JSON.stringify(stopped));
+  check('dap: the attach payload carries the connection, not a program',
+    output.some((t) => t.includes('1234')) && !output.some((t) => t.includes('stopOnEntry')),
+    output.join(' ').replace(/\s+/g, ' ').slice(0, 90));
+  await client.stop().catch(() => undefined);
+}
+
 // ======================================================================= driver
 
 async function main(): Promise<void> {
@@ -173,6 +206,8 @@ async function main(): Promise<void> {
   try {
     console.log('— session —');
     await testSession(kernel);
+    console.log('— attach —');
+    await testAttach(kernel);
     console.log('— degradation —');
     await testDegradation(kernel);
     console.log('— launch failure —');

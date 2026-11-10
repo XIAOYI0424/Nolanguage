@@ -15,12 +15,14 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ndebug.ts
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DebugSession } from '../src/debugtool/session.js';
 import { renderDebugHtml } from '../src/debugtool/ui.js';
 import { startDebugApp, languageOf } from '../src/debugtool/main.js';
+import { parseArgs } from '../src/debugtool/cli.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -101,6 +103,8 @@ check('page: has the three panes', ['Watch', 'Live stacks', 'Inspector'].every((
 check('page: renders the value tree', html.includes('<snode') && html.includes('app.component'));
 check("page: shows the observatory's own overhead", html.includes('dropped') && html.includes('samples'));
 check('page: no emoji', !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html));
+check('page: warns that a watch is evaluated in the target', html.includes('相当于 eval'));
+check('page: can freeze the view', html.includes('togglePause') && html.includes("'resume'"));
 check(
   'page: the shell has no leftover template tokens',
   (() => {
@@ -121,7 +125,18 @@ check('page: no stray backtick inside the template', (() => {
   return uiSource.slice(open + 8, close).indexOf('`') === -1;
 })());
 
-// ------------------------------------------------------------ 3. the app
+// --------------------------------------------------- 3. the CLI contract
+
+const parsed = parseArgs(['app.py', '--port', '7400', '--hz', '20', '--no-open', '--', '60', '--flag']);
+check('cli: the script is the first positional', !('error' in parsed) && !('help' in parsed) && parsed.script === 'app.py');
+check('cli: options are parsed', !('error' in parsed) && !('help' in parsed) && parsed.port === 7400 && parsed.hz === 20 && parsed.open === false);
+check('cli: everything after -- belongs to the target', !('error' in parsed) && !('help' in parsed) && parsed.args.join(' ') === '60 --flag');
+check('cli: no arguments means help', 'help' in parseArgs([]));
+check('cli: an unknown option is an error, not a guess', 'error' in parseArgs(['app.py', '--nope']));
+check('cli: an out-of-range hz is refused', 'error' in parseArgs(['app.py', '--hz', '0']));
+check('cli: a bad port is refused', 'error' in parseArgs(['app.py', '--port', '70000']));
+
+// ------------------------------------------------------------ 4. the app
 
 check('language: .py is observable', languageOf('a.py') === 'python');
 check('language: .js is refused for now, not silently attached', languageOf('a.js') === null);
@@ -132,7 +147,11 @@ if (!existsSync(sample)) {
 } else {
   let app: Awaited<ReturnType<typeof startDebugApp>> | undefined;
   try {
-    app = await startDebugApp({ script: sample, port: 0, hz: 10, quiet: true, args: ['80'] });
+    // Long enough that the watch below cannot race the program's exit: under
+    // `verify-all` the machine is busier, and a 4-second target used to finish
+    // before the watch was evaluated (flaky, not wrong). 400 rounds ≈ 20 s, and
+    // `app.close()` kills it at the end of this block.
+    app = await startDebugApp({ script: sample, port: 0, hz: 10, quiet: true, args: ['400'] });
     check('app: serves a page', app.port > 0, app.url);
 
     const res = await fetch(app.url, { signal: AbortSignal.timeout(3000) });
@@ -189,6 +208,43 @@ if (!existsSync(sample)) {
     check('app: the watch value is the real one', watched?.value?.v === '3', String(watched?.value?.v));
 
     ws.close();
+
+    // The agent prepends its own directory to PYTHONPATH, which shadows any
+    // sitecustomize the user already had (only the first one runs). The chain in
+    // our sitecustomize is what keeps `coverage run` working under ndebug.
+    const hookDir = mkdtempSync(join(tmpdir(), 'nlg-hook-'));
+    const hookLog = join(hookDir, 'hook-ran.txt');
+    writeFileSync(
+      join(hookDir, 'sitecustomize.py'),
+      `import pathlib\npathlib.Path(${JSON.stringify(hookLog)}).write_text('user-hook-ran', encoding='utf-8')\n`,
+      'utf8',
+    );
+    const previousPath = process.env.PYTHONPATH;
+    process.env.PYTHONPATH = hookDir;
+    let hooked: Awaited<ReturnType<typeof startDebugApp>> | undefined;
+    try {
+      hooked = await startDebugApp({ script: sample, port: 0, hz: 5, quiet: true, args: ['20'] });
+      await hooked.exited;
+      check('app: a pre-existing sitecustomize still runs', existsSync(hookLog), existsSync(hookLog) ? 'chained' : 'shadowed');
+    } finally {
+      await hooked?.close();
+      if (previousPath === undefined) delete process.env.PYTHONPATH;
+      else process.env.PYTHONPATH = previousPath;
+      rmSync(hookDir, { recursive: true, force: true });
+    }
+
+    // A busy port must fail loudly instead of leaving an orphaned child behind.
+    const busy = await startDebugApp({ script: sample, port: 0, hz: 5, quiet: true, args: ['20'] });
+    let busyError = '';
+    try {
+      await startDebugApp({ script: sample, port: busy.port, hz: 5, quiet: true, args: ['20'] });
+    } catch (err) {
+      busyError = (err as Error).message;
+    }
+    check('app: a busy port is reported, not swallowed', /cannot serve the page/.test(busyError), busyError.slice(0, 60));
+    const stillAlive = await (await fetch(`http://127.0.0.1:${busy.port}/health`, { signal: AbortSignal.timeout(2000) })).json();
+    check('app: the first instance keeps running after the collision', stillAlive.ok === true, JSON.stringify(stillAlive));
+    await busy.close();
   } catch (err) {
     const msg = (err as Error).message;
     if (/ENOENT|spawn python|not recognized/i.test(msg)) {

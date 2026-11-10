@@ -20,6 +20,12 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  // Vite's transform cache defaults to a directory under the OS temp folder. On
+  // this machine that write can be denied (sandbox, policy, another process), and
+  // vitest then **drops the affected file silently**: the summary says "1 passed"
+  // while a whole suite never ran. Keeping the cache inside the repo makes the
+  // run deterministic and the failure impossible.
+  cacheDir: '.tmp/vitest',
   // Vite 5's builtin list predates `node:sqlite`, so it strips the prefix and
   // then fails to resolve a bare `sqlite` package during collection. Declaring
   // `node:*` external and aliasing the module to a stub are both needed in

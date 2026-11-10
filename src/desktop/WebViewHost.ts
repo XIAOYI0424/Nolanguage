@@ -79,6 +79,10 @@ const WEBVIEW2_CANDIDATES: string[][] = [
   [
     'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application',
     'C:\\Program Files\\Microsoft\\EdgeWebView\\Application',
+    // A per-user install (the bootstrapper's default when not elevated) lands
+    // here. Without it, doctor reports the old machine-wide runtime while the
+    // app happily loads the newer per-user one.
+    join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'EdgeWebView', 'Application'),
   ],
   ['C:\\Program Files (x86)\\Microsoft\\EdgeCore', 'C:\\Program Files\\Microsoft\\EdgeCore'],
 ];

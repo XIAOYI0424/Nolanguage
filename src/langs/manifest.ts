@@ -125,8 +125,30 @@ export interface DebugSpec {
   memoryHint?: string;
   /** What to tell the user when discovery fails. */
   degradedNote?: string;
-  /** Concrete install command shown when the adapter is missing (item 4). */
+  /** Concrete install command shown when the adapter is missing. */
   install?: string;
+  /**
+   * The DAP `launch` (and `attach`) payload, as a template.
+   *
+   * The engine used to hardcode a Python/Go-shaped payload; anything else
+   * (Java's `mainClass`, cppdbg's `MIMode`, Node's `runtimeExecutable`) could
+   * not be expressed. Values are strings with placeholders, or literals to
+   * pass through untouched. Omit it and today's default shape is used, so
+   * existing Python/Go manifests keep working.
+   *
+   * Placeholders: `{program}` `{file}` `{workdir}` `{cwd}` `{args}` `{env}`
+   * `{stopOnEntry}` `{resolved}`.
+   */
+  launch?: Record<string, unknown>;
+  /**
+   * Build the target before debugging. Compiled languages have no source-level
+   * debug target: without this, the debugger is handed a `.cpp` and cannot
+   * stop anywhere. The command is a shell string with the same placeholders,
+   * plus `{toolchain}` when the run block's discovery found a compiler.
+   */
+  preLaunch?: { cmd?: string; timeoutMs?: number };
+  /** Whether this adapter can attach to an already-running target. */
+  supportsAttach?: boolean;
 }
 
 export interface LanguageManifest {

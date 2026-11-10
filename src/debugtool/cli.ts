@@ -52,15 +52,28 @@ export function parseArgs(argv: string[]): CliOptions | { help: true } | { error
 
   for (let i = 0; i < own.length; i++) {
     const a = own[i];
-    if (a === '--port') port = Number(own[++i] ?? 7320) || 7320;
-    else if (a === '--hz') hz = Number(own[++i] ?? 10) || 10;
+    // Parse the raw value, then validate it. `Number(x) || default` looks tidy and
+    // silently turns `--hz 0` into 10 — a user asking for a specific rate would
+    // get a different one with no warning.
+    if (a === '--port') {
+      const raw = own[++i];
+      const n = Number(raw);
+      if (raw === undefined || !Number.isInteger(n) || n < 0 || n > 65535) {
+        return { error: `port must be an integer between 0 and 65535 (got ${raw ?? 'nothing'})` };
+      }
+      port = n;
+    } else if (a === '--hz') {
+      const raw = own[++i];
+      const n = Number(raw);
+      if (raw === undefined || !Number.isFinite(n) || n < 1 || n > 100) {
+        return { error: `hz must be between 1 and 100 (got ${raw ?? 'nothing'})` };
+      }
+      hz = n;
+    }
     else if (a === '--no-open') open = false;
     else if (a === '--quiet') quiet = true;
     else return { error: `unknown option: ${a}` };
   }
-  if (port < 0 || port > 65535) return { error: `port out of range: ${port}` };
-  if (hz < 1 || hz > 100) return { error: `hz must be between 1 and 100 (got ${hz})` };
-
   return { script, port, hz, open, quiet, args: extra };
 }
 

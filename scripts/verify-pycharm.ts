@@ -16,8 +16,10 @@
 import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { renderPyCharmHtml, PY_PATTERN } from '../src/panel/pycharm-ui.js';
+import { CLIENT_FRAGMENTS } from '../src/panel/ui/client-assets.js';
+import { pyCharmClientScript } from '../src/panel/ui/pycharm-client.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -159,17 +161,37 @@ check('shell: inline script parses', (() => {
   try { new Function(code); return true; } catch { return false; }
 })());
 
-// The whole shell is one template literal. A backtick *inside* it — even in a
-// comment — ends the string early, and the file still "looks" fine: tsc reports
-// a parse error dozens of lines later, or the page boots half a script. This has
-// happened twice; assert it instead of relying on review.
-check('shell: no stray backtick inside the inline-script template', (() => {
-  const src = readFileSync(join(ROOT, 'src', 'panel', 'ui', 'pycharm-client.ts'), 'utf8');
-  const open = src.indexOf('return `');
-  const close = src.lastIndexOf('`;');
-  if (open === -1 || close <= open) return false;
-  return src.slice(open + 8, close).indexOf('`') === -1;
-})());
+// The client script is assembled from text fragments (`src/panel/ui/client/*.js`).
+// The old shape was one 4,200-line template literal, and a single backtick in a
+// comment truncated it twice. Three invariants now hold that line:
+//   - no fragment may contain a backtick (there is no literal left to end),
+//   - only the known seed tokens may interpolate,
+//   - the assembled script must have substituted every one of them.
+const CLIENT_DIR = join(ROOT, 'src', 'panel', 'ui', 'client');
+const fragmentFiles = readdirSync(CLIENT_DIR).filter((f) => f.endsWith('.js')).sort();
+check('client: split into 6-8 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 8, fragmentFiles.join(','));
+check(
+  'client: every fragment on disk is wired into the assembler',
+  fragmentFiles.length === CLIENT_FRAGMENTS.length &&
+    fragmentFiles.every((f, i) => CLIENT_FRAGMENTS[i].file === f),
+  `${fragmentFiles.length} files vs ${CLIENT_FRAGMENTS.length} imported`,
+);
+const fragmentText = fragmentFiles.map((f) => readFileSync(join(CLIENT_DIR, f), 'utf8')).join('\n');
+check('client: no fragment contains a backtick', fragmentText.indexOf('`') === -1);
+const SEED_KEYS = ['iconsJson', 'patternJson', 'mainJson', 'utilsJson', 'jsJson', 'readmeJson', 'i18nJson'];
+const tokens = Array.from(new Set(fragmentText.match(/\$\{[A-Za-z0-9_]+\}/g) || []));
+check(
+  'client: only the known seed tokens interpolate',
+  tokens.length === SEED_KEYS.length && tokens.every((t) => SEED_KEYS.indexOf(t.slice(2, -1)) !== -1),
+  tokens.join(','),
+);
+check(
+  'client: the assembled script substituted every seed',
+  pyCharmClientScript({
+    iconsJson: '{}', patternJson: '""', mainJson: '""', utilsJson: '""',
+    jsJson: '""', readmeJson: '""', i18nJson: '{}',
+  }).indexOf('${') === -1,
+);
 
 // ---------------------------------------------------------- jsdom helpers
 
@@ -272,7 +294,7 @@ async function testBoot(): Promise<void> {
   check('boot: editor gutter renders line numbers', qa(w, '#glines .gline').length > 5, `${qa(w, '#glines .gline').length} rows`);
   check('boot: editor loads the main.py sample', (q(w, '#ta')?.value ?? '').indexOf('def fib') !== -1);
   check('boot: three document tabs render', qa(w, '#etabs .etab').length === 3, `${qa(w, '#etabs .etab').length} tabs`);
-  check('boot: bottom dock renders 6 tool windows', qa(w, '#dockTabs .dtab').length === 6, `${qa(w, '#dockTabs .dtab').length} tabs`);
+  check('boot: bottom dock renders 7 tool windows', qa(w, '#dockTabs .dtab').length === 7, `${qa(w, '#dockTabs .dtab').length} tabs`);
   check('boot: status bar shows file + caret + perf cells',
     !!q(w, '#stFile') && !!q(w, '#stPos') && !!q(w, '#stPerf'));
   check('boot: terminal input is present', !!q(w, '#termIn') && !!q(w, '#termOut'));
@@ -1383,6 +1405,170 @@ async function testKeymap(): Promise<void> {
   w.close();
 }
 
+// ---------------------------------------------------------- debug views
+
+/**
+ * A stop must carry more than a stack: frames, scopes and the variables in
+ * them are what make a debugger usable. These checks drive the real message
+ * the engine sends, so they cover the wiring end to end (server reply shape
+ * -> applyDebugState -> Debug window) without needing a real adapter.
+ */
+async function testDebugViews(): Promise<void> {
+  FakeSocket.instances = [];
+  const { window: w, socket } = mountPage(html);
+  await settle(w);
+
+  socket.deliver({
+    kind: 'debugState', ok: true, state: 'stopped', reason: 'breakpoint', threadId: 7,
+    frames: [
+      { id: 11, name: 'fib', file: '/ws/main.py', line: 4, column: 2 },
+      { id: 12, name: 'main', file: '/ws/main.py', line: 13, column: 1 },
+    ],
+    scopes: [
+      { name: 'Locals', variablesReference: 100, variables: [
+        { name: 'n', value: '5', variablesReference: 0 },
+        { name: 'obj', value: 'Point(1, 2)', type: 'Point', variablesReference: 200 },
+      ] },
+      { name: 'Globals', variablesReference: 101, variables: [] },
+    ],
+  });
+  await settle(w);
+
+  check('debug: a stop raises the Debug tool window',
+    (q(w, '#dockTabs .dtab.active')?.textContent ?? '').indexOf('Debug') !== -1,
+    (q(w, '#dockTabs .dtab.active')?.textContent ?? '').trim());
+  check('debug: the call stack renders every frame',
+    qa(w, '#dbgFrames .dbg-frame').length === 2, `${qa(w, '#dbgFrames .dbg-frame').length} frames`);
+  check('debug: the top frame is marked as current',
+    /cur/.test(qa(w, '#dbgFrames .dbg-frame')[0]?.className ?? ''),
+    String(qa(w, '#dbgFrames .dbg-frame')[0]?.className ?? ''));
+  check('debug: variables render grouped by scope',
+    qa(w, '#dbgVars .dbg-scope').length === 2 &&
+    (q(w, '#dbgVars')?.textContent ?? '').indexOf('Point(1, 2)') !== -1,
+    (q(w, '#dbgVars')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60));
+  check('debug: the stopped line is marked in the editor',
+    /dbgcur/.test(qa(w, '#glines .gline')[3]?.className ?? ''),
+    String(qa(w, '#glines .gline')[3]?.className ?? ''));
+
+  // Expanding a structured variable asks the adapter for its children.
+  const expandable = qa(w, '#dbgVars .dbg-var.expandable')[0];
+  check('debug: a structured variable is expandable', !!expandable,
+    `${qa(w, '#dbgVars .dbg-var.expandable').length} expandable`);
+  expandable?.click();
+  await settle(w);
+  const varsReq = socket.lastSentOf('debugCmd');
+  check('debug: expanding asks the adapter for children',
+    varsReq?.cmd === 'vars' && Number(varsReq?.variablesReference) === 200,
+    JSON.stringify(varsReq && { cmd: varsReq.cmd, ref: varsReq.variablesReference }));
+  socket.deliver({
+    kind: 'debugVars', ok: true, variablesReference: 200,
+    variables: [{ name: 'x', value: '1', variablesReference: 0 }, { name: 'y', value: '2', variablesReference: 0 }],
+  });
+  await settle(w);
+  check('debug: the children appear under the expanded variable',
+    (q(w, '#dbgVars')?.textContent ?? '').indexOf('y') !== -1 && qa(w, '#dbgVars .dbg-var').length >= 4,
+    `${qa(w, '#dbgVars .dbg-var').length} rows`);
+
+  // Watches: pin an expression, then see the adapter's answer.
+  const evalIn = q(w, '#dbgEvalIn') as any;
+  evalIn.value = 'n * 2';
+  q(w, '#dbgWatchAdd').click();
+  await settle(w);
+  const watchReq = socket.lastSentOf('debugCmd');
+  check('debug: pinning a watch asks the adapter to evaluate it',
+    watchReq?.cmd === 'evaluate' && watchReq?.expression === 'n * 2',
+    JSON.stringify(watchReq && { cmd: watchReq.cmd, e: watchReq.expression }));
+  socket.deliver({ kind: 'debugEval', ok: true, expression: 'n * 2', result: '10', type: 'int', variablesReference: 0 });
+  await settle(w);
+  check('debug: the watch shows the evaluated value',
+    (q(w, '#dbgWatches')?.textContent ?? '').indexOf('10') !== -1,
+    (q(w, '#dbgWatches')?.textContent ?? '').trim().slice(0, 40));
+
+  // A one-off evaluation lands in the debugger console.
+  evalIn.value = 'n + 1';
+  fire(w, evalIn, 'keydown', { key: 'Enter' });
+  await settle(w);
+  socket.deliver({ kind: 'debugEval', ok: true, expression: 'n + 1', result: '6', variablesReference: 0 });
+  await settle(w);
+  check('debug: an evaluated expression lands in the console',
+    (q(w, '#dbgConsole')?.textContent ?? '').indexOf('6') !== -1,
+    (q(w, '#dbgConsole')?.textContent ?? '').trim().slice(0, 40));
+
+  // The step buttons are live only while stopped — that is the whole point of
+  // the toolbar's enabled rules.
+  check('debug: stepping is enabled while stopped',
+    q(w, '#dbgBar [data-dbg="next"]')?.disabled === false,
+    String(q(w, '#dbgBar [data-dbg="next"]')?.disabled));
+  check('debug: Pause is not offered while stopped',
+    q(w, '#dbgBar [data-dbg="pause"]')?.disabled === true,
+    String(q(w, '#dbgBar [data-dbg="pause"]')?.disabled));
+
+  // Terminating clears both the view and the stopped-line marker.
+  socket.deliver({ kind: 'debugState', ok: true, state: 'terminated' });
+  await settle(w);
+  check('debug: terminating clears the stopped-line marker',
+    qa(w, '#glines .gline.dbgcur').length === 0 &&
+    (q(w, '#dbgFrames')?.textContent ?? '').indexOf('Not stopped') !== -1,
+    `${qa(w, '#glines .gline.dbgcur').length} still marked`);
+
+  w.close();
+}
+
+/**
+ * Breakpoints must outlive the window: they are the one piece of debug state a
+ * user rebuilds by hand every time. Attach must travel as a request with a
+ * connection, not be silently downgraded to a launch.
+ */
+async function testBreakpointsAndAttach(): Promise<void> {
+  FakeSocket.instances = [];
+  const { window: w, socket } = mountPage(html);
+  await settle(w);
+
+  const line3 = () => qa(w, '#glines .gline')[2];
+  line3().click();
+  await settle(w);
+  const saved = JSON.parse(w.localStorage.getItem('nolanguage.pycharm.v1') || '{}');
+  check('bp: a breakpoint is persisted',
+    !!saved.breakpoints && !!(saved.breakpoints['main.py'] || {})['3'],
+    JSON.stringify(saved.breakpoints || {}));
+  check('bp: the gutter shows the breakpoint',
+    /hasbp/.test(line3()?.className ?? ''), String(line3()?.className ?? ''));
+
+  // Toggling off must persist too, or the dots come back on every restart.
+  line3().click();
+  await settle(w);
+  const saved2 = JSON.parse(w.localStorage.getItem('nolanguage.pycharm.v1') || '{}');
+  check('bp: removing a breakpoint persists as well',
+    !(saved2.breakpoints['main.py'] || {})['3'], JSON.stringify(saved2.breakpoints['main.py'] || {}));
+
+  // Put one back and prove a fresh window reads it.
+  line3().click();
+  await settle(w);
+  const restart = mountPage(html, w.localStorage.getItem('nolanguage.pycharm.v1') || '{}');
+  await settle(restart.window);
+  check('bp: breakpoints survive a restart',
+    /hasbp/.test(qa(restart.window, '#glines .gline')[2]?.className ?? ''),
+    String(qa(restart.window, '#glines .gline')[2]?.className ?? ''));
+  restart.window.close();
+
+  // ---- attach ----
+  const seeded = mountPage(html, JSON.stringify({
+    runConfigs: [{ name: 'remote', path: 'main.py', request: 'attach', port: 5678, host: '127.0.0.1' }],
+    activeConfig: 'remote',
+  }));
+  await settle(seeded.window);
+  fire(seeded.window, q(seeded.window, '#ta'), 'keydown', { key: 'F9', shiftKey: true });
+  await settle(seeded.window);
+  const dmsg = seeded.socket!.lastSentOf('debug');
+  check('debug: an attach configuration asks to attach', dmsg?.request === 'attach', String(dmsg?.request));
+  check('debug: an attach configuration carries the connection',
+    Number(dmsg?.port) === 5678 && dmsg?.host === '127.0.0.1',
+    JSON.stringify({ port: dmsg?.port, host: dmsg?.host }));
+  seeded.window.close();
+
+  w.close();
+}
+
 // ---------------------------------------------------------- run
 
 await testBoot();
@@ -1400,6 +1586,10 @@ console.log('');
 await testI18n();
 console.log('');
 await testMcp();
+console.log('');
+await testDebugViews();
+console.log('');
+await testBreakpointsAndAttach();
 console.log('');
 await testUpdateNotice();
 console.log('');

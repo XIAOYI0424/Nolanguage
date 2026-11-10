@@ -65,6 +65,7 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
 
   /* ---- watches ---- */
   .watchAdd { display:flex; gap:6px; padding:7px 9px; border-bottom:1px solid var(--line); }
+  .watchNote { padding:0 10px 6px; font-size:10.5px; color:var(--fg3); border-bottom:1px solid var(--line); }
   input[type=text] { flex:1; min-width:0; background:var(--bg3); border:1px solid var(--line);
     color:var(--fg); border-radius:5px; padding:3px 7px; font-family:var(--mono); font-size:12px; }
   input[type=text]:focus { outline:none; border-color:var(--accent); }
@@ -132,6 +133,7 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
     <span class="stat">sampling <b>{{ hzText }}</b></span>
     <span class="stat">samples <b>{{ st.view.samples || 0 }}</b></span>
     <span class="stat" v-if="st.view.dropped">dropped <b>{{ st.view.dropped }}</b></span>
+    <button :class="{ primary: st.paused }" @click="togglePause()">{{ st.paused ? 'resume' : 'pause' }}</button>
     <span class="badge" :class="stateClass">{{ stateText }}</span>
   </header>
 
@@ -145,6 +147,7 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
         <input type="text" v-model="st.draft" placeholder="order.items[0].price" @keydown.enter="addWatch()" spellcheck="false" />
         <button class="primary" @click="addWatch()">add</button>
       </div>
+      <div class="watchNote">表达式在目标进程里求值（相当于 eval），写副作用就会真的产生副作用。</div>
       <div class="body">
         <div class="w" v-for="w in st.view.watches" :key="w.expr">
           <span class="e" :title="w.expr">{{ w.expr }}</span>

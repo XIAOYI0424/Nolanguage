@@ -372,6 +372,37 @@ def _handle_command(cmd):
         _state["stop"].set()
 
 
+def _install_thread_hook():
+    """Report exceptions from worker threads too.
+
+    `sys.excepthook` only fires for the main thread; a crashing worker used to
+    disappear without a trace, which is exactly the bug people attach an
+    observatory to find.
+    """
+    try:
+        import threading
+
+        previous = threading.excepthook
+
+        def hook(args):
+            try:
+                frames = []
+                for summary in traceback.extract_tb(args.exc_traceback)[-MAX_FRAMES:]:
+                    frames.append({"fn": summary.name, "file": os.path.basename(summary.filename or ""),
+                                   "line": summary.lineno or 0})
+                name = getattr(args.exc_type, "__name__", "Exception")
+                message = str(args.exc_value) if args.exc_value is not None else ""
+                _send({"v": V, "t": "exception", "at": int(time.time() * 1000), "tid": args.thread.ident or 0,
+                       "type": "thread:" + name, "message": message, "frames": frames})
+            except Exception:
+                pass
+            previous(args)
+
+        threading.excepthook = hook
+    except Exception:
+        pass
+
+
 def _install_excepthook():
     previous = sys.excepthook
 
@@ -411,6 +442,7 @@ def boot():
            "agentVersion": "0.2", "caps": ["stack", "snapshot", "watch", "exception", "locals"]})
 
     _install_excepthook()
+    _install_thread_hook()
     hz = float(os.environ.get("NLG_DEBUG_HZ", "10") or 10)
     threading.Thread(target=_sample_loop, args=(hz,), name="nlg-sampler", daemon=True).start()
     threading.Thread(target=_read_loop, args=(sock,), name="nlg-reader", daemon=True).start()

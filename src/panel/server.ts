@@ -22,7 +22,7 @@
  *       PYTHON_BIN             interpreter to use
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { Kernel } from '../kernel/Kernel.js';
@@ -36,30 +36,28 @@ import { renderExtensionsHtml } from './extensions-ui.js';
 import { renderPluginsHtml } from './plugins-ui.js';
 import { renderPyCharmHtml } from './pycharm-ui.js';
 import { renderProfileHtml } from './profile-ui.js';
-import { SAMPLES, type LanguageId } from './samples.js';
+import { SAMPLES } from './samples.js';
 import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
-import { bufferName, normaliseExtensions } from '../langs/manifest.js';
-import type { RegistryRoot } from '../langs/Registry.js';
-import { officialRoots } from '../langs/pluginRoots.js';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { exec as execCb, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
-import type { SandboxLanguage } from '../exec/types.js';
 import { FsService, FsError } from './FsService.js';
 import { McpManager } from '../mcp/McpManager.js';
 import { APP_VERSION } from '../version.js';
-import { discoverInterpreters, pickInterpreter } from '../langs/interpreters.js';
-import { importIdeaProject } from '../langs/ideaImport.js';
-import { attribute } from '../perf/Attribution.js';
 import { ExtensionManager } from '../extensions/ExtensionManager.js';
 import { materializeAssets } from '../desktop/embeddedAssets.js';
 import { StdioTransport, WsTransport, parseFrame, type Transport } from './Transport.js';
 import { FlameSampler } from './flame.js';
 import { runPythonCoverage } from './coverage.js';
 import { gitStatus, gitCommit } from './git.js';
-import { DapClient, type DapStackFrame } from '../dap/DapClient.js';
+import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '../dap/DapClient.js';
 import { discoverBinary } from '../langs/discover.js';
+import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleHover, handleMdRender } from './handlers/languages.js';
+import { envToolchains, handleImportIdea, handleInterpreters, handleSetInterpreter } from './handlers/migration.js';
+import { handleAttribute } from './handlers/attribution.js';
+import { languageRoots, pluginPayload } from './handlers/plugins.js';
 
 /**
  * Directory of this source file. In a Single Executable Application build
@@ -74,277 +72,6 @@ function moduleDir(): string {
   }
 }
 const __dirname = moduleDir();
-
-/**
- * Validate a language id coming off the wire.
- *
- * There is no allow-list any more: languages are plugins, so the id is checked
- * against the workspace's registry (which throws a precise "unknown language"
- * for a bad id) rather than against a hardcoded array.
- */
-function asLanguage(v: unknown, workspace?: WorkspaceService): LanguageId {
-  if (typeof v !== 'string' || !v) return 'python';
-  // An id the workspace does not know is not a crash: it degrades to the
-  // default language, which is what the wire contract has always promised.
-  if (workspace && !workspace.hasLanguage(v)) return 'python';
-  return v;
-}
-
-/**
- * Language ids the execution plane can run. This is *not* the same set as
- * `LANGUAGES`: Markdown renders rather than executes, and the pool only keeps
- * warm workers for the interpreted languages.
- */
-const SANDBOX_LANGUAGES: SandboxLanguage[] = ['python', 'javascript', 'go'];
-
-/** Validate a sandbox language id coming off the wire, defaulting to Python. */
-function asSandboxLanguage(v: unknown): SandboxLanguage {
-  return SANDBOX_LANGUAGES.some((l) => l === v) ? (v as SandboxLanguage) : 'python';
-}
-
-/**
- * Per-language toolchain pins read from the environment.
- *
- * These are the *official* plugin ids; a user-installed plugin is pinned through
- * its own manifest instead. The workspace only ever sees the resulting
- * `Record<pluginId, path>`, so adding a language here is host wiring, not an
- * engine change.
- */
-function envToolchains(): Record<string, string> {
-  const pins: Array<[string, string | undefined]> = [
-    ['python', process.env.PYTHON_BIN],
-    ['go', process.env.GO_BIN],
-    ['javascript', process.env.NODE_BIN],
-    ['markdown', process.env.MARKSMAN_BIN],
-  ];
-  const env = Object.fromEntries(pins.filter((p): p is [string, string] => !!p[1]));
-  // The interpreter picker's pins sit *under* the environment: an explicit
-  // `PYTHON_BIN` is a developer's override for this run and must win.
-  return { ...readToolchainPins(), ...env };
-}
-
-/**
- * Interpreter candidates for one language — migration threshold 1.
- *
- * The answer always names an `active` interpreter: the pin when one is set,
- * otherwise the project's own environment. Leaving it empty would push the
- * decision back to "whatever PATH has", which is the behaviour the picker
- * exists to replace.
- */
-async function handleInterpreters(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const language = asLanguage(msg.language, workspace);
-  const pinned = workspace.toolchains()[language];
-  try {
-    const candidates = await discoverInterpreters(workspace.root, language, {
-      sdkName: typeof msg.sdkName === 'string' && msg.sdkName ? msg.sdkName : undefined,
-    });
-    const picked = pickInterpreter(candidates, { pinned });
-    reply({
-      kind: 'interpreters',
-      language,
-      root: workspace.root,
-      candidates,
-      active: picked?.path ?? null,
-      pinned: pinned ?? null,
-    });
-  } catch (err) {
-    reply({
-      kind: 'interpreters',
-      language,
-      root: workspace.root,
-      candidates: [],
-      active: null,
-      pinned: pinned ?? null,
-      error: (err as Error).message,
-    });
-  }
-}
-
-/** Pin (or unpin) a language's interpreter and rebuild its slot. */
-async function handleSetInterpreter(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const language = asLanguage(msg.language, workspace);
-  const path = typeof msg.path === 'string' ? msg.path : undefined;
-  try {
-    const result = await workspace.setToolchain(language, path);
-    if (result.ok) await saveToolchainPins(workspace.toolchains());
-    reply({ kind: 'interpreterSet', language, ...result });
-  } catch (err) {
-    reply({ kind: 'interpreterSet', language, ok: false, error: (err as Error).message });
-  }
-}
-
-/** Import `.idea/runConfigurations` — migration threshold 2. */
-async function handleImportIdea(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const root = typeof msg.root === 'string' && msg.root.trim() ? msg.root.trim() : workspace.root;
-  try {
-    const result = await importIdeaProject(root);
-    reply({ kind: 'ideaImport', ...result });
-  } catch (err) {
-    reply({
-      kind: 'ideaImport',
-      root,
-      missing: true,
-      projectSdk: undefined,
-      modules: [],
-      configurations: [],
-      warnings: [(err as Error).message],
-    });
-  }
-}
-
-/**
- * Stage 11 — attribute a metric's shift to a point in time.
- *
- * Samples come from the hot perf ring (the same records the Performance tab
- * shows), so the answer is about *this* session, not a stored baseline. The
- * split defaults to the midpoint of the window; `splitAt` pins it to a moment
- * (a deploy, a commit checkout).
- */
-function handleAttribute(
-  kernel: Kernel,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): void {
-  const metric = String(msg.metric ?? '');
-  const values: number[] = [];
-  const times: number[] = [];
-  for (const r of kernel.recentPerf(5000)) {
-    const v =
-      r.type === 'metric'
-        ? r.name === metric
-          ? r.value
-          : undefined
-        : r.type === 'sample'
-          ? r.profileType === metric
-            ? r.value
-            : undefined
-          : r.name === metric
-            ? r.duration
-            : undefined;
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      values.push(v);
-      times.push(r.timestamp);
-    }
-  }
-
-  const splitAt = Number(msg.splitAt);
-  let cut = Number.isFinite(splitAt) && splitAt > 0 ? times.findIndex((t) => t >= splitAt) : Math.floor(values.length / 2);
-  if (cut <= 0 || cut >= values.length) cut = Math.floor(values.length / 2);
-
-  const result = attribute({
-    before: values.slice(0, cut),
-    after: values.slice(cut),
-    series: values,
-  });
-  reply({ kind: 'attribution', metric, ...result, samples: { before: cut, after: values.length - cut } });
-}
-
-/**
- * Pins chosen in the interpreter picker, persisted across restarts.
- *
- * Kept out of the workspace directory on purpose: the interpreter belongs to
- * the *machine*, and a project checked out twice should not disagree with
- * itself about which python it uses.
- */
-function toolchainPinPath(): string {
-  return appDataPath('toolchains.json');
-}
-
-function readToolchainPins(): Record<string, string> {
-  try {
-    const raw = JSON.parse(readFileSync(toolchainPinPath(), 'utf8')) as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(raw).filter((e): e is [string, string] => typeof e[1] === 'string'));
-  } catch {
-    return {};
-  }
-}
-
-async function saveToolchainPins(pins: Record<string, string>): Promise<void> {
-  try {
-    await mkdir(appDataPath(), { recursive: true });
-    await writeFile(toolchainPinPath(), JSON.stringify(pins, null, 2) + '\n', 'utf8');
-  } catch {
-    /* best-effort: a pin that cannot be saved still applies to this session */
-  }
-}
-
-/**
- * The payload the Plugins page renders.
- *
- * Everything here is derived from manifests plus the Phase 4 budget — the page
- * never has a language id of its own, which is the same rule the IDE follows.
- */
-function pluginPayload(workspace: WorkspaceService): Record<string, unknown> {
-  const registry = workspace.languages;
-  const budget = workspace.resourceSummary();
-  const budgetOf = new Map(budget.profiles.map((p) => [p.languageId, p]));
-  const slots = new Map(workspace.status().languages.map((l) => [l.id, l]));
-  // Layer, override and shadow data only exist after a scan; asking the
-  // registry before that throws, and the page must still render.
-  const scanned = registry.isScanned();
-  const overrideOf = new Map((scanned ? registry.overrides() : []).map((o) => [o.id, o]));
-  const plugins = (scanned ? registry.installed() : []).map((p) => {
-    const m = p.manifest;
-    const res = budgetOf.get(m.id);
-    const slot = slots.get(m.id);
-    const override = overrideOf.get(m.id);
-    return {
-      id: m.id,
-      displayName: m.displayName,
-      version: m.version,
-      publisher: m.publisher ?? '',
-      description: m.description ?? '',
-      kind: p.source.kind,
-      removable: p.source.removable,
-      enabled: p.enabled,
-      extensions: normaliseExtensions(m.file),
-      fileName: bufferName(m),
-      runMode: m.run?.mode,
-      needsRunner: !!m.run,
-      runnerError: slot?.runnerError ?? '',
-      lspServerName: m.lsp?.serverName,
-      debugAdapter: m.debug?.adapter,
-      profilerAdapter: m.profiler?.adapter,
-      memoryBytes: res?.memoryBytes ?? 0,
-      memoryRunning: res?.lspRunning ?? false,
-      migrations: (m.migrations ?? []).length,
-      validation: p.validation.issues,
-      validationOk: p.validation.ok,
-      dir: p.source.dir,
-      // Which tier supplied this body, and what `overrides/<id>.json` changed.
-      // The page's job is to make "why is this plugin here / why is its LSP
-      // command different" answerable without a terminal.
-      layer: (scanned ? registry.layerOf(m.id)?.id : undefined) ?? p.source.kind,
-      readOnly: (scanned ? registry.layerOf(m.id)?.readOnly : undefined) ?? !p.source.removable,
-      overrides: override
-        ? { file: override.file, changed: override.changed, stale: override.stale }
-        : undefined,
-    };
-  });
-  return {
-    kind: 'plugins',
-    plugins,
-    resource: budget,
-    runtimes: workspace.runtimes.list(),
-    // Same id in several tiers: the losers are not installed, but seeing them is
-    // the only way to understand a plugin that "should" be a different version.
-    conflicts: scanned ? registry.conflicts() : [],
-    overrideProblems: scanned ? registry.overrideIssues() : [],
-    home: registry.home,
-  };
-}
 
 /**
  * Candidate directories scanned for `extension.json` manifests. `EXT_DIR` may
@@ -365,21 +92,8 @@ function extensionDirs(): string[] {
   return [...new Set([...fromEnv, ...builtins, ...(unpacked ? [unpacked] : [])])];
 }
 
-/**
- * Extra roots scanned for language plugins (`<id>@<version>/manifest.json`).
- *
- * The registry itself owns `~/.nolanguage/builtin` and `~/.nolanguage/languages`;
- * these are the *development* and *packaged* sources of the official plugins,
- * which must not have to be copied into the home directory before first run.
- *
- * `LANG_DIR` (`:`/`;` separated) lets a host or a test point at its own tree.
- */
-function languageRoots(): RegistryRoot[] {
-  // Shared with the CLI and `--dump-plugins` so the three cannot drift apart.
-  return officialRoots();
-}
-
-export interface MainOptions {  /**
+export interface MainOptions {
+  /**
    * How a UI reaches the engine.
    *
    *   `'ws'`    (default) serve HTTP + WebSocket for a browser page, or for the
@@ -435,10 +149,16 @@ export async function main(
   await kernel.start();
 
   // Best-effort install receipt: one place doctor/update can read "which build
-  // is installed here". Only the packaged desktop writes it: `nlg ide` and the
-  // test servers run on node.exe and would otherwise overwrite the receipt with
-  // the interpreter path. Diagnostics must never block startup.
-  if (process.env.NOLANGUAGE_DESKTOP === '1') {
+  // is installed here".
+  //
+  // `NOLANGUAGE_DESKTOP=1` alone is not enough: `nlg desktop` and the
+  // verification suites set it while running under node.exe, and a node path in
+  // this file makes `nlg doctor` report the interpreter as the installed build —
+  // the exact confusion the receipt exists to prevent (0.7.5 found a suite run
+  // had left `exePath: …\node.exe` behind). A receipt describes the *installed
+  // app*, so it is only written when the running image is not node itself.
+  const packagedImage = !/(^|[\\/])node(\.exe)?$/i.test(process.execPath);
+  if (process.env.NOLANGUAGE_DESKTOP === '1' && packagedImage) {
     try {
       await mkdir(appDataPath(), { recursive: true });
       await writeFile(
@@ -844,7 +564,7 @@ export async function main(
 
         // ---------- terminal (PyCharm shell) ----------
         case 'termExec':
-          handleTerm(String(msg.cmd ?? ''), reply, key);
+          handleTerm(String(msg.cmd ?? ''), reply, key, fs.root);
           break;
         case 'termInput': {
           const tc = stateFor(key).termChild;
@@ -1296,19 +1016,104 @@ if (invokedDirectly) {
  * Per-connection interactive-execution state: an attached terminal child and the
  * active run's stdin sink. Keyed by the live connection object.
  */
-const connState = new Map<unknown, {
+interface ConnState {
   runSink?: (d: string) => void;
   termChild?: ChildProcess;
   dap?: DapClient;
-}>();
-function stateFor(conn: unknown): {
-  runSink?: (d: string) => void;
-  termChild?: ChildProcess;
-  dap?: DapClient;
-} {
+  /**
+   * Thread the adapter last reported as stopped. Continue / step / pause must
+   * name the same thread, or an adapter with more than one thread answers
+   * "notStopped" and the toolbar silently does nothing.
+   */
+  dapThreadId?: number;
+}
+const connState = new Map<unknown, ConnState>();
+function stateFor(conn: unknown): ConnState {
   let s = connState.get(conn);
   if (!s) { s = {}; connState.set(conn, s); }
   return s;
+}
+
+const execAsync = promisify(execCb);
+
+/**
+ * Substitute `{placeholder}` tokens in one string.
+ *
+ * A manifest is data, not code, so the only way it can describe "debug the
+ * binary the build just produced" is by naming it. Unknown placeholders are
+ * left alone rather than blanked — a typo should be visible in the adapter's
+ * error, not silently become an empty path.
+ */
+function dbgVarsReduce(s: string, vars: Record<string, string>): string {
+  let out = String(s);
+  for (const [k, v] of Object.entries(vars)) out = out.split(k).join(v);
+  return out;
+}
+
+/**
+ * Build a DAP payload from the manifest's `launch` template.
+ *
+ * String values go through placeholder substitution; `{args}` / `{env}` /
+ * `{cwd}` expand to the *typed* values from the run configuration, because an
+ * adapter wants a real array and object, not their string forms. Any other
+ * value (number, boolean, object) is passed through verbatim, which is how
+ * adapter-specific constants like `MIMode: 'lldb'` are declared.
+ */
+function dbgVarsReduceRecord(
+  tpl: Record<string, unknown>,
+  vars: Record<string, string>,
+  typed: { args?: string[]; env?: Record<string, string>; cwd?: string },
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, raw] of Object.entries(tpl)) {
+    if (typeof raw !== 'string') { out[k] = raw; continue; }
+    const key = raw.trim();
+    if (key === '{args}') { out[k] = typed.args ?? []; continue; }
+    if (key === '{env}') { if (typed.env) out[k] = typed.env; continue; }
+    if (key === '{cwd}') { if (typed.cwd) out[k] = typed.cwd; continue; }
+    if (key === '{stopOnEntry}') { out[k] = vars['{stopOnEntry}'] === 'true'; continue; }
+    out[k] = dbgVarsReduce(raw, vars);
+  }
+  return out;
+}
+
+/**
+ * Everything the debugger views need for one stop: the call stack plus each
+ * scope's variables. Collected together so the UI never has to ask twice —
+ * a stop that showed a stack but no variables looks like a broken debugger.
+ */
+async function collectStopState(dap: DapClient, threadId: number): Promise<{
+  frames: DapStackFrame[];
+  scopes: Array<{ name: string; variablesReference: number; variables: DapVariable[] }>;
+}> {
+  let frames: DapStackFrame[] = [];
+  try {
+    frames = await dap.stackTrace(threadId);
+  } catch {
+    /* the adapter may have no stack for this stop */
+  }
+  const scopes: Array<{ name: string; variablesReference: number; variables: DapVariable[] }> = [];
+  if (frames.length) {
+    let raw: DapScope[] = [];
+    try {
+      raw = await dap.scopes(frames[0].id);
+    } catch {
+      raw = [];
+    }
+    for (const s of raw) {
+      let variables: DapVariable[] = [];
+      const ref = Number(s.variablesReference ?? 0);
+      if (ref > 0) {
+        try {
+          variables = await dap.variables(ref);
+        } catch {
+          variables = [];
+        }
+      }
+      scopes.push({ name: s.name, variablesReference: ref, variables });
+    }
+  }
+  return { frames, scopes };
 }
 
 /**
@@ -1320,7 +1125,7 @@ function stateFor(conn: unknown): {
  * `termInput` to feed the child's stdin. A 4 MiB output cap kills a runaway
  * producer so it can't wedge the panel.
  */
-function handleTerm(cmd: string, reply: (p: unknown) => void, conn: unknown): void {
+function handleTerm(cmd: string, reply: (p: unknown) => void, conn: unknown, cwd: string): void {
   const st = stateFor(conn);
   if (st.termChild) return; // already attached; ignore stray commands
   const started = Date.now();
@@ -1328,7 +1133,7 @@ function handleTerm(cmd: string, reply: (p: unknown) => void, conn: unknown): vo
   const CAP = 4 * 1024 * 1024;
   const shell = process.platform === 'win32' ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
   const args = process.platform === 'win32' ? ['/c', cmd] : ['-c', cmd];
-  const child = spawn(shell, args, { cwd: process.cwd(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(shell, args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   st.termChild = child;
   const cap = (d: Buffer): void => {
     bytes += d.length;
@@ -1472,7 +1277,8 @@ async function handleDebug(
     reply({ kind: 'debugState', ok: false, state: 'running', error: 'a debug session is already running' });
     return;
   }
-  const spec = workspace.manifestOf(language)?.debug;
+  const manifest = workspace.manifestOf(language);
+  const spec = manifest?.debug;
   if (!spec) {
     reply({
       kind: 'debugState',
@@ -1493,6 +1299,98 @@ async function handleDebug(
     });
     return;
   }
+  const template = spec.command?.length ? spec.command : ['{resolved}'];
+  const [head, ...rest] = template;
+  const command = head.replace('{resolved}', resolved.bin);
+  const args = [...rest, ...(spec.args ?? [])].map((a) => a.replace('{resolved}', resolved.bin));
+
+  // Extra launch fields from the configuration: program arguments, environment
+  // overrides and a working directory. All optional; adapters ignore what they
+  // do not understand.
+  const cfgArgs = Array.isArray(msg.args)
+    ? msg.args.map((a) => String(a))
+    : typeof msg.args === 'string' && msg.args
+      ? msg.args.split(/\s+/).filter(Boolean)
+      : [];
+  const cfgEnv = msg.env && typeof msg.env === 'object' ? (msg.env as Record<string, string>) : undefined;
+  // A debug adapter's `cwd` must be absolute — debugpy/dlv spawn the target with
+  // it verbatim. Imported `.idea` configurations carry a *project-relative*
+  // working directory (`$PROJECT_DIR$/src` -> `src`), so resolve it here rather
+  // than handing the adapter a path that does not exist.
+  const rawCwd = typeof msg.cwd === 'string' && msg.cwd.trim() ? msg.cwd.trim() : undefined;
+  const cfgCwd = rawCwd ? resolve(workspace.root, rawCwd) : undefined;
+  const attach = String(msg.request ?? 'launch') === 'attach';
+
+  // ---- attach: connect to a target that is already running ----
+  // Nothing is started, built or written here: the target owns its own program,
+  // and handing an attach a `program` would make the adapter launch a second
+  // copy (or fail saying it cannot).
+  if (attach) {
+    if (!spec.supportsAttach) {
+      reply({
+        kind: 'debugState',
+        ok: false,
+        adapter: spec.adapter,
+        error: `${spec.serverName ?? spec.adapter} cannot attach (manifest.debug.supportsAttach is not set)`,
+        hint: 'use a launch configuration, or declare supportsAttach in the language manifest',
+      });
+      return;
+    }
+    const port = Number(msg.port ?? 0);
+    const processId = Number(msg.processId ?? 0);
+    const host = typeof msg.host === 'string' && msg.host.trim() ? msg.host.trim() : 'localhost';
+    if (!port && !processId) {
+      reply({
+        kind: 'debugState',
+        ok: false,
+        adapter: spec.adapter,
+        error: 'attach needs a port or a process id',
+        hint: 'set Port or Process ID in the Run/Debug configuration',
+      });
+      return;
+    }
+    const attachArgs: Record<string, unknown> = { type: spec.type ?? spec.adapter };
+    if (port) attachArgs.port = port;
+    if (processId) attachArgs.processId = processId;
+    if (!processId) attachArgs.host = host;
+    const dapAttach = new DapClient(
+      kernel,
+      { command, args, adapterId: spec.type ?? spec.adapter, cwd: cfgCwd ?? workspace.root, attach: true, attachArgs },
+      {
+        onStopped: (info) => {
+          void (async () => {
+            const tid = Number(info.threadId) || 1;
+            st.dapThreadId = tid;
+            const stop = await collectStopState(dapAttach, tid);
+            reply({
+              kind: 'debugState', ok: true, state: 'stopped', reason: info.reason,
+              threadId: tid, frames: stop.frames, scopes: stop.scopes,
+            });
+          })();
+        },
+        onOutput: (text, category) => reply({ kind: 'debugOut', text, category }),
+        onTerminated: () => {
+          const live = connState.get(client);
+          if (live) { live.dap = undefined; live.dapThreadId = undefined; }
+          reply({ kind: 'debugState', ok: true, state: 'terminated' });
+        },
+      },
+    );
+    st.dap = dapAttach;
+    try {
+      await dapAttach.start();
+      reply({ kind: 'debugState', ok: true, state: 'running', adapter: spec.adapter, request: 'attach' });
+    } catch (err) {
+      st.dap = undefined;
+      reply({
+        kind: 'debugState', ok: false, adapter: spec.adapter,
+        error: `debug adapter failed: ${(err as Error).message}`,
+      });
+    }
+    return;
+  }
+
+  // ---- launch ----
   // A debug configuration may name the entry script explicitly (VS Code's
   // launch.json `program`). When it does, debug that file on disk; otherwise
   // fall back to the language's scratch buffer (the original behaviour).
@@ -1515,38 +1413,60 @@ async function handleDebug(
       /* missing file — the adapter will report a clean error */
     }
   }
+  // A `preLaunch` step (compiled languages) may rewrite the artifact, so the
+  // source is flushed *before* the build, not after it.
   if (effectiveCode) await writeFile(program, effectiveCode, 'utf8').catch(() => undefined);
 
-  const template = spec.command?.length ? spec.command : ['{resolved}'];
-  const [head, ...rest] = template;
-  const command = head.replace('{resolved}', resolved.bin);
-  const args = [...rest, ...(spec.args ?? [])].map((a) => a.replace('{resolved}', resolved.bin));
+  // Compile first when the manifest asks for it: C/C++/Rust have no
+  // source-level debug target, and handing the adapter a `.cpp` yields a
+  // session that starts and then never stops anywhere.
+  const pre = spec.preLaunch?.cmd;
+  // `{toolchain}` lets a `preLaunch` compile with the very compiler the run
+  // block discovered, instead of assuming one is on PATH under a fixed name.
+  const toolchain = manifest?.run?.discovery
+    ? discoverBinary(manifest.run.discovery, { root: workspace.root }).bin
+    : '';
+  const dbgVars: Record<string, string> = {
+    '{resolved}': resolved.bin,
+    '{toolchain}': toolchain,
+    '{program}': program,
+    '{file}': program,
+    '{workdir}': workspace.root,
+    '{cwd}': cfgCwd ?? workspace.root,
+    '{args}': cfgArgs.join(' '),
+    '{stopOnEntry}': msg.stopOnEntry !== false ? 'true' : 'false',
+    '{exe}': process.platform === 'win32' ? '.exe' : '',
+  };
+  if (pre) {
+    const cmdLine = dbgVarsReduce(pre, dbgVars);
+    try {
+      const out = await execAsync(cmdLine, {
+        cwd: cfgCwd ?? workspace.root,
+        timeout: spec.preLaunch?.timeoutMs ?? 60_000,
+        windowsHide: true,
+      });
+      if (out.stdout) reply({ kind: 'debugOut', text: String(out.stdout), category: 'stdout' });
+      if (out.stderr) reply({ kind: 'debugOut', text: String(out.stderr), category: 'stderr' });
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string; message?: string };
+      reply({
+        kind: 'debugState',
+        ok: false,
+        adapter: spec.adapter,
+        error: `build before debug failed: ${e.message ?? 'unknown error'}`,
+        hint: [e.stdout, e.stderr].filter(Boolean).join('').trim().split('\n').slice(-6).join('\n') || undefined,
+      });
+      return;
+    }
+  }
 
-  // Extra launch fields from the configuration: program arguments, environment
-  // overrides and a working directory. All optional; adapters ignore what they
-  // do not understand. (`request: 'attach'` is accepted but treated as launch
-  // for now — attach needs a running target, which this flow does not yet start.)
-  const cfgArgs = Array.isArray(msg.args)
-    ? msg.args.map((a) => String(a))
-    : typeof msg.args === 'string' && msg.args
-      ? msg.args.split(/\s+/).filter(Boolean)
-      : [];
-  const cfgEnv = msg.env && typeof msg.env === 'object' ? (msg.env as Record<string, string>) : undefined;
-  // A debug adapter's `cwd` must be absolute — debugpy/dlv spawn the target with
-  // it verbatim. Imported `.idea` configurations carry a *project-relative*
-  // working directory (`$PROJECT_DIR$/src` -> `src`), so resolve it here rather
-  // than handing the adapter a path that does not exist.
-  const rawCwd = typeof msg.cwd === 'string' && msg.cwd.trim() ? msg.cwd.trim() : undefined;
-  const cfgCwd = rawCwd ? resolve(workspace.root, rawCwd) : undefined;
-
-  const dap = new DapClient(
-    kernel,
-    {
-      command,
-      args,
-      adapterId: spec.type ?? spec.adapter,
-      cwd: cfgCwd ?? workspace.root,
-      launchArgs: {
+  // The `launch` payload. With a manifest template every field is declared
+  // (Java's mainClass, cppdbg's MIMode, Node's runtimeExecutable …); without
+  // one we fall back to the shape debugpy and delve both accept, so existing
+  // manifests need no change.
+  const launchArgs = spec.launch
+    ? dbgVarsReduceRecord(spec.launch, dbgVars, { args: cfgArgs, env: cfgEnv, cwd: cfgCwd })
+    : {
         program,
         stopOnEntry: msg.stopOnEntry !== false,
         // Compiled-language adapters (dlv dap) need the build mode; ignored by
@@ -1555,35 +1475,51 @@ async function handleDebug(
         ...(cfgArgs.length ? { args: cfgArgs } : {}),
         ...(cfgEnv ? { env: cfgEnv } : {}),
         ...(cfgCwd ? { cwd: cfgCwd } : {}),
-      },
+      };
+
+  const dap = new DapClient(
+    kernel,
+    {
+      command,
+      args,
+      adapterId: spec.type ?? spec.adapter,
+      cwd: cfgCwd ?? workspace.root,
+      launchArgs,
     },
     {
       onStopped: (info) => {
         void (async () => {
-          let frames: DapStackFrame[] = [];
-          try {
-            frames = await dap.stackTrace(info.threadId);
-          } catch {
-            /* the adapter may have no stack for this stop */
-          }
-          reply({ kind: 'debugState', ok: true, state: 'stopped', reason: info.reason, frames });
+          const tid = Number(info.threadId) || 1;
+          st.dapThreadId = tid;
+          const stop = await collectStopState(dap, tid);
+          reply({
+            kind: 'debugState',
+            ok: true,
+            state: 'stopped',
+            reason: info.reason,
+            threadId: tid,
+            frames: stop.frames,
+            scopes: stop.scopes,
+          });
         })();
       },
       onOutput: (text, category) => reply({ kind: 'debugOut', text, category }),
       onTerminated: () => {
         const live = connState.get(client);
-        if (live) live.dap = undefined;
+        if (live) { live.dap = undefined; live.dapThreadId = undefined; }
         reply({ kind: 'debugState', ok: true, state: 'terminated' });
       },
     },
   );
   st.dap = dap;
   try {
-    await dap.start();
     const breakpoints = Array.isArray(msg.breakpoints)
       ? (msg.breakpoints as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
       : [];
-    if (breakpoints.length) await dap.setBreakpoints(program, breakpoints);
+    // Breakpoints go in before the handshake finishes (configurationDone), not
+    // after: the adapter does not start the target until configurationDone, so a
+    // setBreakpoints that lands later is too late when stopOnEntry is false.
+    await dap.start(breakpoints.length ? { file: program, lines: breakpoints } : undefined);
     reply({ kind: 'debugState', ok: true, state: 'running', adapter: spec.adapter, program });
   } catch (err) {
     st.dap = undefined;
@@ -1609,133 +1545,73 @@ async function handleDebugCmd(
     return;
   }
   const cmd = String(msg.cmd ?? '');
+  // Every continuation has to name the thread the adapter stopped on; a wrong
+  // (or defaulted) thread id is the classic "the step button does nothing".
+  const tid = st.dapThreadId ?? 1;
   try {
     if (cmd === 'continue') {
-      await dap.continue_();
+      await dap.continue_(tid);
       reply({ kind: 'debugState', ok: true, state: 'running' });
       return;
     }
+    // Pause lands as its own `stopped` event, so this only acknowledges it.
+    if (cmd === 'pause') {
+      await dap.pause(tid);
+      reply({ kind: 'debugState', ok: true, state: 'pausing', threadId: tid });
+      return;
+    }
     if (cmd === 'next' || cmd === 'stepIn' || cmd === 'stepOut') {
-      if (cmd === 'next') await dap.stepOver();
-      else if (cmd === 'stepIn') await dap.stepIn();
-      else await dap.stepOut();
-      const frames = await dap.stackTrace();
-      reply({ kind: 'debugState', ok: true, state: 'stopped', reason: cmd, frames });
+      if (cmd === 'next') await dap.stepOver(tid);
+      else if (cmd === 'stepIn') await dap.stepIn(tid);
+      else await dap.stepOut(tid);
+      const stop = await collectStopState(dap, tid);
+      reply({
+        kind: 'debugState',
+        ok: true,
+        state: 'stopped',
+        reason: cmd,
+        threadId: tid,
+        frames: stop.frames,
+        scopes: stop.scopes,
+      });
       return;
     }
     if (cmd === 'stack') {
-      const frames = await dap.stackTrace();
-      reply({ kind: 'debugState', ok: true, state: 'stopped', frames });
+      const stop = await collectStopState(dap, tid);
+      reply({ kind: 'debugState', ok: true, state: 'stopped', threadId: tid, frames: stop.frames, scopes: stop.scopes });
+      return;
+    }
+    // Watch list / debugger console.
+    if (cmd === 'evaluate') {
+      const expr = typeof msg.expression === 'string' ? msg.expression : '';
+      const frameId = typeof msg.frameId === 'number' ? msg.frameId : undefined;
+      const r = await dap.evaluate(expr, frameId);
+      reply({
+        kind: 'debugEval',
+        ok: true,
+        expression: expr,
+        result: r.result,
+        type: r.type,
+        variablesReference: r.variablesReference,
+      });
+      return;
+    }
+    // Expanding one structured variable.
+    if (cmd === 'vars') {
+      const ref = Number(msg.variablesReference ?? 0);
+      const variables = ref > 0 ? await dap.variables(ref) : [];
+      reply({ kind: 'debugVars', ok: true, variablesReference: ref, variables });
       return;
     }
     if (cmd === 'stop') {
       await dap.stop();
-      if (st) st.dap = undefined;
+      if (st) { st.dap = undefined; st.dapThreadId = undefined; }
       reply({ kind: 'debugState', ok: true, state: 'terminated' });
       return;
     }
     reply({ kind: 'debugState', ok: false, error: `unknown debug command: ${cmd}` });
   } catch (err) {
     reply({ kind: 'debugState', ok: false, error: (err as Error).message });
-  }
-}
-
-async function handleCheck(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const code = typeof msg.code === 'string' ? msg.code : '';
-  const language = asLanguage(msg.language, workspace);
-  try {
-    const d = await workspace.diagnose(language, code);
-    reply({
-      kind: 'diagnostics',
-      language,
-      uri: d.uri,
-      items: d.items,
-      errors: d.errors,
-      warnings: d.warnings,
-      fromLsp: d.fromLsp,
-      note: d.note,
-    });
-  } catch (err) {
-    reply({ kind: 'error', language, message: `check failed: ${(err as Error).message}` });
-  }
-}
-
-async function handleComplete(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const code = typeof msg.code === 'string' ? msg.code : '';
-  const language = asLanguage(msg.language, workspace);
-  const line = Number(msg.line ?? 0);
-  const character = Number(msg.character ?? 0);
-  const requestId = Number(msg.requestId ?? 0);
-  try {
-    const items = await workspace.complete(language, code, line, character);
-    reply({
-      kind: 'completion',
-      language,
-      requestId,
-      items: items.slice(0, 100).map((i) => ({ label: i.label, kind: i.kind, detail: i.detail })),
-    });
-  } catch (err) {
-    reply({ kind: 'error', language, message: `completion failed: ${(err as Error).message}` });
-  }
-}
-
-async function handleHover(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const code = typeof msg.code === 'string' ? msg.code : '';
-  const language = asLanguage(msg.language, workspace);
-  const line = Number(msg.line ?? 0);
-  const character = Number(msg.character ?? 0);
-  const requestId = Number(msg.requestId ?? 0);
-  try {
-    const hover = await workspace.hover(language, code, line, character);
-    reply({ kind: 'hover', language, requestId, hover });
-  } catch (err) {
-    reply({ kind: 'error', language, message: `hover failed: ${(err as Error).message}` });
-  }
-}
-
-/**
- * Stage 8: render a Markdown document for the preview pane.
- *
- * The reply carries the sanitized HTML plus the metadata the UI shows beside
- * it (title, headings for the outline, render time). `ok: false` keeps the
- * pane in a recoverable state instead of leaving it spinning — a renderer
- * bug must degrade one document, not the connection.
- */
-async function handleMdRender(
-  workspace: WorkspaceService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const code = typeof msg.code === 'string' ? msg.code : '';
-  const language = asLanguage(msg.language, workspace);
-  const requestId = Number(msg.requestId ?? 0);
-  try {
-    const p = await workspace.preview(language, code);
-    reply({ kind: 'mdPreview', language, requestId, ok: true, ...p });
-  } catch (err) {
-    reply({
-      kind: 'mdPreview',
-      language,
-      requestId,
-      ok: false,
-      html: '',
-      headings: [],
-      stats: { blocks: 0, words: 0, codeBlocks: 0, links: 0, headings: 0 },
-      ms: 0,
-      error: `render failed: ${(err as Error).message}`,
-    });
   }
 }
 

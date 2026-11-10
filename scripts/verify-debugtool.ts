@@ -10,7 +10,7 @@
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-debugtool.ts
  */
 import { createServer, type Server, type Socket } from 'node:net';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +25,7 @@ import {
   type StackEvent,
 } from '../src/debugtool/protocol.js';
 import { DEFAULT_LIMITS, countNodes, isSensitive, serializeJs } from '../src/debugtool/serializer.js';
+import type { SNode } from '../src/debugtool/protocol.js';
 import { detectStalls, effectiveHz, foldStacks, stackKey, type StackSample } from '../src/debugtool/sampler.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -216,6 +217,136 @@ check('sampler: the effective rate is measured, not assumed', (() => {
   const hz = effectiveHz(samples);
   return hz > 9 && hz < 11;
 })());
+
+// ------------------------------------------------- TS <-> Python parity
+
+/**
+ * The Python agent mirrors `serializer.ts` by hand.
+ *
+ * Two implementations of one contract always drift; the question is whether the
+ * drift is caught. These checks compare the *decisions* (redact / cycle / cap /
+ * depth) rather than the bytes, because those are the ones that make the UI lie
+ * — a wrong `more` count or a missed cycle is invisible until someone trusts it.
+ */
+interface Shape {
+  tokenWhy: string;
+  selfCycle: boolean;
+  itemCount: number;
+  itemMore: number;
+  deepWhy: string;
+  depthLimit: number;
+  itemLimit: number;
+  stringLimit: number;
+}
+
+function shapeOfTs(): Shape {
+  const deep = (n: number): unknown => (n === 0 ? { end: true } : { next: deep(n - 1) });
+  const withCycle: Record<string, unknown> = { name: 'x', api_token: 'sk-1', items: Array.from({ length: 200 }, (_, i) => i) };
+  withCycle.self = withCycle;
+
+  const root = serializeJs(withCycle);
+  if (root.k !== 'obj') throw new Error('expected obj');
+  const field = (k: string): SNode | undefined => root.fields.find(([name]) => name === k)?.[1];
+
+  const token = field('api_token');
+  const items = field('items');
+  const self = field('self');
+
+  // Walk to the depth ceiling and read why it stopped.
+  let node: SNode = serializeJs(deep(20));
+  let deepWhy = '';
+  for (let i = 0; i < 20; i++) {
+    if (node.k === 'trunc') {
+      deepWhy = node.why;
+      break;
+    }
+    if (node.k !== 'obj') break;
+    const next: SNode | undefined = node.fields[0]?.[1];
+    if (!next) break;
+    node = next;
+  }
+
+  return {
+    tokenWhy: token?.k === 'trunc' ? token.why : `not-trunc:${token?.k}`,
+    selfCycle: self?.k === 'obj' && typeof self.cycle === 'string',
+    itemCount: items?.k === 'seq' ? items.items.length : -1,
+    itemMore: items?.k === 'seq' ? (items.more ?? 0) : -1,
+    deepWhy,
+    depthLimit: DEFAULT_LIMITS.maxDepth,
+    itemLimit: DEFAULT_LIMITS.maxItems,
+    stringLimit: DEFAULT_LIMITS.maxString,
+  };
+}
+
+function shapeOfPython(pythonBin: string): Shape | null {
+  const agentDir = join(root, 'src', 'debugtool', 'agents', 'python');
+  // A Python `dict` serializes as `map` (it really is a mapping), while a JS
+  // plain object is `obj`; the walker below accepts both, because the parity
+  // that matters is the *decisions* (redact/cycle/cap/depth), not the node kind.
+  const script = [
+    'import json, sys',
+    `sys.path.insert(0, ${JSON.stringify(agentDir)})`,
+    'import nlg_agent as a',
+    'obj = {"name": "x", "api_token": "sk-1", "items": list(range(200))}',
+    'obj["self"] = obj',
+    'root = a.ser(obj)',
+    'fields = {}',
+    'for key, val in root.get("entries", []):',
+    '    if key.get("k") == "prim":',
+    '        fields[key["v"]] = val',
+    'def first_child(n):',
+    '    if n.get("k") == "obj" and n.get("fields"):',
+    '        return n["fields"][0][1]',
+    '    if n.get("k") == "map" and n.get("entries"):',
+    '        return n["entries"][0][1]',
+    '    return None',
+    'deep = {"end": True}',
+    'for _ in range(20): deep = {"next": deep}',
+    'node = a.ser(deep)',
+    'why = ""',
+    'for _ in range(24):',
+    '    if node.get("k") == "trunc":',
+    '        why = node["why"]',
+    '        break',
+    '    nxt = first_child(node)',
+    '    if nxt is None: break',
+    '    node = nxt',
+    'tok = fields.get("api_token", {})',
+    'items = fields.get("items", {})',
+    'selfn = fields.get("self", {})',
+    'print(json.dumps({',
+    '  "tokenWhy": tok.get("why", "not-trunc") if tok.get("k") == "trunc" else "not-trunc",',
+    '  "selfCycle": selfn.get("k") == "obj" and isinstance(selfn.get("cycle"), str),',
+    '  "itemCount": len(items.get("items", [])) if items.get("k") == "seq" else -1,',
+    '  "itemMore": items.get("more", 0),',
+    '  "deepWhy": why,',
+    '  "depthLimit": a.MAX_DEPTH,',
+    '  "itemLimit": a.MAX_ITEMS,',
+    '  "stringLimit": a.MAX_STR,',
+    '}))',
+  ].join('\n');
+  const run = spawnSync(pythonBin, ['-c', script], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+  if (run.status !== 0 || !run.stdout.trim()) return null;
+  try {
+    return JSON.parse(run.stdout.trim()) as Shape;
+  } catch {
+    return null;
+  }
+}
+
+const tsShape = shapeOfTs();
+check('parity: the TS serializer redacts by name', tsShape.tokenWhy === 'redacted', tsShape.tokenWhy);
+check('parity: the TS serializer reports cycles', tsShape.selfCycle);
+check('parity: the TS serializer caps items and says how many', tsShape.itemCount === 50 && tsShape.itemMore === 150, `${tsShape.itemCount}+${tsShape.itemMore}`);
+
+const pythonShape = shapeOfPython(process.platform === 'win32' ? 'python' : 'python3');
+if (!pythonShape) {
+  console.log('SKIP  TS/Python serializer parity (python unavailable)');
+} else {
+  for (const key of Object.keys(tsShape) as Array<keyof Shape>) {
+    check(`parity: ${key} matches between TS and Python`, tsShape[key] === pythonShape[key], `${String(tsShape[key])} vs ${String(pythonShape[key])}`);
+  }
+}
 
 // ---------------------------------------------------------------- the channel
 

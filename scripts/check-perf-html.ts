@@ -101,6 +101,14 @@ const capabilities: Array<[string, RegExp]> = [
   ['exposes slow-path clear', /clearSlow/],
   ['exposes a slow-path filter', /st\.slowFilter/],
   ['reconnects after disconnect', /setTimeout\(open,/],
+  // Stage 11 — attribution. The page must offer the action, send the message
+  // the server answers, and render the evidence rather than only a sentence.
+  ['offers the explain action', /explain change/.test(shell)],
+  ['sends the attribute message', /kind: 'attribute'/.test(app)],
+  ['renders the verdict card', /attrCard/.test(shell) && /st\.attr\.verdict/.test(shell)],
+  ['shows the statistics, not just a sentence', /st\.attr\.pValue/.test(shell) && /st\.attr\.effectSize/.test(shell)],
+  ['shows the change point', /st\.attr\.changePoint/.test(shell)],
+  ['can dismiss the verdict', /closeAttr\(\)/.test(shell) && /function closeAttr/.test(app)],
 ];
 for (const [name, ok] of capabilities) {
   checks.push([`implements ${name}`, ok, '']);

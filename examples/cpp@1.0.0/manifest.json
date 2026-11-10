@@ -168,8 +168,20 @@
       "--port",
       "0"
     ],
+    "preLaunch": {
+      "cmd": "\"{toolchain}\" -std=c++17 -g -O0 \"{file}\" -o \"{workdir}/nl_dbg{exe}\"",
+      "timeoutMs": 60000
+    },
+    "launch": {
+      "program": "{workdir}/nl_dbg{exe}",
+      "cwd": "{cwd}",
+      "args": "{args}",
+      "stopOnEntry": "{stopOnEntry}",
+      "MIMode": "lldb"
+    },
     "serverName": "codelldb",
     "memoryHint": "120MB",
-    "degradedNote": "codelldb not installed - debugging is unavailable for C++"
+    "degradedNote": "codelldb not installed - debugging is unavailable for C++",
+    "supportsAttach": true
   }
 }

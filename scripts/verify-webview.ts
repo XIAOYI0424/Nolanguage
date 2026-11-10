@@ -205,10 +205,20 @@ check(
 // Edge's EdgeCore ships a *newer* WebView2 than the Evergreen Runtime. Reading
 // the newest folder made doctor claim WebView2 151 while the runtime an embedded
 // app actually loads was 143 — the exact difference between "works" and "blank".
+// Structural, not textual: the candidate list is an array of *groups*, and the
+// Evergreen Runtime must sit in an earlier group than EdgeCore. Matching the
+// whole list with a character window broke the moment a third path (the
+// per-user install) was added to the first group.
 check(
   'the WebView2 version prefers the Evergreen runtime over EdgeCore',
-  /const WEBVIEW2_CANDIDATES: string\[\]\[\]/.test(source) &&
-    /EdgeWebView\\\\Application[\s\S]{0,120}EdgeCore/.test(source),
+  (() => {
+    const list = /const WEBVIEW2_CANDIDATES: string\[\]\[\] = \[([\s\S]*?)\n\];/.exec(source);
+    if (!list) return false;
+    const groups = list[1].split(/\n  \[/).filter((g) => g.trim());
+    if (groups.length < 2) return false;
+    const evergreen = groups[0];
+    return /EdgeWebView/.test(evergreen) && !/EdgeCore/.test(evergreen) && /EdgeCore/.test(groups[1]);
+  })(),
 );
 
 const failed = results.filter((r) => !r[1]).length;
