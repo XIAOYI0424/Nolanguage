@@ -127,6 +127,11 @@ for (const art of ARTIFACTS) {
 
 // ---------------------------------------------------------------------- report
 
+// Both modes end here. The `--push` gate jumps out early (it only cares about a
+// clean tree); the default path falls through the artifact checks above. A
+// version of this script that *only* jumped early silently passed everything.
+report();
+
 function report() {
 console.log('[release] version ' + pkg.version + (headTag ? ` · tag ${headTag}` : ' · untagged HEAD'));
 for (const n of notes) console.log(`  note  ${n}`);
