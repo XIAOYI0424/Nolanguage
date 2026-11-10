@@ -58,6 +58,8 @@ import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleHover
 import { envToolchains, handleImportIdea, handleInterpreters, handleSetInterpreter } from './handlers/migration.js';
 import { handleAttribute } from './handlers/attribution.js';
 import { languageRoots, pluginPayload } from './handlers/plugins.js';
+import { PerfHandlers } from './handlers/perf.js';
+import { handleFs } from './handlers/fs.js';
 
 /**
  * Directory of this source file. In a Single Executable Application build
@@ -325,6 +327,9 @@ export async function main(
    */
   /** Clients currently attached, so page-specific frames can be broadcast. */
   const wsClients = new Set<Transport>();
+  // Performance cases own `lastProfile` and a cross-client fan-out; see
+  // handlers/perf.ts for why those six cases moved out of the switch.
+  let perfHandlers: PerfHandlers | undefined;
   /**
    * Push the MCP catalogue to every attached client. A connect/disconnect
    * changes what another window should show, and the sidebar repaints from it.
@@ -341,7 +346,21 @@ export async function main(
   };
   /** Last user-code profile result, so a /profile page opened after the IDE
    * triggered a run can render it without the IDE relaying state. */
-  let lastProfile: unknown = null;
+  perfHandlers = new PerfHandlers({
+    workspace,
+    profiler,
+    flame,
+    broadcastToOthers: (payload, except) => {
+      for (const c of wsClients) {
+        if (c === except) continue;
+        try {
+          c.send(payload);
+        } catch {
+          /* a closed client missed the update */
+        }
+      }
+    },
+  });
   /** Project root — where `resolve-loader.mjs` and `scripts/` live. */
   const projectRoot = join(__dirname, '..', '..');
 
@@ -441,6 +460,18 @@ export async function main(
         return;
       }
       switch (msg.kind) {
+        // Performance cases live in handlers/perf.ts: they own `lastProfile` and
+        // fan out to other windows. Delegating here keeps the switch a routing
+        // table instead of a place where state hides.
+        case 'profile':
+        case 'profileLast':
+        case 'profileCaps':
+        case 'coverage':
+        case 'flameStart':
+        case 'flameStop':
+          if (perfHandlers) perfHandlers.handle(String(msg.kind), msg, reply, transport);
+          break;
+
         // ---------- Phase 3 · plugins ----------
         case 'listPlugins':
           reply(pluginPayload(workspace));
@@ -607,29 +638,6 @@ export async function main(
           break;
 
         // Run with coverage (Python stdlib tracer).
-        case 'coverage': {
-          const language = asLanguage(msg.language, workspace);
-          if (language !== 'python') {
-            reply({
-              kind: 'coverageResult',
-              ok: false,
-              language,
-              error: `line coverage is only implemented for Python (this document is ${language})`,
-            });
-            break;
-          }
-          const bin = workspace.languageStatus('python').binary || process.env.PYTHON_BIN || 'python';
-          void runPythonCoverage(bin, String(msg.code ?? ''), {
-            timeoutMs: msg.timeoutMs ? Number(msg.timeoutMs) : 30_000,
-          })
-            .then((r) => reply({ kind: 'coverageResult', ...r }))
-            .catch((err: unknown) =>
-              reply({ kind: 'coverageResult', ok: false, language, error: (err as Error).message }),
-            );
-          break;
-        }
-
-        // Commit pane + git widget: real porcelain status and commit.
         case 'gitStatus':
           void gitStatus(fs.root)
             .then((s) => reply({ kind: 'gitStatus', ...s }))
@@ -647,17 +655,7 @@ export async function main(
           break;
 
         // Kernel flame graph: subscribe this window to live CPU samples.
-        case 'flameStart':
-          flame.subscribe(reply, msg.intervalMs ? Number(msg.intervalMs) : undefined);
-          break;
 
-        case 'flameStop':
-          flame.unsubscribe(reply);
-          break;
-
-        // Command palette → kernel command. The list arrives in `hello`, and
-        // selecting one runs it for real; an argument-taking command answers
-        // with the bus's own error instead of a silent no-op.
         case 'command': {
           const id = String(msg.id ?? '');
           const args = Array.isArray(msg.args) ? (msg.args as unknown[]) : [];
@@ -706,58 +704,8 @@ export async function main(
           break;
 
         // ---------- Stage 10 · user-code profiler ----------
-        case 'profile': {
-          if (!profiler) {
-            reply({ kind: 'profileResult', ok: false, error: 'profiler unavailable', hotspots: [], sampleCount: 0 });
-            break;
-          }
-          // The profiler is the last language-keyed component (Phase 6 moves it
-          // onto manifests), so ask *it* which languages it has adapters for
-          // rather than picking ids here.
-          const wanted = String(msg.language ?? '');
-          const language = profiler.supports(wanted) ? wanted : profiler.defaultLanguage();
-          void profiler
-            .profile({
-              languageId: language,
-              code: String(msg.code ?? ''),
-              timeoutMs: msg.timeoutMs ? Number(msg.timeoutMs) : undefined,
-            })
-            .then((r) => {
-              lastProfile = r;
-              reply({ kind: 'profileResult', ...r });
-              // A /profile page opened in another tab gets it live.
-              for (const c of wsClients) {
-                if (c === transport) continue;
-                try {
-                  c.send({ kind: 'profileResult', ...r });
-                } catch {
-                  /* closed client missed the update */
-                }
-              }
-            })
-            .catch((err: unknown) =>
-              reply({ kind: 'profileResult', ok: false, error: (err as Error).message, hotspots: [], sampleCount: 0 }),
-            );
-          break;
-        }
 
-        case 'profileLast':
-          reply(lastProfile ? { kind: 'profileResult', ...(lastProfile as object) } : { kind: 'profileResult', ok: false, error: 'no profile yet', hotspots: [], sampleCount: 0 });
-          break;
 
-        case 'profileCaps':
-          reply({
-            kind: 'profileCaps',
-            languages: profiler ? profiler.languages().map((m) => ({
-              id: m.id,
-              displayName: m.displayName,
-              adapter: m.profiler?.adapter ?? '',
-              available: profiler.adapterFor(m.id)?.available ?? false,
-            })) : [],
-          });
-          break;
-
-        // ---------- command palette (nlg run <script> -- <args>) ----------
         case 'runScript':
           void handleRunScript(msg, reply, projectRoot);
           break;
@@ -1616,71 +1564,3 @@ async function handleDebugCmd(
 }
 
 // ---------------- project explorer ----------------
-
-/**
- * One dispatcher for every file-system message.
- *
- * A shared error funnel matters here: `FsService` signals a rejected path
- * (traversal, absolute, missing) by throwing `FsError`, and the client must be
- * told *which* path failed and why — otherwise a refused `..` looks identical
- * to a broken explorer. Every branch therefore reports `reqId` back so the UI
- * can clear its pending state, and never lets a rejection reach the socket.
- */
-async function handleFs(
-  fs: FsService,
-  msg: Record<string, unknown>,
-  reply: (p: unknown) => void,
-): Promise<void> {
-  const reqId = Number(msg.reqId ?? 0);
-  const path = typeof msg.path === 'string' ? msg.path : '';
-  const fail = (err: unknown, at?: string): void => {
-    const code = err instanceof FsError ? err.code : 'io';
-    reply({ kind: 'fsError', reqId, path: at ?? path, code, message: (err as Error).message });
-  };
-
-  try {
-    switch (msg.kind) {
-      case 'fsList': {
-        const listing = await fs.list(path);
-        reply({ kind: 'fsListing', reqId, ...listing });
-        return;
-      }
-      case 'fsRead': {
-        const file = await fs.read(path);
-        reply({ kind: 'fsFile', reqId, file });
-        return;
-      }
-      case 'fsWrite': {
-        const saved = await fs.write(path, typeof msg.content === 'string' ? msg.content : '');
-        reply({ kind: 'fsSaved', reqId, path: saved.path, mtime: saved.mtime, size: saved.size });
-        return;
-      }
-      case 'fsCreate': {
-        const entry = await fs.create(path, msg.entryKind === 'dir' ? 'dir' : 'file');
-        reply({ kind: 'fsChanged', reqId, op: 'create', path: entry.path, entry });
-        return;
-      }
-      case 'fsRename': {
-        const to = typeof msg.to === 'string' ? msg.to : '';
-        const entry = await fs.rename(path, to);
-        // `from` travels back so the UI can remap any open tab / expanded node.
-        reply({ kind: 'fsChanged', reqId, op: 'rename', path: entry.path, from: path, entry });
-        return;
-      }
-      case 'fsDelete': {
-        const removed = await fs.remove(path);
-        reply({ kind: 'fsChanged', reqId, op: 'delete', path: removed.path });
-        return;
-      }
-      case 'openFolder': {
-        await fs.setRoot(path);
-        reply({ kind: 'fsRoot', reqId, ...fs.describe() });
-        return;
-      }
-      default:
-        reply({ kind: 'fsError', reqId, code: 'io', message: `unknown fs message: ${String(msg.kind)}` });
-    }
-  } catch (err) {
-    fail(err);
-  }
-}

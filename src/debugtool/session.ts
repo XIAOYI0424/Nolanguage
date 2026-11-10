@@ -210,6 +210,12 @@ export class DebugSession extends EventEmitter {
           watches: [...this.watchMap.keys()],
           redact: this.opts.redact,
         });
+        // A watch added before the agent attached had nowhere to go (`send` is a
+        // no-op without a socket), and the page usually loads first. Re-send the
+        // list now that there is someone to receive it.
+        if (this.watchMap.size) {
+          this.send({ v: PROTOCOL_VERSION, t: 'set-watches', watches: [...this.watchMap.keys()] });
+        }
         this.emit('attached', this.view());
         return;
       }

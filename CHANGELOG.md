@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.7.9 — 2026-11-10
+
+### 发布流程：从"记得做"变成"做不到错"
+
+- **`npm run build:all`**：exe + ndebug + 安装包一条命令，末尾打印产物大小与时间戳，并跑一次发布校验。
+- **`scripts/check-release.mjs`**：检查三件人会忘的事——①工作区干净 ②`package.json` / `src/version.ts` / tag 三者一致 ③**产物比源码新**（二进制不能比代码旧）。`--push` 是只查干净的轻量模式。
+- **`npm run hooks:install`**：装一个 **pre-push** 钩子，工作区不干净就拒绝推送。选 pre-push 而不是 pre-commit，是因为"暂存了但一直不提交"这件事，pre-commit 天然看不见（提交时当然有暂存内容）。
+
+### CI：从"写在仓库里"变成"跑得起来"
+
+- `esbuild` / `postject` / `jsdom` 进入 **devDependencies**：之前靠 `npm install --no-save` 临时装，注册表一抖整个作业就红，而且失败原因和改动无关。
+- Node 版本对齐到 **22**（`build-exe` 的 esbuild target 就是 node22，CI 在 24 上测的是另一个运行时）。
+- **干净克隆重放**（本机无远端，`workflow_dispatch` 跑不了，改用等价做法）：`git clone` → `npm ci` → `tsc` → `vitest` → `verify-all --pure`（**281/281**）→ `build:exe`（**92.6 MiB**），全过。CI 的两个作业因此有了本机证据，而不是"应该能跑"。
+
+### ndebug：支持 JavaScript
+
+- `src/debugtool/agents/js/nlg_agent.js`，用 `node --require` 注入（不改 argv、不改源码）。
+- 采样走 **inspector 的 CPU profiler，500 ms 一个窗口**（10 ms 间隔，约 50 样本/窗口）。**这是窗口采样，不是连续时钟**——窗口之间有空隙，短于空隙的调用会漏，界面标注 `window` 而不是假装连续。
+- 过滤掉两类噪声：Node 自身帧（`node:*` / `internal/*`，用 url 判断，不猜文件名）和 **agent 自己**的 `Profiler.start/stop` 调用——否则"最热栈"永远是 agent。
+- 异常用 `uncaughtExceptionMonitor`：**观察但不改变行为**（普通 `uncaughtException` 监听器会让崩溃的程序活下来）。
+- **没有 live locals**：JS 的帧变量不可达。Watch 只在**全局作用域**求值，界面在 Inspector 里说明原因，而不是留一个空面板。
+- 示例：`debugtool/samples/js/app.js`（嵌套调用 + await 间隙 + 全局对象 + 密钥字段）。
+
+### 修掉的一个真 bug（e2e 才暴露）
+
+**页面先于 agent 加载时，添加的 watch 会被静默丢弃**：`session.setWatches()` 在还没有 socket 时写入无处可去，而 agent 连上后只发 `hello-ack`，两份 agent 都不读它。现在 `hello` 处理里会补发一次 `set-watches`。页面先开、程序后启是常态，这个 bug 会让"加了个监视但永远没值"。
+
+### server.ts 按域拆（第二批）
+
+- `handlers/perf.ts`（profile / profileLast / profileCaps / coverage / flameStart / flameStop）+ `handlers/fs.ts`（6 个 fs case）。
+- **更正一个数字**：之前评估里说"900 行 WS switch"，实际是 **375 行**（443–817），那个 900 是 11-07 文档里的旧数据。`server.ts` 从 1,686 → **1,567 行**。
+- 剩下的 `mcp*` / `sandbox*` **故意不搬**：它们是 3–17 行、直接转发给已经拥有逻辑的服务，搬进 handlers 只会多一个 context 对象、不会减少一个决策。理由写在 `handlers/perf.ts` 的头注释里。
+
+### 验证
+
+- `verify-all` 全绿（37 套件）；`tsc` 0；`npm test` 38/38。
+- `verify-ndebug` 51/51（含 JS：attach → 窗口采样出 `step` → 全局 watch 拿到 `2`）。
+- 干净克隆：`npm ci` + `tsc` + `vitest` + 纯逻辑 281/281 + `build:exe` 全过。
+
 ## 0.7.8 — 2026-11-10
 
 ### 仓库完整性修复（本轮最重要的一件事）

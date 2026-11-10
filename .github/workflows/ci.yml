@@ -30,9 +30,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'
           cache: 'npm'
 
+      # esbuild / postject / jsdom are devDependencies, so this one step is the
+      # whole toolchain: no transient `npm install --no-save` to fail on a
+      # registry hiccup halfway through a job.
       - name: Install dependencies
         run: npm ci
 
@@ -60,23 +63,18 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'
           cache: 'npm'
 
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
 
-      # Runtime dependency (1) + dev toolchain (5). `npm ci` is exact and fast;
+      # No runtime dependencies; 8 dev ones (types, vitest, esbuild, postject, jsdom, ...).
+      # `npm ci` is exact and fast;
       # package-lock.json is committed.
       - name: Install dependencies
         run: npm ci
-
-      # Build + DOM-test tooling, installed transiently (NOT saved to
-      # package.json): esbuild + postject build the SEA exe, jsdom drives the
-      # UI-DOM suites.
-      - name: Install build + DOM-test tools (transient)
-        run: npm install --no-save esbuild postject jsdom
 
       # `build:exe` runs `postbuild:exe`, which mirrors dist/Nolanguage.exe into
       # src-tauri/binaries via scripts/sync-sidecar.mjs — the shell can no

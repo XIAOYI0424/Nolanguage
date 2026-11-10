@@ -156,6 +156,12 @@
         return 'warn';
       });
 
+      /** Does this agent provide live locals? JS does not — say so, not nothing. */
+      var hasLocals = computed(function () {
+        var caps = st.view.caps || [];
+        return caps.indexOf('locals') >= 0;
+      });
+
       var hzText = computed(function () {
         var hz = st.view.actualHz || 0;
         return hz > 0 ? hz.toFixed(1) + ' Hz' : st.view.hz + ' Hz (requested)';
@@ -217,6 +223,7 @@
         stateText: stateText,
         stateClass: stateClass,
         hzText: hzText,
+        hasLocals: hasLocals,
         addWatch: addWatch,
         removeWatch: removeWatch,
         select: select,

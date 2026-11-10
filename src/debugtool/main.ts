@@ -18,6 +18,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, extname, resolve } from 'node:path';
+import agentJs from './agents/js/nlg_agent.js?raw';
 import agentPy from './agents/python/nlg_agent.py?raw';
 import sitecustomizePy from './agents/python/sitecustomize.py?raw';
 import { DebugSession, type SessionView } from './session.js';
@@ -55,8 +56,7 @@ export interface DebugApp {
 export function languageOf(file: string): DebugLanguage | null {
   const ext = extname(file).toLowerCase();
   if (ext === '.py' || ext === '.pyw') return 'python';
-  // The JS agent (inspector window sampling) is M2; refusing is better than
-  // attaching and showing nothing.
+  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') return 'javascript';
   return null;
 }
 
@@ -66,8 +66,7 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
   const language = languageOf(script);
   if (!language) {
     throw new Error(
-      `cannot observe ${basename(script)}: only Python is supported so far (the JS agent is M2). ` +
-        `Supported: .py`,
+      `cannot observe ${basename(script)}: supported languages are Python (.py) and JavaScript (.js/.mjs/.cjs).`,
     );
   }
 
@@ -225,11 +224,25 @@ function removeAgentDir(dir: string): void {
   }
 }
 
+/**
+ * The node binary to run a JS target with.
+ *
+ * `process.execPath` is the right answer from source and the **wrong** answer
+ * when packaged: it points at NDebug.exe, which would re-run the observatory
+ * instead of the user's script. So it is only trusted when it really is node.
+ */
+function nodeBinary(): string {
+  if (process.env.NODE_BIN) return process.env.NODE_BIN;
+  const own = process.execPath;
+  return /(^|[\\/])node(\.exe)?$/i.test(own) ? own : 'node';
+}
+
 /** Write the embedded agent into a temp dir; returns its path. */
 function materialiseAgent(): string {
   const dir = mkdtempSync(resolve(tmpdir(), 'ndebug-agent-'));
   writeFileSync(resolve(dir, 'nlg_agent.py'), agentPy, 'utf8');
   writeFileSync(resolve(dir, 'sitecustomize.py'), sitecustomizePy, 'utf8');
+  writeFileSync(resolve(dir, 'nlg_agent.js'), agentJs, 'utf8');
   return dir;
 }
 
@@ -246,11 +259,16 @@ function spawnTarget(
   const existing = process.env.PYTHONPATH;
   env.PYTHONPATH = existing ? agentDir + delimiter + existing : agentDir;
 
-  const bin = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3');
-  // `-u`: unbuffered, so the program's own output interleaves honestly with the
-  // observatory's log lines. cwd stays the caller's: `ndebug sub/app.py` should
-  // behave like `python sub/app.py` from where it was typed.
-  const child = spawn(bin, ['-u', script, ...args], {
+  const isJs = language === 'javascript';
+  const bin = isJs ? nodeBinary() : process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3');
+  // Python: `-u` unbuffered, injected through PYTHONPATH + sitecustomize.
+  // Node: `--require` the agent; argv and the script itself stay untouched.
+  // cwd stays the caller's: `ndebug sub/app.py` should behave like
+  // `python sub/app.py` from where it was typed.
+  const argv = isJs
+    ? ['--require', resolve(agentDir, 'nlg_agent.js'), script, ...args]
+    : ['-u', script, ...args];
+  const child = spawn(bin, argv, {
     cwd: process.cwd(),
     env,
     windowsHide: true,

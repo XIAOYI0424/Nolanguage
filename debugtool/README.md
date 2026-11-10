@@ -125,8 +125,8 @@ npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 
 | 语言 | 状态 |
 |---|---|
-| Python | 已支持：栈 / 局部变量 / 监视 / 按需快照 / 异常 |
-| JavaScript | 计划中（需要 inspector 窗口采样，会有间隙，界面会标注） |
+| Python | 已支持：栈 / **实时局部变量** / 监视 / 按需快照 / 异常 |
+| JavaScript | 已支持：栈（**500 ms 窗口采样**）/ 全局作用域监视 / 异常。**没有局部变量**——JS 的帧变量从外部不可达，界面会说明原因 |
 | Go | 需要编译期 agent；在此之前明确提示"用 /profile" |
 
 不支持的语言会**直接拒绝**并说明原因，不会"挂上去但什么都不显示"。
@@ -140,6 +140,8 @@ npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 | 页脚 `waiting for agent` | agent 没连上 | 看终端：程序是否启动失败？`PYTHONPATH` 是否被程序自己覆盖了？ |
 | `rejected` | token 不匹配或协议版本不符 | 通常是端口被别的进程占了；换 `--port` |
 | 中栏一直空 | 程序在 agent 启动前就结束了 | 程序要活过 ~200 ms 才有样本 |
+| JS 的栈很浅、没有 `step` | V8 会把小函数内联 | 看到的是被内联后的调用者，这是真实情况 |
+| JS 的 watch 报 `ReferenceError` | 只认全局作用域 | 把要看的对象挂到 `globalThis` 上，或用 `globalThis.x` |
 | 采样率远低于设定 | 程序在 GIL 上长时间占用 | 正常现象；降低 `--hz` 反而更稳 |
 | `dropped` 在涨 | 事件产生快于消费 | 降低 `--hz` |
 
@@ -164,7 +166,8 @@ src/debugtool/                 应用代码
   session.ts                   一个被观测程序：socket + 环形缓冲 + 聚合
   ui.ts                        自包含页面
   assets/debug-app.js          页面逻辑（Vue 3，内联）
-  agents/python/               注入的 agent（文本内嵌进 exe）
+  agents/python/               注入的 agent（sitecustomize，文本内嵌进 exe）
+  agents/js/                   注入的 agent（--require，文本内嵌进 exe）
   main.ts                      库：startDebugApp()
   cli.ts                       唯一入口：ndebug 命令行
 scripts/build-ndebug.mjs       单文件 exe 构建

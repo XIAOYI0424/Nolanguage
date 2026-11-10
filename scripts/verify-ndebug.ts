@@ -139,7 +139,8 @@ check('cli: a bad port is refused', 'error' in parseArgs(['app.py', '--port', '7
 // ------------------------------------------------------------ 4. the app
 
 check('language: .py is observable', languageOf('a.py') === 'python');
-check('language: .js is refused for now, not silently attached', languageOf('a.js') === null);
+check('language: .js is observable', languageOf('a.js') === 'javascript' && languageOf('b.mjs') === 'javascript');
+check('language: .go is refused, not silently attached', languageOf('a.go') === null);
 
 const sample = join(root, 'debugtool', 'samples', 'py', 'app.py');
 if (!existsSync(sample)) {
@@ -196,13 +197,20 @@ if (!existsSync(sample)) {
 
     // A watch added from the page must come back with a value.
     ws.send(JSON.stringify({ kind: 'watch-add', expr: 'len(order.items)' }));
-    const watchDeadline = Date.now() + 5000;
+    const watchDeadline = Date.now() + 8000;
     let watched: { ok?: boolean; value?: { v?: string } } | undefined;
-    while (Date.now() < watchDeadline && !watched) {
+    // The engine registers a watch optimistically (ok:false) the moment it is
+    // added; waiting for *presence* would assert against the placeholder. Wait
+    // for the first evaluated value instead.
+    while (Date.now() < watchDeadline) {
       const v = views[views.length - 1] as Record<string, unknown> | undefined;
       const list = (v?.watches as Array<{ expr: string; ok: boolean; value?: { v?: string } }> | undefined) ?? [];
-      watched = list.find((w) => w.expr === 'len(order.items)');
-      if (!watched) await sleep(150);
+      const found = list.find((w) => w.expr === 'len(order.items)');
+      if (found && found.ok) {
+        watched = found;
+        break;
+      }
+      await sleep(150);
     }
     check('app: a watch added from the page evaluates in the target', watched?.ok === true, JSON.stringify(watched?.value ?? null));
     check('app: the watch value is the real one', watched?.value?.v === '3', String(watched?.value?.v));
@@ -245,6 +253,66 @@ if (!existsSync(sample)) {
     const stillAlive = await (await fetch(`http://127.0.0.1:${busy.port}/health`, { signal: AbortSignal.timeout(2000) })).json();
     check('app: the first instance keeps running after the collision', stillAlive.ok === true, JSON.stringify(stillAlive));
     await busy.close();
+
+    // ---- JavaScript target: inspector window sampling ----
+    const jsSample = join(root, 'debugtool', 'samples', 'js', 'app.js');
+    if (!existsSync(jsSample)) {
+      console.log('SKIP  javascript end-to-end (sample missing)');
+    } else {
+      const jsApp = await startDebugApp({ script: jsSample, port: 0, hz: 10, quiet: true, args: ['300'] });
+      try {
+        const jsWs = new WebSocket(`ws://127.0.0.1:${jsApp.port}/`);
+        const jsViews: Array<Record<string, unknown>> = [];
+        jsWs.onmessage = (ev: MessageEvent) => {
+          try {
+            const msg = JSON.parse(String(ev.data)) as Record<string, unknown>;
+            if (msg.kind === 'view') jsViews.push(msg.view as Record<string, unknown>);
+          } catch {
+            /* ignore */
+          }
+        };
+        await new Promise<void>((resolve, reject) => {
+          jsWs.onopen = () => resolve();
+          jsWs.onerror = () => reject(new Error('js ws failed'));
+          setTimeout(() => reject(new Error('js ws timeout')), 5000);
+        });
+
+        jsWs.send(JSON.stringify({ kind: 'watch-add', expr: 'order.items.length' }));
+
+        // Wait for stacks: the profiler needs a full 500 ms window first.
+        const jsDeadline = Date.now() + 12000;
+        let jsHot: Array<{ stack: string }> = [];
+        while (Date.now() < jsDeadline) {
+          const last = jsViews[jsViews.length - 1] as Record<string, unknown> | undefined;
+          jsHot = (last?.hot as Array<{ stack: string }> | undefined) ?? [];
+          if (jsHot.length && (last?.samples as number) > 2) break;
+          await sleep(200);
+        }
+        check('js: the agent attaches through --require', jsViews.some((v) => v.state === 'attached'), `${jsViews.length} views`);
+        check('js: window sampling produces stacks', jsHot.length > 0, jsHot.slice(0, 2).map((h) => h.stack).join(' | '));
+        check('js: the stacks are the target program', jsHot.some((h) => /work|step|main/.test(h.stack)), jsHot[0]?.stack ?? '');
+
+        const lastJs = jsViews[jsViews.length - 1] as Record<string, unknown> | undefined;
+        check('js: the page is told this language has no live locals', !((lastJs?.caps as string[]) ?? []).includes('locals'), JSON.stringify(lastJs?.caps ?? []));
+
+        const jsWatchDeadline = Date.now() + 8000;
+        let jsWatch: { ok?: boolean; value?: { v?: string } } | undefined;
+        while (Date.now() < jsWatchDeadline) {
+          const v = jsViews[jsViews.length - 1] as Record<string, unknown> | undefined;
+          const list = (v?.watches as Array<{ expr: string; ok: boolean; value?: { v?: string } }> | undefined) ?? [];
+          const found = list.find((w) => w.expr === 'order.items.length');
+          if (found && found.ok) {
+            jsWatch = found;
+            break;
+          }
+          await sleep(200);
+        }
+        check('js: a watch evaluates in global scope', jsWatch?.ok === true && jsWatch?.value?.v === '2', JSON.stringify(jsWatch?.value ?? null));
+        jsWs.close();
+      } finally {
+        await jsApp.close();
+      }
+    }
   } catch (err) {
     const msg = (err as Error).message;
     if (/ENOENT|spawn python|not recognized/i.test(msg)) {

@@ -211,6 +211,10 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
       <div class="body tree" v-if="current">
         <snode :node="current.value" path="$"></snode>
       </div>
+      <div class="empty" v-else-if="st.view.state === 'attached' && !hasLocals">
+        {{ st.view.lang }} does not expose frame locals (a JS frame's variables are
+        not reachable from outside). Use Watch for global expressions.
+      </div>
       <div class="empty" v-else>
         Select a stack to see its live locals, or press “snapshot now”.
       </div>
