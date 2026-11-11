@@ -19,7 +19,7 @@
  * socket must not disturb the engine or the other clients.
  */
 import { appendFileSync } from 'node:fs';
-import type { WebSocketConnection } from './WebSocketServer.js';
+import type { WebSocketConnection } from '../net/websocket.js';
 
 /**
  * Debug trace for the stdio transport: when `NOLANGUAGE_STDIO_TRACE` names a

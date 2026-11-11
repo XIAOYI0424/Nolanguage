@@ -1,4 +1,4 @@
-import { RingBuffer } from './RingBuffer.js';
+import { RingBuffer } from '../util/ringBuffer.js';
 import type { PerfRecord } from './types.js';
 
 /** Hot store for raw PerfRecords backed by a ring buffer (latest N records). */

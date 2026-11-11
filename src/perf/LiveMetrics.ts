@@ -1,12 +1,7 @@
-export interface MetricSummary {
-  count: number;
-  min: number;
-  max: number;
-  avg: number;
-  p50: number;
-  p95: number;
-  p99: number;
-}
+import type { MetricSummary } from './types.js';
+
+// Re-exported for callers that knew it from here before it became vocabulary.
+export type { MetricSummary } from './types.js';
 
 /**
  * Sliding-window metric aggregator. Keeps the last `maxSamples` values per

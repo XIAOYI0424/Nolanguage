@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ulid } from '../util/ulid.js';
-import type { LogCorrelation } from '../kernel/types.js';
+import type { LogCorrelation } from './types.js';
 import { probeGit, GitProbe, UNKNOWN_GIT } from '../git/GitProbe.js';
 import type { GitInfo, GitProbeOptions } from '../git/GitProbe.js';
 

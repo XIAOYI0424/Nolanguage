@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const dir = join(root, 'src', 'panel', 'vendor', 'codemirror');
+const dir = join(root, 'src', 'vendor', 'codemirror');
 
 const REQUIRED = [
   'codemirror.js',

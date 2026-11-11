@@ -1,5 +1,7 @@
-import type { LoggerFactory, LogResourceScope, LogCorrelation } from '../kernel/types.js';
-import type { LogEnvironment } from './types.js';
+import type { LoggerFactory } from './LoggerFactory.js';
+import type { LogResourceScope } from './types.js';
+import type { LogCorrelation } from '../correlation/types.js';
+import type { LogEnvironment } from '../util/env.js';
 import { LoggerImpl } from './Logger.js';
 import type { LogPipeline } from './LogPipeline.js';
 

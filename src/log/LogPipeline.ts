@@ -1,4 +1,4 @@
-import { RingBuffer } from '../perf/RingBuffer.js';
+import { RingBuffer } from '../util/ringBuffer.js';
 import { LogSampler } from './LogSampler.js';
 import { LogLevel } from './LogLevel.js';
 import type { LogRecord } from './types.js';

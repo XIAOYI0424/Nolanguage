@@ -1,20 +1,9 @@
 import { ulid } from '../util/ulid.js';
+import type { Span } from './types.js';
+
+export type { Span } from './types.js';
 import { performance } from 'node:perf_hooks';
 
-export interface Span {
-  id: string;
-  parentId?: string;
-  traceId: string;
-  name: string;
-  startTime: number;
-  endTime?: number;
-  duration?: number;
-  status: 'ok' | 'error' | 'running';
-  attributes: Record<string, unknown>;
-  end(attrs?: Record<string, unknown>): Span;
-  recordException(err: Error): void;
-  setAttribute(key: string, value: unknown): Span;
-}
 
 export interface Tracer {
   startSpan(name: string, opts?: {

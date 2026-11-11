@@ -143,7 +143,14 @@ check(
   'logDesktop() appends a readable line',
   existsSync(logFile) && /probe-event \{"ok":true\}/.test(readFileSync(logFile, 'utf8')),
 );
-rmSync(sessionProbe, { recursive: true, force: true });
+// Cleanup is best-effort. A leftover directory under `.tmp/` must never fail the
+// suite: the sandbox's delete guard can refuse a bulk removal, and that refusal
+// used to take the whole run down with it (the summary then read 0/0).
+try {
+  rmSync(sessionProbe, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+} catch {
+  /* a temp directory is not worth an assertion */
+}
 
 // ---- delegation guard ----
 // Chromium hands an `--app` URL to a browser that already owns the profile and

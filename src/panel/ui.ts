@@ -9,7 +9,7 @@
  * Layout follows the design spec (二十八): header + two columns
  * (Performance | Logs), status bar at the bottom.
  */
-import vueRuntime from './vendor/vue.global.prod.js?raw';
+import vueRuntime from '../vendor/vue.global.prod.js?raw';
 import nlCoreSource from './assets/nl-core.js?raw';
 import monitorAppSource from './assets/monitor-app.js?raw';
 

@@ -17,8 +17,12 @@
  */
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { RegistryRoot } from './Registry.js';
 import { officialRoots, splitEnvList } from './pluginRoots.js';
+import type { RegistryRoot } from './types.js';
+
+export type { RegistryRoot } from './types.js';
+
+
 
 export type LayerId = 'project' | 'builtin' | 'user' | 'cli' | 'system';
 

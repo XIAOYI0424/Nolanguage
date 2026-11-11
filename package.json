@@ -1,6 +1,6 @@
 {
   "name": "nolanguage",
-  "version": "0.7.11",
+  "version": "0.7.12",
   "private": true,
   "type": "module",
   "description": "Unified multi-language dev & execution platform — stages 1–6: minimal kernel (three buses + performance & log spines), live dev panel (WebSocket + UI), a Python + LSP closed loop (RPC instrumentation + LSP log collection), an interactive multi-language workspace (write, run, check, complete), Go support (toolchain discovery + GoRunner + gopls), and a baseline system (git commit 打点 + SQLite warm tier + long-term metric baselines).",
@@ -48,6 +48,7 @@
     "verify:ndebug-go": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-ndebug-go.ts",
     "verify:redact": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-redact.ts",
     "verify:sanitize": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-sanitize.ts",
+    "verify:arch": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-architecture.ts",
     "ndebug": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs src/debugtool/cli.ts",
     "build:ndebug": "node scripts/build-ndebug.mjs",
     "build:all": "node scripts/build-all.mjs",

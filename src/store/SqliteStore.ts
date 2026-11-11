@@ -5,7 +5,7 @@ import os from 'node:os';
 import { LogLevel } from '../log/LogLevel.js';
 import type { LogRecord } from '../log/types.js';
 import type { PerfRecord } from '../perf/types.js';
-import type { BaselineRecord } from '../perf/BaselineStore.js';
+import type { BaselineRecord } from './types.js';
 import { appDataPath } from '../util/appData.js';
 
 /**

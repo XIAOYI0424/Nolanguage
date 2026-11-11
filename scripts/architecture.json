@@ -1,0 +1,64 @@
+{
+  "layers": {
+    "util": 0,
+    "net": 0,
+    "assets": 0,
+    "git": 0,
+    "vendor": 0,
+    "correlation": 1,
+    "log": 2,
+    "store": 3,
+    "perf": 4,
+    "kernel": 5,
+    "runtimes": 6,
+    "mcp": 6,
+    "langs": 7,
+    "lsp": 6,
+    "go": 9,
+    "python": 9,
+    "markdown": 9,
+    "extensions": 9,
+    "dap": 9,
+    "profiler": 10,
+    "exec": 10,
+    "js": 11,
+    "panel": 12,
+    "cli": 13,
+    "desktop": 13,
+    "debugtool": 14,
+    "(root)": 15
+  },
+  "products": {
+    "debugtool": [
+      "util",
+      "net",
+      "assets",
+      "vendor"
+    ]
+  },
+  "allowedCycles": [
+    {
+      "members": [
+        "kernel",
+        "perf"
+      ],
+      "why": "PerfSpine builds its own command/event/service buses to record internal metrics, so perf depends on kernel while the kernel owns the perf spine. Breaking it means giving PerfSpine a narrow host interface instead of constructing a kernel; deferred, tracked here so it cannot grow."
+    },
+    {
+      "members": [
+        "cli",
+        "desktop"
+      ],
+      "why": "Two entry points share the language listing and dump helpers. They belong in a lower slice (panel or a commands slice); deferred because both files are pure formatting and the move touches the installer."
+    }
+  ],
+  "budgets": {
+    "maxFileLines": 1200,
+    "maxSliceFiles": 25
+  },
+  "budgetExceptions": {
+    "panel/server.ts": "the WebSocket switch plus the HTTP routes; splitting it further needs the handlers/ extraction finished (tracked since 0.7.9)",
+    "panel/WorkspaceService.ts": "the workspace aggregate: languages, LSP, buffers and the registry mirror in one object. Splitting it is a design change, not a move",
+    "panel": "the app shell is 30 files by nature (one page per UI plus its server side); the budget counts files, and this slice is the one that renders"
+  }
+}

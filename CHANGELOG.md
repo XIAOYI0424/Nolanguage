@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.7.12 — 2026-11-11
+
+### 架构契约：把"分层"从文档变成构建失败
+
+`scripts/verify-architecture.ts` + `scripts/architecture.json`，`npm run verify:arch`。五条规则，全部从真实 import 图推导，不读注释、不读文档：
+
+| 规则 | 内容 |
+|---|---|
+| R1 层序 | 切片只能 import 严格更低层；27 个切片各有一个声明层号 |
+| R2 无环 | 切片图和文件图都不得有成员数 > 1 的强连通分量（账本列出的除外） |
+| R3 词汇 | **零 import 的 `types.ts`**（以及根下无 import 的文件）是共享词汇，任何层可引用 |
+| R4 产品边界 | `debugtool` 只能 import `util`/`net`/`assets`/`vendor` |
+| R5 预算 | 单文件 ≤ 1200 行、单切片 ≤ 25 文件，超出必须记账 |
+
+**账本只能缩小**：新增违规失败、已记账的违规变多失败、已记账的违规消失也失败（逼你删过期条目）。
+
+### 先修检查器，再谈架构
+
+第一版分析器报"文件级循环 0 个"。那是假的：`edges` 的 key 是相对路径、value 是绝对路径，邻接查找永远落空，环检测恒返回 0。修正后真实数字是 **3 个文件环 + 8 组切片互依赖**。
+
+所以契约的第一段是**自检**：用合成图跑 2 环、3 环、DAG、绝对路径四种情形，通过之后才允许它判断真实代码。同一个坑在词汇规则上又踩了一次——`types.ts` 的正则只认 `/`，Windows 路径是 `\`，词汇豁免整条失效，6 个切片看起来纠缠成一团。
+
+### 解掉的耦合（实测前后）
+
+| 动作 | 解开了什么 |
+|---|---|
+| `panel/WebSocketServer.ts` → `net/websocket.ts` | ndebug 不再 import 应用外壳（产品边界从违规变干净） |
+| `panel/vendor/` → `src/vendor/` | vendored 代码不再属于任何业务切片 |
+| `desktop/embeddedAssets.ts` → `assets/` | `panel ↔ desktop`、`extensions ↔ desktop` 两组环 |
+| 4 个日志类型从 `kernel/types.ts` 移回归属（`correlation`/`log`/`util`） | `log → kernel` 4 条边 → 0 |
+| `LogSpine` → `kernel/` | kernel 拥有它自己的脊柱（它本来就 `new` 它） |
+| `perf/RingBuffer` → `util/` | 通用数据结构不再住在 perf |
+| `Span`/`MetricSummary`/`BaselineRecord`/`RegistryRoot` → 词汇或归属切片 | `log ↔ perf`、`perf ↔ store`、`langs` 三文件环 |
+
+**8 组互依赖 + 3 个文件环 → 2 组已记账 + 0 个文件环。**
+
+判断"类型该放哪"的规则只有一条：**这个概念在哪里产生/持久化/定义语义**。反面教材是之前的做法——谁用得多放谁那儿，于是 `kernel/types.ts`、`perf/BaselineStore.ts`、`langs/Registry.ts` 互相 import 成环。
+
+### 修掉两个"测试基建在撒谎"
+
+- **`0/0` 的套件被算作通过**：一个模块被搬走导致某套件 `ERR_MODULE_NOT_FOUND` 崩在第一条断言之前，汇总仍然打印 `1978/1978 checks passed`。现在 `0/0` 记为 `EMPTY` 并计入失败，汇总行会写 `N SUITE(S) DID NOT PASS`。
+- **`verify-cli-launch` 用自己的句子报告**（`2 passed, 0 failed`），harness 读不到，于是它一直以 `0/0` 隐身。改成标准格式后它真的开始被计数。
+- **清理失败会带走整个套件**：`verify-webview` 里一句 `rmSync(sessionProbe)` 遇到沙箱的批量删除保护就抛异常，套件崩在最后一条断言之后，汇总变成 `0/0`。清理是 best-effort，不该是断言。
+
+### 验证
+
+- `verify-all`：**2015/2015 · 43 套件**；`tsc` 0；`npm test` 38/38。
+- `verify-arch`：14/14（含 4 条自检）· 153 文件 · 435 条 import。
+- 纯逻辑闸门：**383/383 · 13 套件**。
+
 ## 0.7.11 — 2026-11-11
 
 ### Go：`--attach` 轮询 pprof（路线改了，理由在 DESIGN）

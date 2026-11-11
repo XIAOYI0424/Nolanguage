@@ -30,13 +30,11 @@ import {
 } from './manifest.js';
 import type { RuntimeRegistry } from '../runtimes/RuntimeRegistry.js';
 import { defaultLayers, layersFromRoots, type LayerId, type PluginLayer } from './layers.js';
+import type { RegistryRoot } from './types.js';
+
+export type { RegistryRoot } from './types.js';
 import { applyOverride, readOverride } from './overrides.js';
 
-export interface RegistryRoot {
-  dir: string;
-  kind: 'builtin' | 'user';
-  removable: boolean;
-}
 
 /** One id found in more than one layer; the loser is kept for `--dump-plugins`. */
 export interface ScanConflict {

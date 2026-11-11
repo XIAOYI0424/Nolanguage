@@ -3,8 +3,9 @@ import { LogLevel } from './LogLevel.js';
 import type {
   LogRecord, LogEnvironment, LogResource, LogCodeScope, LogError,
 } from './types.js';
-import type { LogCorrelation, LogResourceScope } from '../kernel/types.js';
-import type { Span } from '../perf/Tracer.js';
+import type { LogCorrelation } from '../correlation/types.js';
+import type { LogResourceScope } from './types.js';
+import type { Span } from '../perf/types.js';
 import type { LogPipeline } from './LogPipeline.js';
 
 export interface Logger {

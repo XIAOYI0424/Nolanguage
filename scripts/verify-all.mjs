@@ -55,6 +55,8 @@ const stages = [
   { name: 'Debug · redaction rules', script: 'scripts/verify-redact.ts', pure: true },
   // Recording export: token removal, re-redaction, scrub patterns.
   { name: 'Debug · sanitize a recording', script: 'scripts/verify-sanitize.ts' },
+  // The architecture contract: layers, cycles, product boundary, budgets.
+  { name: 'Arch · contract', script: 'scripts/verify-architecture.ts', pure: true },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.
@@ -183,12 +185,24 @@ for (const [i, stage] of selected.entries()) {
 }
 
 console.log(`\n${'='.repeat(72)}\n  SUMMARY\n${'='.repeat(72)}`);
+// A suite that ran but produced no checks did not pass — it crashed before its
+// first assertion. Marking that "0/0 PASS" is how a broken suite hides inside a
+// green total (this happened: a moved module broke one suite's import, and the
+// summary still read "1978/1978 passed").
+let empty = 0;
 for (const s of summary) {
-  const mark = s.code === 0 ? (s.skipped ? 'SKIP' : 'PASS') : 'FAIL';
+  const isCrashed = !s.skipped && s.code !== 0;
+  const isEmpty = !s.skipped && s.code === 0 && s.total === 0;
+  if (isEmpty) empty++;
+  const mark = s.skipped ? 'SKIP' : isCrashed ? 'FAIL' : isEmpty ? 'EMPTY' : 'PASS';
   console.log(`  ${mark}  ${s.name.padEnd(46)} ${s.passed}/${s.total} checks`);
 }
 const totalPassed = summary.reduce((a, s) => a + s.passed, 0);
 const totalChecks = summary.reduce((a, s) => a + s.total, 0);
 const ran = summary.filter((s) => !s.skipped).length;
-console.log(`\n  ${totalPassed}/${totalChecks} checks passed across ${ran} suites`);
-process.exit(failed ? 1 : 0);
+const bad = failed + empty;
+console.log(
+  `\n  ${totalPassed}/${totalChecks} checks passed across ${ran} suites` +
+    (bad ? `  ·  ${bad} SUITE(S) DID NOT PASS` : ''),
+);
+process.exit(bad ? 1 : 0);

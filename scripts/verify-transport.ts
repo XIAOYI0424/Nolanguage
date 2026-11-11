@@ -22,7 +22,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { StdioTransport, WsTransport, parseFrame, type Transport } from '../src/panel/Transport.js';
-import type { WebSocketConnection } from '../src/panel/WebSocketServer.js';
+import type { WebSocketConnection } from '../src/net/websocket.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const results: { name: string; ok: boolean; detail: string }[] = [];

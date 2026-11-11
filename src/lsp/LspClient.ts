@@ -19,7 +19,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { JsonRpcConnection, type JsonRpcMessage } from './jsonrpc.js';
 import { LspLogCollector, type LspLogStats } from './LspLogCollector.js';
-import { embeddedAssetPath } from '../desktop/embeddedAssets.js';
+import { embeddedAssetPath } from '../assets/embeddedAssets.js';
 import type { Kernel } from '../kernel/Kernel.js';
 import type { Logger } from '../log/Logger.js';
 

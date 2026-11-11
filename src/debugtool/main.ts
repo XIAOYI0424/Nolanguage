@@ -28,7 +28,7 @@ import agentJs from './agents/js/nlg_agent.js?raw';
 import agentPy from './agents/python/nlg_agent.py?raw';
 import sitecustomizePy from './agents/python/sitecustomize.py?raw';
 import { DebugSession, type SessionView } from './session.js';
-import { WebSocketServer, type WebSocketConnection } from '../panel/WebSocketServer.js';
+import { WebSocketServer, type WebSocketConnection } from '../net/websocket.js';
 import { renderDebugHtml } from './ui.js';
 import { Recorder, describeRecording, playback, readRecording, type Playback, type Recording } from './recorder.js';
 import { dumpToStackLines, parseGoroutineDump, pprofUrl } from './agents/go/pprof.js';

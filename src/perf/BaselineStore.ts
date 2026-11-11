@@ -2,6 +2,9 @@ import { ulid } from '../util/ulid.js';
 import type { MetricSummary } from './LiveMetrics.js';
 import type { LiveMetrics } from './LiveMetrics.js';
 import type { SqliteStore } from '../store/SqliteStore.js';
+import type { BaselineRecord } from '../store/types.js';
+
+export type { BaselineRecord } from '../store/types.js';
 
 /**
  * Long-term metric baselines (Stage 6 · 基线系统, spec 十).
@@ -11,20 +14,6 @@ import type { SqliteStore } from '../store/SqliteStore.js';
  * it against the previous baseline to surface regressions.
  */
 
-export interface BaselineRecord {
-  id: string;
-  gitCommit: string;
-  gitBranch?: string;
-  configHash?: string;
-  sessionId?: string;
-  createdAt: number;
-  appVersion?: string;
-  /** Free-form name for this checkpoint (e.g. `commit 4f2a1b9`). */
-  label?: string;
-  /** Why the checkpoint was taken: `initial` | `git-commit` | `manual` | … */
-  reason?: string;
-  metrics: Record<string, MetricSummary>;
-}
 
 export type DeltaStatus = 'new' | 'gone' | 'regressed' | 'improved' | 'stable';
 

@@ -7,7 +7,7 @@
  */
 import { Kernel } from '../src/kernel/Kernel.js';
 import { LogLevel } from '../src/log/LogLevel.js';
-import { RingBuffer } from '../src/perf/RingBuffer.js';
+import { RingBuffer } from '../src/util/ringBuffer.js';
 import { LogSampler } from '../src/log/LogSampler.js';
 import { levelFromName } from '../src/log/LogLevel.js';
 

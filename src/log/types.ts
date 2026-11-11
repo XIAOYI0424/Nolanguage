@@ -1,11 +1,10 @@
 import { LogLevel } from './LogLevel.js';
-import type { LogResourceScope, LogCorrelation } from '../kernel/types.js';
-import type { PerfEnvironment } from '../perf/types.js';
+import type { LogCorrelation } from '../correlation/types.js';
+import type { LogEnvironment } from '../util/env.js';
+// Re-exported: `log/types` is the log slice's public surface, and the
+// definition lives in `util` because that is what builds it.
+export type { LogEnvironment } from '../util/env.js';
 
-/** LogEnvironment = PerfEnvironment + required appVersion. */
-export interface LogEnvironment extends PerfEnvironment {
-  appVersion: string;
-}
 
 export interface LogResource {
   scope: LogResourceScope;
@@ -58,3 +57,8 @@ export interface LogRecord {
   tags?: string[];
   sampled?: boolean;
 }
+
+/** What a record says it came from. */
+export type LogResourceScope =
+  | 'kernel' | 'extension' | 'language-server'
+  | 'execution' | 'user-code' | 'ai' | 'markdown';

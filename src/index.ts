@@ -35,7 +35,7 @@ export type {
   PerfResource, PerfScope, PerfCorrelation, PerfEnvironment,
   PerfEnvelope, PerfEvent, PerfSample, PerfMetric, PerfRecord, PerfResourceScope,
 } from './perf/types.js';
-export { RingBuffer } from './perf/RingBuffer.js';
+export { RingBuffer } from './util/ringBuffer.js';
 export { LiveMetrics } from './perf/LiveMetrics.js';
 export type { MetricSummary } from './perf/LiveMetrics.js';
 export { PerfStore } from './perf/PerfStore.js';
@@ -56,8 +56,8 @@ export { LogPipeline } from './log/LogPipeline.js';
 export { LogSampler } from './log/LogSampler.js';
 export type { SamplerOptions } from './log/LogSampler.js';
 export { LogFactory } from './log/LogFactory.js';
-export { LogSpine } from './log/LogSpine.js';
-export type { LogSpineOptions } from './log/LogSpine.js';
+export { LogSpine } from './kernel/LogSpine.js';
+export type { LogSpineOptions } from './kernel/LogSpine.js';
 export { ConsoleTransport } from './log/transports/ConsoleTransport.js';
 
 // ---------------- Extension host (Stage 2 · 面板接入) ----------------
@@ -84,8 +84,8 @@ export type {
   PanelHubOptions, PanelSink, PanelFilter, PanelServerMessage,
   ClientLogRecord, SlowEntry, PanelLevelName,
 } from './panel/PanelHub.js';
-export { WebSocketServer, WebSocketConnection } from './panel/WebSocketServer.js';
-export type { WsServerOptions } from './panel/WebSocketServer.js';
+export { WebSocketServer, WebSocketConnection } from './net/websocket.js';
+export type { WsServerOptions } from './net/websocket.js';
 export { renderPanelHtml } from './panel/ui.js';
 export { startDemo, startTraffic } from './panel/demo-commands.js';
 

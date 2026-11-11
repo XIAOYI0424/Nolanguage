@@ -1,6 +1,15 @@
 import type { Tracer } from '../perf/Tracer.js';
 import type { CorrelationBus } from '../correlation/CorrelationBus.js';
 import type { Logger } from '../log/Logger.js';
+import type { LoggerFactory } from '../log/LoggerFactory.js';
+import type { LogCorrelation } from '../correlation/types.js';
+import type { LogResourceScope } from '../log/types.js';
+
+// Re-exported so the kernel keeps one public surface. The definitions live
+// where the concept is owned, which is what removes the slice cycles.
+export type { LogCorrelation } from '../correlation/types.js';
+export type { LogResourceScope } from '../log/types.js';
+export type { LoggerFactory } from '../log/LoggerFactory.js';
 
 export type Disposable = { dispose(): void };
 
@@ -80,19 +89,7 @@ export interface ServiceRegistry {
 
 // ---------------- Shared correlation + scopes ----------------
 
-export type LogResourceScope =
-  | 'kernel' | 'extension' | 'language-server'
-  | 'execution' | 'user-code' | 'ai' | 'markdown';
 
-export interface LogCorrelation {
-  gitCommit?: string;
-  gitBranch?: string;
-  configHash?: string;
-  sessionId?: string;
-  requestId?: string;
-  userId?: string;
-  traceId?: string;
-}
 
 // ---------------- View / Language / Config (later-phase stubs) ----------------
 
@@ -131,19 +128,6 @@ export interface Configuration {
   forWorkspace(): ConfigScope;
 }
 
-export interface LoggerFactory {
-  forExtension(id: string): Logger;
-  forComponent(name: string): Logger;
-  /** Logger scoped to a language server (scope = 'language-server'). */
-  forLanguageServer(languageId: string, component?: string): Logger;
-  /** Logger scoped to the execution plane / sandbox (scope = 'execution'). */
-  forExecution(component: string, sessionId?: string): Logger;
-  /** Logger scoped to user code output (scope = 'user-code'). */
-  forUserCode(languageId: string, sessionId?: string): Logger;
-  /** Logger scoped to the Markdown render pipeline (scope = 'markdown'). */
-  forMarkdown(component?: string): Logger;
-  root(): Logger;
-}
 
 // ---------------- Kernel ----------------
 

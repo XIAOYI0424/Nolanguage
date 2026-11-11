@@ -63,7 +63,7 @@ import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { appDataPath } from '../util/appData.js';
-import { isPackaged } from './embeddedAssets.js';
+import { isPackaged } from '../assets/embeddedAssets.js';
 import { killTree, logDesktop, patchSession } from './session.js';
 
 /** Where the WebView engine binaries typically live on Windows. */

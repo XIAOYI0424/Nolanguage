@@ -10,7 +10,7 @@
  * this page is the analytical one: full metric summaries, per-subsystem
  * attribution, trend history and slow-path correlation.
  */
-import vueRuntime from './vendor/vue.global.prod.js?raw';
+import vueRuntime from '../vendor/vue.global.prod.js?raw';
 import nlCoreSource from './assets/nl-core.js?raw';
 import perfAppSource from './assets/perf-app.js?raw';
 

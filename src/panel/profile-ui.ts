@@ -9,7 +9,7 @@
  * This is the *user's code* profile (Stage 10), deliberately separate from
  * `/perf`, which measures the kernel itself.
  */
-import vueRuntime from './vendor/vue.global.prod.js?raw';
+import vueRuntime from '../vendor/vue.global.prod.js?raw';
 import nlCoreSource from './assets/nl-core.js?raw';
 import profileAppSource from './assets/profile-app.js?raw';
 

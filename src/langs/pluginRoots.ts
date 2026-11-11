@@ -15,8 +15,8 @@
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { materializeAssets } from '../desktop/embeddedAssets.js';
-import type { RegistryRoot } from './Registry.js';
+import { materializeAssets } from '../assets/embeddedAssets.js';
+import type { RegistryRoot } from './types.js';
 
 /**
  * Directory of this module. `import.meta.url` is not a `file://` URL inside the

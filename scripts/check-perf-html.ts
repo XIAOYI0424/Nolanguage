@@ -57,7 +57,7 @@ for (const [i, block] of blocks.entries()) {
 let templateError = '';
 let templateSize = 0;
 try {
-  const vueSource = readFileSync(join(here, '..', 'src', 'panel', 'vendor', 'vue.global.prod.js'), 'utf8');
+  const vueSource = readFileSync(join(here, '..', 'src', 'vendor', 'vue.global.prod.js'), 'utf8');
   // eslint-disable-next-line no-new-func
   const Vue = new Function(vueSource + '\n;return Vue;')() as { compile(t: string): unknown };
   (globalThis as unknown as { Vue: unknown }).Vue = Vue;

@@ -1,12 +1,12 @@
-import type { Kernel } from '../kernel/types.js';
-import { LogPipeline } from './LogPipeline.js';
-import { LogFactory } from './LogFactory.js';
-import { LogSampler } from './LogSampler.js';
-import { ConsoleTransport } from './transports/ConsoleTransport.js';
-import { LogLevel } from './LogLevel.js';
-import type { LogEnvironment } from './types.js';
+import type { Kernel } from './types.js';
+import { LogPipeline } from '../log/LogPipeline.js';
+import { LogFactory } from '../log/LogFactory.js';
+import { LogSampler } from '../log/LogSampler.js';
+import { ConsoleTransport } from '../log/transports/ConsoleTransport.js';
+import { LogLevel } from '../log/LogLevel.js';
+import type { LogEnvironment } from '../log/types.js';
 import type { CorrelationBus } from '../correlation/CorrelationBus.js';
-import type { Logger } from './Logger.js';
+import type { Logger } from '../log/Logger.js';
 
 export interface LogSpineOptions {
   level?: LogLevel;

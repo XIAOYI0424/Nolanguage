@@ -79,7 +79,9 @@ async function main(): Promise<void> {
   await testLaunch('web', '7411');
   await testLaunch('desktop', '7412');
 
-  console.log(`\n${passed} passed, ${failed} failed`);
+  // The harness reads `N/M checks passed`; printing a different sentence made
+  // this suite invisible to the summary (it counted as 0/0 and looked neutral).
+  console.log(`\n${passed}/${passed + failed} checks passed`);
   if (failed) {
     console.log('failures:');
     for (const f of fails) console.log(`  - ${f}`);

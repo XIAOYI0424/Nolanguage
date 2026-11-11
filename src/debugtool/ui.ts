@@ -9,7 +9,7 @@
  * Dark by default, unlike the panel pages: this is a standalone developer tool
  * that people keep open next to their editor, not a page inside the IDE shell.
  */
-import vueRuntime from '../panel/vendor/vue.global.prod.js?raw';
+import vueRuntime from '../vendor/vue.global.prod.js?raw';
 import appSource from './assets/debug-app.js?raw';
 
 export interface DebugPageOptions {

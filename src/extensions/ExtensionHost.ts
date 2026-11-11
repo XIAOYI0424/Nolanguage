@@ -22,7 +22,7 @@ import { join, relative, resolve } from 'node:path';
 import { ulid } from '../util/ulid.js';
 import type { Kernel } from '../kernel/Kernel.js';
 import { connectChildProcess } from '../lsp/jsonrpc.js';
-import { isPackaged } from '../desktop/embeddedAssets.js';
+import { isPackaged } from '../assets/embeddedAssets.js';
 import { LogLevel } from '../log/LogLevel.js';
 import type { LogRecord } from '../log/types.js';
 import type { RegisteredExtension } from './ExtensionRegistry.js';
