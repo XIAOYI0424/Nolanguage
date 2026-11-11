@@ -17,6 +17,7 @@
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DebugSession } from '../src/debugtool/session.js';
@@ -169,6 +170,36 @@ check('page: shows a shifted path in the tooltip', html.includes('e.pathBefore')
 check('page: marks a replay session', html.includes('st.view.replay') && html.includes('replay {{ replayPct }}'));
 check('page: a replay is read-only', html.includes(':disabled="!!st.view.replay"'));
 check('page: shows the oversized counter', html.includes('st.view.oversized'));
+
+// Every check above is a string search, and a broken Vue template still passes
+// all of them while rendering a blank page. Mount the real thing once: the
+// template compiles at mount time, so a syntax error surfaces here and nowhere
+// else.
+{
+  let JSDOM: unknown;
+  try {
+    JSDOM = createRequire(join(root, 'package.json'))('jsdom').JSDOM as unknown;
+  } catch {
+    console.log('SKIP  page mount (jsdom unavailable)');
+  }
+  if (JSDOM) {
+    const Ctor = JSDOM as new (markup: string, opts: Record<string, unknown>) => {
+      window: { document: Document; close: () => void };
+    };
+    const dom = new Ctor(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://127.0.0.1:7000/' });
+    await sleep(400);
+    const doc = dom.window.document;
+    const buttons = Array.from(doc.querySelectorAll('button')).map((b) => (b.textContent ?? '').trim());
+    check('page: the Vue app actually mounts', (doc.querySelector('#app')?.children.length ?? 0) > 0, `${buttons.length} buttons`);
+    check('page: the inspector offers baseline and diff', buttons.indexOf('baseline') >= 0 && buttons.indexOf('diff') >= 0, buttons.join(','));
+    check('page: diff starts disabled without a baseline', (() => {
+      const btn = Array.from(doc.querySelectorAll('button')).find((b) => (b.textContent ?? '').trim() === 'diff');
+      return btn !== undefined && btn.hasAttribute('disabled');
+    })());
+    // The page retries its socket forever; without this the suite never exits.
+    dom.window.close();
+  }
+}
 
 // --------------------------------------------------- 3. the CLI contract
 
