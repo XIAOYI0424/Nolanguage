@@ -20,6 +20,9 @@
   var createApp = Vue.createApp;
 
   var WS_URL = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/';
+  // Set by the server only when an engine answered /health. Empty means the link
+  // is not rendered at all, which is the normal case for a standalone tool.
+  var ENGINE = (typeof window.__NLG_ENGINE__ === 'string' ? window.__NLG_ENGINE__ : '').replace(/\/$/, '');
   var PING_MS = 20000;
   var RETRY_MS = 1000;
 
@@ -45,6 +48,7 @@
           badLines: 0,
           oversized: 0,
           baselines: [],
+          startedAt: 0,
           replay: null,
         },
         draft: '',
@@ -168,10 +172,43 @@
         return 'warn';
       });
 
-      /** Does this agent provide live locals? JS does not — say so, not nothing. */
+      /** Does this agent provide live locals? JS and Go do not — say so, not nothing. */
       var hasLocals = computed(function () {
         var caps = st.view.caps || [];
         return caps.indexOf('locals') >= 0;
+      });
+
+      /** Why there are no locals, in the source's own terms. */
+      var noLocalsReason = computed(function () {
+        if (st.view.lang === 'javascript') return "a JS frame's variables are not reachable from outside";
+        if (st.view.lang === 'go') return 'a pprof dump carries stacks, not values';
+        return 'this source does not report values';
+      });
+
+      /**
+       * Whether Watch can do anything at all.
+       *
+       * Driven by `caps`, not by the mode: a Go session and a replay both cannot
+       * evaluate, but for different reasons, and a JS session *can* (globally).
+       * A disabled input with the reason next to it beats a button that silently
+       * does nothing.
+       */
+      var watchBlockedReason = computed(function () {
+        if (st.view.replay) return '回放：程序已经结束，表达式无法再求值。这里显示的是录制时求出的值。';
+        var caps = st.view.caps || [];
+        if (st.view.state === 'attached' && caps.indexOf('watch') < 0) {
+          return '这个来源不能求值表达式：' + noLocalsReason.value + '。';
+        }
+        return '';
+      });
+
+      var canWatch = computed(function () {
+        return !watchBlockedReason.value;
+      });
+
+      var canSnapshot = computed(function () {
+        var caps = st.view.caps || [];
+        return caps.indexOf('snapshot') >= 0;
       });
 
       /** Diffing needs a baseline captured for the snapshot currently shown. */
@@ -186,6 +223,21 @@
         var r = st.view.replay;
         if (!r || !r.total) return '0%';
         return Math.round((r.position / r.total) * 100) + '%';
+      });
+
+      /**
+       * The jump to the engine's Performance page, or '' when there is no engine.
+       *
+       * The window is the session's own lifetime: `startedAt` is fixed, `to` moves
+       * with the view (4 Hz), so the link always describes "this session, so far".
+       */
+      var perfHref = computed(function () {
+        if (!ENGINE || !st.view.startedAt) return '';
+        var params = new URLSearchParams();
+        params.set('from', String(st.view.startedAt));
+        params.set('to', String(Date.now()));
+        params.set('src', 'ndebug:' + (st.view.target || 'session'));
+        return ENGINE + '/perf?' + params.toString();
       });
 
       var hzText = computed(function () {
@@ -267,8 +319,13 @@
         stateClass: stateClass,
         hzText: hzText,
         hasLocals: hasLocals,
+        noLocalsReason: noLocalsReason,
+        watchBlockedReason: watchBlockedReason,
+        canWatch: canWatch,
+        canSnapshot: canSnapshot,
         canDiff: canDiff,
         replayPct: replayPct,
+        perfHref: perfHref,
         markBaseline: markBaseline,
         showDiff: showDiff,
         closeDiff: closeDiff,

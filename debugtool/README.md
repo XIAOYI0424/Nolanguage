@@ -40,6 +40,12 @@ ndebug app.py --record crash.ndlog -- 80
 
 # 5. 回放（不需要原程序，也不需要 Python）
 ndebug --replay crash.ndlog --speed 4
+
+# 6. Go：程序自己开 pprof，然后 attach（Go 没有外部注入的办法）
+ndebug --attach http://127.0.0.1:6060
+
+# 7. 分享录像前先脱敏
+ndebug --sanitize crash.ndlog --out share.ndlog --scrub "sk-[A-Za-z0-9]+"
 ```
 
 `--` 之后的一切原样传给被观测的程序（上例里 `80` 是示例的循环次数）。
@@ -132,7 +138,36 @@ ndebug --replay crash.ndlog --speed 0  # 直接跳到最终状态
 | 写失败只是关掉录制 | 磁盘满 / 文件被占 / 没权限，都不能影响观测本身 |
 | 尾部半行会被丢弃 | 崩溃时最后一行常常是半截；丢掉它并标注，而不是让整个文件读不了 |
 
-录制文件里带着当次会话的握手 token（回放要用它复现握手）。它守护的是一个**已经关闭的**回环端口，但仍然算凭据——所以录像当日志对待，别直接贴到公开 issue 里。
+录制文件里带着当次会话的握手 token（回放要用它复现握手）。它守护的是一个**已经关闭的**回环端口，但仍然算凭据——所以分享之前先脱敏：
+
+```bash
+ndebug --sanitize crash.ndlog --out share.ndlog --scrub "sk-[A-Za-z0-9]+"
+```
+
+它做三件事，并且**不猜**：
+
+| 做什么 | 为什么 |
+|---|---|
+| 删掉 header 和 `hello` 里的 token | 它守护的端口已经关了，但读者无法知道这一点 |
+| 用**当前**规则重新脱敏所有值 | 录像里的脱敏用的是录制时的规则；规则变严之后，旧录像仍然带着那个值 |
+| 按你给的正则清空字符串 | 密钥可能藏在异常消息或普通字符串里，按字段名匹配看不见它 |
+
+输出是一个新文件（永远不覆盖输入——原始文件是唯一能用更好的规则重新脱敏的东西），头部带 `sanitized` 标记，写明改了什么。
+
+报告会说明数量：`17 events · token removed from header · token removed from 1 hello · 2 fields re-redacted · 3 values scrubbed`。**没有 `--scrub` 时字符串里的密钥会留下**——这是基于字段名的脱敏的诚实边界，报告里的 `0 values scrubbed` 就是在说这件事。
+
+---
+
+## 跳到 /perf
+
+如果本机同时跑着 Nolanguage 引擎（默认 `127.0.0.1:7310`），页脚会出现 `perf ↗`：它把**这个会话的时间窗**带过去，`/perf` 顶栏会显示 `window 12:03:11 → 12:03:41 · from ndebug:app.py`，并把趋势图裁到那一段。
+
+几条边界写在页面上，而不是让人猜：
+
+- 引擎没在跑 → 没有链接（探测 `/health`，800ms 超时，不拖慢启动）。
+- 引擎晚于 ndebug 启动 → 刷新页面即可，页面每次请求都重新渲染。
+- `/perf` 的 **KPI 总计是当前 digest，不是窗口内**——趋势图被裁了，总计没有。横幅会明说。
+- 趋势的时间戳是**页面自己的接收时间**。服务器播种的历史没有时间戳，这些行标 `windowed: false`，横幅会说"有 N 条趋势无法裁剪，未过滤显示"。混着裁和不裁而不说，会让同一张图有两种含义。
 
 ---
 
@@ -162,12 +197,32 @@ ndebug --replay crash.ndlog --speed 0  # 直接跳到最终状态
 | 序列化 | 深 6 / 宽 50 / 单串 512 字符 / 总节点 4000 | 一个巨大对象不该拖死程序 |
 | 局部变量 | 每次最多 24 个名字，2 Hz | 变量多的函数不会刷屏 |
 | 表达式 | **只执行你手动输入的** | 不自动跑任何线上来的东西 |
-| 脱敏 | token/secret/password/apikey/... | 在进程内完成，不依赖 UI 遮挡 |
+| 脱敏 | 可配置（见下）；默认 token/secret/password/apikey/... | 在进程内完成，不依赖 UI 遮挡 |
 | 单行上限 | 256 KiB | 超了只丢这一条并计数（`oversized`），**不断开会话** |
 | 未完成行 | 1 MiB 后放弃并重新对齐 | 一行永远不结束不能把内存吃光 |
 | 引擎侧树预算 | 20,000 节点 | agent 限额是 4,000；这是防止别的 agent 把页面撑爆的兜底 |
 
 **注意**：监视表达式是 `eval`，它会**真的执行代码**。写 `x.append(1)` 就会改变程序状态。工具不阻止你，但你需要知道。
+
+### 脱敏规则可配置
+
+默认名单是"凭据形状"的词。真实项目里总有两个方向不够用：自己的字段名不在名单里（漏了），或者 `token_count` 这种被误伤（多了）。所以有两张表，**白名单优先**：
+
+```bash
+ndebug app.py --redact sessionid,x-api-key      # 再加几个名字（子串，不区分大小写）
+ndebug app.py --allow token_count               # 这些即使命中也不隐藏
+ndebug app.py --config ndebug.json              # 写进文件
+```
+
+```json
+{ "redact": { "names": ["sessionid"], "allow": ["token_count", "secretary"] } }
+```
+
+也可以写成一行 `{ "redact": ["sessionid"] }`。
+
+优先级：默认 → 配置文件 → 命令行。**`names` 只能加不能减**——配置文件无法把 `password` 从名单里去掉，因为那正是这个功能最不该允许的错误。要放行就写 `allow`，它无条件优先。
+
+规则通过握手时的 `hello-ack` 下发给 agent，所以 Python 和 JS 用的是同一份规则，而不是各自硬编码一份。
 
 ---
 
@@ -177,9 +232,15 @@ ndebug --replay crash.ndlog --speed 0  # 直接跳到最终状态
 |---|---|
 | Python | 已支持：栈 / **实时局部变量** / 监视 / 按需快照 / 异常 |
 | JavaScript | 已支持：栈（**500 ms 窗口采样**）/ 全局作用域监视 / 异常。**没有局部变量**——JS 的帧变量从外部不可达，界面会说明原因 |
-| Go | 需要编译期 agent；在此之前明确提示"用 /profile" |
+| Go | 已支持（`--attach`）：**轮询 pprof 端点**拿全部 goroutine 的栈。没有 locals、没有 watch——dump 里没有值。直接 `ndebug app.go` 会打印两行改动和要跑的命令 |
 
 不支持的语言会**直接拒绝**并说明原因，不会"挂上去但什么都不显示"。
+
+### Go 为什么是 `--attach`
+
+Go 没有 `sitecustomize`、没有 `--require`，也没有从进程外注入钩子的办法。它有的是 `net/http/pprof`：任何挂了 pprof handler 的程序都会用一份文本 dump 回答 `/debug/pprof/goroutine?debug=2`，里面是每个 goroutine 的完整栈。
+
+所以 ndebug 去**轮询那个端点**。代价写在明面上：它是轮询不是进程内采样；只有栈没有值；而且 dump 里包含了产生 dump 的那个 goroutine——那个必须滤掉，否则观测台自己的 HTTP handler 永远是"最热栈"。
 
 ---
 
@@ -197,6 +258,11 @@ ndebug --replay crash.ndlog --speed 0  # 直接跳到最终状态
 | `oversized` 在涨 | 某个值超过了 256 KiB 的单行上限 | 正常保护；要看那个值就单独监视它的字段，别整个对象 |
 | `diff` 按钮是灰的 | 还没有为当前快照点过 `baseline` | 先点 `baseline`，改变发生后再点 `diff` |
 | 回放时 `waiting for agent` | 录像里没有 `hello`（文件被截断在开头） | 换一个录像；头部行缺失的文件也能放，但没有目标信息 |
+| `ndebug app.go` 直接退出 | Go 无法从外部注入 | 按输出的两行改程序，然后 `--attach` |
+| `--attach` 后页脚 `agent exited` | 3 次连续拉不到 pprof | 端点挂了或程序退出；恢复后会自动重新 attach |
+| Go 的 Inspector 是空的 | pprof 只有栈没有值 | 这是设计，不是 bug；用 dlv 看变量 |
+| `--allow` 写了但字段还是被隐藏 | 拼写没命中（子串匹配，不区分大小写） | 用字段名里的**一段**，不要写完整路径 |
+| `--sanitize` 之后文件里还有密钥 | 它只按字段名 + 你给的正则清 | 加 `--scrub`；报告里的 `0 values scrubbed` 就是在提示这个 |
 
 ---
 
@@ -207,6 +273,9 @@ npm run verify:debugtool   # 协议 / 序列化 / 采样聚合 + 真实进程通
 npm run verify:ndebug      # 会话 / 页面 / 端到端 attach + watch + diff + 录制回放（91 条）
 npm run verify:diff        # 快照 diff 纯逻辑（46 条）
 npm run verify:stress      # 大对象 / 大树 / 失控行 / agent 进程内开销（29 条）
+npm run verify:ndebug-go   # pprof 解析 + 对真实 Go 程序 attach（44 条）
+npm run verify:redact      # 脱敏规则与配置文件（36 条）
+npm run verify:sanitize    # 录像脱敏导出（29 条）
 npm run build:ndebug       # 打 dist/NDebug.exe
 ```
 
@@ -221,6 +290,11 @@ src/debugtool/                 应用代码
   session.ts                   一个被观测程序：socket + 环形缓冲 + 聚合 + 基线/diff
   diff.ts                      两棵快照树的差异（纯函数）
   recorder.ts                  录制 / 读取 / 定时回放
+  redact.ts                    脱敏规则（names + allow，纯函数）
+  sanitize.ts                  录像脱敏导出（去 token / 重脱敏 / 正则清洗）
+  perfLink.ts                  跳 /perf 的窗口链接（纯函数）
+  agents/go/pprof.ts           Go goroutine dump 解析
+  agents/go/guide.ts           `ndebug app.go` 时的操作指引
   ui.ts                        自包含页面
   assets/debug-app.js          页面逻辑（Vue 3，内联）
   agents/python/               注入的 agent（sitecustomize，文本内嵌进 exe）
@@ -228,7 +302,7 @@ src/debugtool/                 应用代码
   main.ts                      库：startDebugApp()
   cli.ts                       唯一入口：ndebug 命令行
 scripts/build-ndebug.mjs       单文件 exe 构建
-scripts/verify-{debugtool,ndebug,diff,stress}.ts
+scripts/verify-{debugtool,ndebug,ndebug-go,diff,stress,redact,sanitize}.ts
 ```
 
 三条不能破的规则：

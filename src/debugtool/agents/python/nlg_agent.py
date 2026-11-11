@@ -48,6 +48,11 @@ _state = {
     "sent": 0,
     "dropped": 0,
     "ticks": 0,
+    # The engine owns these: it sends them in `hello-ack`. Keeping a local copy
+    # means a session with a custom allowlist redacts correctly from the first
+    # tick, and a session that never gets an ack falls back to the defaults.
+    "redact": list(REDACT),
+    "redact_allow": [],
 }
 _main_ident = None
 
@@ -80,8 +85,19 @@ def _connect():
 # ------------------------------------------------------------------- serializer
 
 def _sensitive(name):
+    """Is this field name a secret?
+
+    The allowlist wins, unconditionally: it exists to override a match
+    (`token_count` matches `token`, and hiding it helps nobody). Both lists come
+    from the engine's `hello-ack`, so the rule lives in one place instead of
+    being hard-coded here and in two other agents.
+    """
     low = name.lower()
-    return any(r in low for r in REDACT)
+    allow = _state.get("redact_allow") or ()
+    if any(a and a in low for a in allow):
+        return False
+    names = _state.get("redact") or REDACT
+    return any(n and n in low for n in names)
 
 
 def _typename(v):
@@ -359,7 +375,14 @@ def _read_loop(sock):
 
 def _handle_command(cmd):
     t = cmd.get("t")
-    if t == "set-watches":
+    if t == "hello-ack":
+        names = cmd.get("redact")
+        allow = cmd.get("redactAllow")
+        if isinstance(names, list):
+            _state["redact"] = [str(n).strip().lower() for n in names if isinstance(n, str) and n.strip()]
+        if isinstance(allow, list):
+            _state["redact_allow"] = [str(a).strip().lower() for a in allow if isinstance(a, str) and a.strip()]
+    elif t == "set-watches":
         watches = cmd.get("watches")
         _state["watches"] = [w for w in watches if isinstance(w, str)][:32] if isinstance(watches, list) else []
     elif t == "snapshot":

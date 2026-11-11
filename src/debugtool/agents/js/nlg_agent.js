@@ -99,7 +99,14 @@ function boot() {
       } catch {
         continue;
       }
-      if (cmd.t === 'set-watches' && Array.isArray(cmd.watches)) {
+      if (cmd.t === 'hello-ack') {
+        if (Array.isArray(cmd.redact)) {
+          redact.names = cmd.redact.filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim().toLowerCase());
+        }
+        if (Array.isArray(cmd.redactAllow)) {
+          redact.allow = cmd.redactAllow.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim().toLowerCase());
+        }
+      } else if (cmd.t === 'set-watches' && Array.isArray(cmd.watches)) {
         watches.clear();
         for (const w of cmd.watches) if (typeof w === 'string') watches.add(w);
       } else if (cmd.t === 'bye') {
@@ -295,7 +302,23 @@ function framesFromStack(stack) {
  * directory, before any of our code exists.
  */
 const LIMITS = { depth: 6, items: 50, str: 512, nodes: 4000 };
-const REDACT = ['password', 'passwd', 'secret', 'token', 'apikey', 'api_key', 'authorization', 'cookie', 'credential'];
+const REDACT_DEFAULT = ['password', 'passwd', 'secret', 'token', 'apikey', 'api_key', 'authorization', 'cookie', 'credential'];
+
+// Replaced by the engine's `hello-ack`. The defaults apply until it arrives, so
+// the very first value is never less protected than the ones after it.
+let redact = { names: REDACT_DEFAULT.slice(), allow: [] };
+
+/**
+ * Is this field name a secret?
+ *
+ * The allowlist wins: `token_count` matches `token`, and a debugger that hides a
+ * number for no visible reason teaches people to distrust the redaction.
+ */
+function isSensitive(key) {
+  const low = String(key).toLowerCase();
+  if (redact.allow.some((a) => a && low.includes(a))) return false;
+  return redact.names.some((n) => n && low.includes(n));
+}
 
 function ser(value, depth, seen, budget, key) {
   depth = depth || 0;
@@ -303,9 +326,7 @@ function ser(value, depth, seen, budget, key) {
   budget = budget || { left: LIMITS.nodes };
 
   if (--budget.left < 0) return { k: 'trunc', why: 'size' };
-  if (key && REDACT.some((r) => String(key).toLowerCase().includes(r))) {
-    return { k: 'trunc', why: 'redacted', t: typeof value };
-  }
+  if (key && isSensitive(key)) return { k: 'trunc', why: 'redacted', t: typeof value };
   if (value === null) return { k: 'prim', t: 'none', v: 'null' };
   if (value === undefined) return { k: 'prim', t: 'none', v: 'undefined' };
 

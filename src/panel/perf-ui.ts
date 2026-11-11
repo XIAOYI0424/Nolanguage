@@ -53,6 +53,18 @@ export function renderPerfHtml(port: number): string {
   .nav a.on { color:var(--accent); border-color:var(--border); background:var(--bg-elevated); font-weight:600; }
 
   /* ---------- kpi strip ---------- */
+  /* A window handed over from ndebug: stated, not silently applied. */
+  #winbar { display:flex; align-items:center; gap:10px; padding:6px 14px;
+    background:var(--bg-secondary); border-bottom:1px solid var(--border);
+    font-size:11.5px; color:var(--text-secondary); }
+  #winbar .wlabel { text-transform:uppercase; letter-spacing:.7px; font-size:10.5px; font-weight:600; }
+  #winbar .wrange { font-family:var(--mono); color:var(--text-primary); }
+  #winbar .wsrc { color:var(--accent); }
+  #winbar .wnote { color:var(--text-secondary); font-size:11px; }
+  #winbar .spacer { flex:1; }
+  #winbar button { font-size:11px; padding:1px 8px; border-radius:5px; border:1px solid var(--border);
+    background:var(--bg-elevated); color:var(--text-secondary); cursor:pointer; }
+
   #kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
     gap:1px; background:var(--border); border-bottom:1px solid var(--border); flex:0 0 auto; }
   .kpi { background:var(--bg-secondary); padding:8px 13px; min-width:0; }
@@ -213,6 +225,16 @@ export function renderPerfHtml(port: number): string {
     <span>{{ st.conn === 'on' ? 'connected' : st.conn === 'off' ? 'disconnected — retrying' : 'connecting…' }}</span>
   </div>
 </header>
+
+<div id="winbar" v-if="st.window">
+  <span class="wlabel">window</span>
+  <span class="wrange">{{ windowLabel }}</span>
+  <span class="wsrc" v-if="st.window.src">from {{ st.window.src }}</span>
+  <span class="wnote" v-if="windowUnfiltered">{{ windowUnfiltered }} trends have no client-side timestamps and are shown unfiltered</span>
+  <span class="wnote">KPI totals below are the current digest, not the window</span>
+  <span class="spacer"></span>
+  <button @click="clearWindow()">clear</button>
+</div>
 
 <div id="kpis">
   <div class="kpi">

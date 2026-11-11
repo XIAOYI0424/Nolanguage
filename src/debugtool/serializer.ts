@@ -33,6 +33,8 @@ export interface SerializeLimits {
   maxNodes: number;
   /** Field names (case-insensitive substring) whose values are redacted. */
   redact: string[];
+  /** Substrings that exempt a field even when it matches `redact`. */
+  redactAllow?: string[];
 }
 
 export const DEFAULT_LIMITS: SerializeLimits = {
@@ -43,9 +45,15 @@ export const DEFAULT_LIMITS: SerializeLimits = {
   redact: ['password', 'passwd', 'secret', 'token', 'apikey', 'api_key', 'authorization', 'cookie', 'credential'],
 };
 
-/** `true` when a field name looks like a secret. */
-export function isSensitive(name: string, redact: string[]): boolean {
+/**
+ * `true` when a field name looks like a secret.
+ *
+ * The allowlist is checked first and wins: it exists to override a match, and an
+ * exemption that only applied when nothing matched would never apply at all.
+ */
+export function isSensitive(name: string, redact: string[], allow: string[] = []): boolean {
   const lower = name.toLowerCase();
+  if (allow.some((a) => a && lower.includes(a))) return false;
   return redact.some((r) => r && lower.includes(r));
 }
 
@@ -72,7 +80,7 @@ export function serializeJs(value: unknown, limits: SerializeLimits = DEFAULT_LI
   function walk(v: unknown, depth: number, path: string, key?: string): SNode {
     if (!spend()) return { k: 'trunc', why: 'size' };
 
-    if (key !== undefined && isSensitive(key, limits.redact)) return { k: 'trunc', why: 'redacted', t: typeof v };
+    if (key !== undefined && isSensitive(key, limits.redact, limits.redactAllow)) return { k: 'trunc', why: 'redacted', t: typeof v };
 
     if (v === null) return { k: 'prim', t: 'none', v: 'null' };
     if (v === undefined) return { k: 'prim', t: 'none', v: 'undefined' };

@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.7.11 — 2026-11-11
+
+### Go：`--attach` 轮询 pprof（路线改了，理由在 DESIGN）
+
+Go 没有 `sitecustomize`、没有 `--require`，也没有从进程外注入钩子的办法。原计划的"编译期 agent"要求用户改 `go build`（`-toolec`），对 CI 构建脚本是侵入性的。
+
+改走 pprof：任何挂了 `net/http/pprof` 的程序都会用一份文本 dump 回答 `/debug/pprof/goroutine?debug=2`，里面是每个 goroutine 的完整栈。
+
+- `ndebug --attach http://127.0.0.1:6060` —— 地址可以是 `host:port`、pprof 索引或完整 dump URL。
+- `ndebug app.go` 不再是一句"不支持"，而是**操作指引**：两行改动 + 要跑的命令 + 明确说"没有 locals、没有 watch"。
+- 解析器按**真实 dump** 写（`scripts/verify-ndebug-go.ts` 的 fixture 来自一台真跑的 Go 1.27 程序）。三个只有真实数据才暴露的点：
+  - 函数名带参数表（`main.work(0x7ff7...)`），不剥掉则同一个函数的两帧看起来都不一样，热栈永远合并不了；
+  - 采样器自己的 goroutine 必须滤掉，而且要在**缩短函数名之前**判断（`net/http/pprof.Index` 缩短后变成 `pprof.Index`，丢了上下文）——否则"最热栈"永远是观测台自己的 HTTP handler；
+  - `[chan receive, 9 minutes]` 里时长不是状态；`created by ...` 不是帧。
+- 断线自愈：连续 3 次拉不到就标 detached（页面不会假装还连着），恢复后自动重新 attach。
+- 页面按能力而不是按模式禁写：`caps: ['stack']` → Watch 与 snapshot 按钮禁用并给出原因。
+
+### 脱敏规则可配置（顺带修一个死配置）
+
+引擎一直在 `hello-ack` 里发 `redact`，**两个 agent 从来没读过**——一个看起来配好了、实际不生效的开关。现在两边都读。
+
+- 两张表：`names`（命中即隐藏）、`allow`（命中即放行，**无条件优先**）。
+- 三层来源：默认 → `--config <file>` → `--redact a,b` / `--allow a,b`。
+- **`names` 只能加不能减**：配置文件无法把 `password` 从名单里去掉。要放行写 `allow`。
+- 配置文件接受两种形状：`{ "redact": ["a"] }` 与 `{ "redact": { "names": [...], "allow": [...] } }`；拼错键名是错误而不是静默忽略。
+- 端到端验证：真实 Python 进程里 `api_token` 因白名单**可见**、`price` 因自定义名**被隐藏**。
+
+### 录像脱敏导出
+
+`ndebug --sanitize crash.ndlog --out share.ndlog --scrub "sk-[A-Za-z0-9]+"`
+
+- 删掉 header 与 `hello` 里的 token（两处都要删——只删一处等于没删）。
+- 用**当前**规则重新脱敏所有值：录像里的脱敏用的是录制时的规则。
+- 按 `--scrub` 正则清字符串与异常消息。**不猜**——会静默漏掉的启发式比用户配置的规则更危险，因为它制造虚假的信心。
+- 不覆盖输入；输出头部带 `sanitized` 标记；报告写明数量，没有 `--scrub` 时 `0 values scrubbed` 就是在提示"字符串里的密钥还在"。
+- 修一个顺序 bug：敏感名检查原先在 `prim` 分支之后，导致**基本类型的敏感字段从来没被脱敏**（只有容器会）——正好是最常见的密钥形状。
+
+### `/perf` 时间窗互跳
+
+- ndebug 页脚出现 `perf ↗`（仅当引擎 `/health` 可达；800ms 探测，不拖慢启动）。
+- 链接带 `from`/`to`/`src`；`/perf` 顶栏显示窗口并把**趋势图**裁到那一段，可一键清除。
+- 三处边界写在页面上：KPI 总计不是窗口内的；没有客户端时间戳的趋势标 `windowed: false` 并计数；窗口非法就不生成链接（`file:`/`javascript:` 一律拒绝）。
+- 趋势的接收时间随值一起记，服务器播种的历史标 `0`（时间未知）而不是猜。
+
+### 发现：`scripts/` 从来没被类型检查过
+
+`tsconfig.json` 是 `include: ["src"]`，40 多个验证脚本一行都没进过 `tsc`。实测补上后有 **111 个存量类型错误**。这跟"vitest 静默丢测试文件"是同一类问题：**测试基建本身没有守卫**。本轮不硬修（会动到大量别人的套件），已记进 DESIGN 的下一步，并在新写的代码里避开这个盲区（例如把 `perfLink` 的字段名对齐成查询串里的 `src`，让调用方无从写错）。
+
+### 验证
+
+- `verify-all`：**1995/1995 · 42 套件**；`tsc` 0；`npm test` 38/38。
+- 新增：`verify-ndebug-go`（44 条，含对真实 Go 程序 attach）、`verify-redact`（36 条，纯逻辑，进快速闸门）、`verify-sanitize`（29 条）；`verify-ndebug` 104 → **119 条**（含脱敏端到端与 12 条互跳断言）；`check-perf-html` 53 → **59 条**。
+- 纯逻辑闸门：**369/369 · 12 套件**。
+- 打包 exe 实测：`--help` 有四个新区块；`ndebug app.go` 打印完整指引；录制 16 行 → `--sanitize` 后 token 两处都消失、15 个事件仍可回放。
+
 ## 0.7.10 — 2026-11-11
 
 ### ndebug：快照 diff

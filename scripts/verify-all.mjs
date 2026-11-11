@@ -49,6 +49,12 @@ const stages = [
   { name: 'Debug · snapshot diff', script: 'scripts/verify-diff.ts', pure: true },
   // Bounds: big values, big trees, runaway lines, and the agent's own cost.
   { name: 'Debug · stress (bounds)', script: 'scripts/verify-stress.ts' },
+  // Go: pprof parsing + a real attach against a compiled sample.
+  { name: 'Debug · go attach (pprof)', script: 'scripts/verify-ndebug-go.ts' },
+  // Redaction rules: pure, so it belongs in the fast gate.
+  { name: 'Debug · redaction rules', script: 'scripts/verify-redact.ts', pure: true },
+  // Recording export: token removal, re-redaction, scrub patterns.
+  { name: 'Debug · sanitize a recording', script: 'scripts/verify-sanitize.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.

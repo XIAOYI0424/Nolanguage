@@ -50,6 +50,16 @@ export interface RecordingHeader {
    * to publish.
    */
   token?: string;
+  /**
+   * Present when this file was produced by `--sanitize`. Records what was
+   * changed, so a reader can tell a scrubbed recording from a raw one.
+   */
+  sanitized?: {
+    at: number;
+    fieldsRedacted: number;
+    valuesScrubbed: number;
+    tokenRemoved: boolean;
+  };
 }
 
 export interface RecorderStats {

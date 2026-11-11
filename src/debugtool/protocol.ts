@@ -148,7 +148,17 @@ export type AgentEvent =
 
 /** Commands the engine sends to the agent. */
 export type ToolCommand =
-  | { v: number; t: 'hello-ack'; sampleHz: number; maxDepth: number; watches: string[]; redact: string[] }
+  | {
+      v: number;
+      t: 'hello-ack';
+      sampleHz: number;
+      maxDepth: number;
+      watches: string[];
+      /** Substrings that mark a field name as sensitive. */
+      redact: string[];
+      /** Substrings that exempt a field even when it matches `redact`. */
+      redactAllow?: string[];
+    }
   | { v: number; t: 'set-watches'; watches: string[] }
   | { v: number; t: 'snapshot'; id: string; path: string }
   | { v: number; t: 'bye' };

@@ -19,6 +19,13 @@ export interface DebugPageOptions {
   lang: string;
   /** `python 3.13.14`, when known. */
   runtime?: string;
+  /**
+   * Base URL of a running Nolanguage engine, when one answered `/health`.
+   *
+   * Absent is the normal case for a standalone tool, and the page then shows no
+   * link rather than one that 404s.
+   */
+  engineUrl?: string;
 }
 
 export function renderDebugHtml(opts: DebugPageOptions): string {
@@ -136,6 +143,8 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
   footer .spacer { flex:1; }
   footer b { color:var(--fg2); font-weight:500; }
   .pill { padding:0 6px; border-radius:8px; border:1px solid var(--line); }
+  .perfLink { color:var(--accent); text-decoration:none; border-bottom:1px dotted var(--accent); }
+  .perfLink:hover { color:var(--fg); }
 </style>
 </head>
 <body>
@@ -163,11 +172,11 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
       </div>
       <div class="watchAdd">
         <input type="text" v-model="st.draft" placeholder="order.items[0].price" @keydown.enter="addWatch()"
-               spellcheck="false" :disabled="!!st.view.replay" />
-        <button class="primary" @click="addWatch()" :disabled="!!st.view.replay">add</button>
+               spellcheck="false" :disabled="!canWatch" />
+        <button class="primary" @click="addWatch()" :disabled="!canWatch">add</button>
       </div>
-      <div class="watchNote" v-if="!st.view.replay">表达式在目标进程里求值（相当于 eval），写副作用就会真的产生副作用。</div>
-      <div class="replayNote" v-else>回放：程序已经结束，表达式无法再求值。这里显示的是录制时求出的值。</div>
+      <div class="watchNote" v-if="!watchBlockedReason">表达式在目标进程里求值（相当于 eval），写副作用就会真的产生副作用。</div>
+      <div class="replayNote" v-else>{{ watchBlockedReason }}</div>
       <div class="body">
         <div class="w" v-for="w in st.view.watches" :key="w.expr">
           <span class="e" :title="w.expr">{{ w.expr }}</span>
@@ -228,7 +237,7 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
         <span class="badge" :class="st.diff && st.diff.result.entries.length ? 'warn' : 'on'" v-if="st.diff">{{ st.diff.summary || 'no visible change' }}</span>
         <span class="spacer"></span>
         <template v-if="!st.diff">
-          <button v-if="!st.view.replay" @click="takeSnapshot()">snapshot now</button>
+          <button v-if="canSnapshot" @click="takeSnapshot()">snapshot now</button>
           <button @click="markBaseline()" :disabled="!current" title="remember the value now, to compare against later">baseline</button>
           <button class="primary" @click="showDiff()" :disabled="!canDiff" title="what changed since the baseline">diff</button>
         </template>
@@ -258,8 +267,7 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
         <snode :node="current.value" path="$"></snode>
       </div>
       <div class="empty" v-else-if="st.view.state === 'attached' && !hasLocals">
-        {{ st.view.lang }} does not expose frame locals (a JS frame's variables are
-        not reachable from outside). Use Watch for global expressions.
+        {{ st.view.lang }} has no live locals here — {{ noLocalsReason }}.
       </div>
       <div class="empty" v-else>
         Select a stack to see its live locals, or press “snapshot now”.
@@ -272,11 +280,14 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
     <span v-if="st.view.replay">recording <b>{{ st.view.replay.file }}</b> · {{ st.view.replay.position }}/{{ st.view.replay.total }}</span>
     <span>target <b>{{ st.view.target || '—' }}</b></span>
     <span>pid <b>{{ st.view.pid || '—' }}</b></span>
+    <a class="perfLink" v-if="perfHref" :href="perfHref" target="_blank" rel="noopener"
+       title="open the engine's Performance page for this session's time window">perf &#8599;</a>
     <span class="spacer"></span>
     <span>ws://127.0.0.1:${opts.port}/</span>
   </footer>
 </div>
 
+<script>window.__NLG_ENGINE__ = ${JSON.stringify(opts.engineUrl ?? '')};</script>
 <script>${vueRuntime}</script>
 <script>${appSource}</script>
 </body>

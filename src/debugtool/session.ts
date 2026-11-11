@@ -76,6 +76,8 @@ export interface SessionView {
   replay?: ReplayView;
   /** Snapshot ids that have a baseline captured, for the diff buttons. */
   baselines: string[];
+  /** Epoch ms when the session was created; the left edge of a perf jump. */
+  startedAt: number;
 }
 
 export interface ReplayView {
@@ -104,6 +106,8 @@ export interface SessionOptions {
   maxDepth?: number;
   /** Extra field names to redact, merged with the agent's defaults. */
   redact?: string[];
+  /** Field names to exempt even when they match `redact`. */
+  redactAllow?: string[];
   /** When set, every accepted line is appended to the file verbatim. */
   recorder?: Recorder;
   /**
@@ -120,7 +124,11 @@ const DEFAULT_MAX_SAMPLES = 2000;
 
 export class DebugSession extends EventEmitter {
   readonly token: string;
-  private readonly opts: Required<Omit<SessionOptions, 'redact' | 'recorder' | 'token'>> & { redact: string[]; recorder?: Recorder };
+  private readonly opts: Required<Omit<SessionOptions, 'redact' | 'redactAllow' | 'recorder' | 'token'>> & {
+    redact: string[];
+    redactAllow: string[];
+    recorder?: Recorder;
+  };
   private server?: Server;
   private socket?: Socket;
   private port = 0;
@@ -142,6 +150,7 @@ export class DebugSession extends EventEmitter {
   private oversized = 0;
   private windowCount = 0;
   private windowStart = Date.now();
+  private readonly startedAt = Date.now();
 
   constructor(opts: SessionOptions = {}) {
     super();
@@ -150,6 +159,7 @@ export class DebugSession extends EventEmitter {
       maxSamples: opts.maxSamples ?? DEFAULT_MAX_SAMPLES,
       maxDepth: opts.maxDepth ?? 12,
       redact: opts.redact ?? [],
+      redactAllow: opts.redactAllow ?? [],
       ...(opts.recorder ? { recorder: opts.recorder } : {}),
     };
     this.token = opts.token ?? randomBytes(16).toString('hex');
@@ -278,6 +288,7 @@ export class DebugSession extends EventEmitter {
           maxDepth: this.opts.maxDepth,
           watches: [...this.watchMap.keys()],
           redact: this.opts.redact,
+          redactAllow: this.opts.redactAllow,
         });
         // A watch added before the agent attached had nowhere to go (`send` is a
         // no-op without a socket), and the page usually loads first. Re-send the
@@ -456,6 +467,7 @@ export class DebugSession extends EventEmitter {
       ...(this.note ? { note: this.note } : {}),
       ...(this.replay ? { replay: this.replay } : {}),
       baselines: [...this.baselines.keys()],
+      startedAt: this.startedAt,
     };
   }
 

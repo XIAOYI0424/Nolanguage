@@ -31,9 +31,13 @@ import { DebugSession, type SessionView } from './session.js';
 import { WebSocketServer, type WebSocketConnection } from '../panel/WebSocketServer.js';
 import { renderDebugHtml } from './ui.js';
 import { Recorder, describeRecording, playback, readRecording, type Playback, type Recording } from './recorder.js';
+import { dumpToStackLines, parseGoroutineDump, pprofUrl } from './agents/go/pprof.js';
+import { goAttachGuide } from './agents/go/guide.js';
+import { defaultConfig, mergeConfig, type RedactConfig } from './redact.js';
+import { normaliseEngineUrl } from './perfLink.js';
 import { APP_VERSION } from '../version.js';
 
-export type DebugLanguage = 'python' | 'javascript';
+export type DebugLanguage = 'python' | 'javascript' | 'go';
 
 export interface DebugAppOptions {
   /** Script to observe. Resolved against the caller's cwd. */
@@ -50,6 +54,11 @@ export interface DebugAppOptions {
   quiet?: boolean;
   /** Write every accepted agent line to this path. */
   record?: string;
+  /**
+   * Redaction rules. Merged over the defaults, so a caller can add names or
+   * exempt a field but cannot accidentally un-redact `password`.
+   */
+  redact?: Partial<RedactConfig>;
 }
 
 export interface ReplayAppOptions {
@@ -66,10 +75,14 @@ export interface DebugApp {
   port: number;
   session: DebugSession;
   language: string;
+  /** How the events arrive: a spawned target, a recording, or a pprof endpoint. */
+  mode: 'live' | 'replay' | 'attach';
   /** Resolves when the target exits, or when a replay reaches its last line. */
   exited: Promise<number>;
   /** The recording being written, when `record` was given. */
   recorder?: Recorder;
+  /** The redaction rules in effect, for the banner. */
+  redactConfig: RedactConfig;
   close(): Promise<void>;
 }
 
@@ -78,6 +91,10 @@ export function languageOf(file: string): DebugLanguage | null {
   const ext = extname(file).toLowerCase();
   if (ext === '.py' || ext === '.pyw') return 'python';
   if (ext === '.js' || ext === '.mjs' || ext === '.cjs') return 'javascript';
+  // Go is recognised so `ndebug app.go` can explain what to do instead of
+  // claiming the language is unknown. Attaching needs `--attach`; there is no
+  // in-process hook to install.
+  if (ext === '.go') return 'go';
   return null;
 }
 
@@ -100,6 +117,8 @@ async function serve(opts: {
   port: number;
   target: string;
   lang: string;
+  /** Read at render time: the engine may come up after this page was served. */
+  engineUrl?: () => string | undefined;
   onCommand: (msg: Record<string, unknown>, reply: (payload: unknown) => void) => void;
 }): Promise<Served> {
   const { session } = opts;
@@ -117,7 +136,8 @@ async function serve(opts: {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
         // Rendered per request so the footer shows the port the OS actually
         // bound (port 0 means "pick one"), not the one that was requested.
-        res.end(renderDebugHtml({ port: boundPort, target: opts.target, lang: opts.lang }));
+        const engineUrl = opts.engineUrl?.();
+        res.end(renderDebugHtml({ port: boundPort, target: opts.target, lang: opts.lang, ...(engineUrl ? { engineUrl } : {}) }));
         return true;
       }
       if (url === '/health') {
@@ -173,13 +193,19 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
   const language = languageOf(script);
   if (!language) {
     throw new Error(
-      `cannot observe ${basename(script)}: supported languages are Python (.py) and JavaScript (.js/.mjs/.cjs).`,
+      `cannot observe ${basename(script)}: supported are Python (.py), JavaScript (.js/.mjs/.cjs), and Go via --attach.`,
     );
+  }
+  if (language === 'go') {
+    // Not an error message but a set of instructions: Go cannot be attached from
+    // outside, and saying "unsupported" would leave the user with nowhere to go.
+    throw new Error(goAttachGuide(script));
   }
 
   // The session is built first so the recording can carry the token the agent
   // will be given; a recording without it would not survive its own handshake.
-  const session = new DebugSession({ hz: opts.hz ?? 10 });
+  const redactConfig = mergeConfig(defaultConfig(), opts.redact);
+  const session = new DebugSession({ hz: opts.hz ?? 10, redact: redactConfig.names, redactAllow: redactConfig.allow });
   const recorder = opts.record
     ? Recorder.open({
         path: opts.record,
@@ -189,7 +215,7 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
           lang: language,
           target: basename(script),
           hz: opts.hz ?? 10,
-          redact: [],
+          redact: redactConfig.names,
           token: session.token,
         },
       })
@@ -200,6 +226,13 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
   const agentDir = materialiseAgent();
   const child = spawnTarget(language, script, opts.args ?? [], session, agentDir);
 
+  // The engine is optional and usually absent. Probing in the background keeps
+  // startup fast and keeps the link honest: it appears only if /health answered.
+  let engineUrl: string | undefined;
+  void probeEngine().then((url) => {
+    engineUrl = url;
+  });
+
   let served: Served;
   try {
     served = await serve({
@@ -207,6 +240,7 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
       port: opts.port ?? 7320,
       target: basename(script),
       lang: language,
+      engineUrl: () => engineUrl,
       onCommand: (msg, reply) => handleCommand(session, msg, reply),
     });
   } catch (err) {
@@ -263,7 +297,9 @@ export async function startDebugApp(opts: DebugAppOptions): Promise<DebugApp> {
     port: served.port,
     session,
     language,
+    mode: 'live',
     exited,
+    redactConfig,
     ...(recorder ? { recorder } : {}),
     close,
   };
@@ -342,8 +378,144 @@ export async function startReplayApp(opts: ReplayAppOptions): Promise<DebugApp &
     port: served.port,
     session,
     language: recording.header.lang || '?',
+    mode: 'replay',
     exited,
     recording,
+    redactConfig: mergeConfig(defaultConfig()),
+    close,
+  };
+}
+
+export interface AttachAppOptions {
+  /** Anything the user might paste: host:port, the pprof index, or the dump URL. */
+  url: string;
+  port?: number;
+  hz?: number;
+  quiet?: boolean;
+}
+
+export interface AttachApp extends DebugApp {
+  /** The normalised dump address actually being polled. */
+  dumpUrl: string;
+}
+
+/**
+ * Observe a Go program through its pprof endpoint.
+ *
+ * The polling loop *is* the agent here: it produces the same `stack` events an
+ * in-process agent would, through the same NDJSON path, so a Go session is
+ * recorded, replayed and diffed by exactly the same code as a Python one.
+ *
+ * The one thing it cannot do is read values, so `caps` is `['stack']` and the
+ * page says why instead of showing an empty Inspector.
+ */
+export async function startAttachApp(opts: AttachAppOptions): Promise<AttachApp> {
+  const dumpUrl = pprofUrl(opts.url);
+  const hz = opts.hz ?? 10;
+  const session = new DebugSession({ hz });
+
+  // A local client faking the handshake. It goes through `ingest` on purpose:
+  // the alternative (setting session state directly) would give this path a
+  // second, untested way into the engine.
+  const hello = (): void => {
+    session.ingest(JSON.stringify({
+      v: 1,
+      t: 'hello',
+      token: session.token,
+      lang: 'go',
+      pid: 0,
+      target: dumpUrl,
+      agentVersion: 'pprof',
+      // No `locals`, no `snapshot`: a dump carries stacks only.
+      caps: ['stack'],
+    }));
+  };
+  hello();
+
+  const served = await serve({
+    session,
+    port: opts.port ?? 7320,
+    target: dumpUrl,
+    lang: 'go',
+    // Same read-only surface as replay: there is no process to evaluate in.
+    onCommand: (msg, reply) => {
+      if (msg.kind === 'ping') return;
+      if (msg.kind === 'diff') {
+        const view = session.diff(String(msg.id ?? 'live-locals'));
+        if (view) reply({ kind: 'diff', diff: view });
+        return;
+      }
+      if (msg.kind === 'baseline') session.setBaseline(String(msg.id ?? 'live-locals'));
+      if (msg.kind === 'baseline-clear') session.clearBaseline(typeof msg.id === 'string' ? msg.id : undefined);
+      if (msg.kind === 'baseline' || msg.kind === 'baseline-clear') {
+        reply({ kind: 'view', view: session.view() });
+      }
+    },
+  });
+
+  let busy = false;
+  let failures = 0;
+  let detached = false;
+  let stopped = false;
+
+  const poll = async (): Promise<void> => {
+    if (busy || stopped) return;
+    busy = true;
+    try {
+      const res = await fetch(dumpUrl, { signal: AbortSignal.timeout(Math.max(1000, Math.round(2000 / hz))) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const goroutines = parseGoroutineDump(await res.text());
+      const at = Date.now();
+      for (const line of dumpToStackLines(goroutines, at)) session.ingest(line);
+      failures = 0;
+      // The endpoint came back: say so, instead of leaving the page frozen on
+      // "agent exited" for the rest of the session.
+      if (detached) {
+        detached = false;
+        hello();
+      }
+    } catch {
+      failures += 1;
+      // Three misses is a real outage, not a slow request. Marking it detached is
+      // the difference between "the page is stale" and "the page is wrong".
+      if (failures >= 3 && !detached) {
+        detached = true;
+        session.ingest(JSON.stringify({ v: 1, t: 'bye', reason: `pprof unreachable: ${dumpUrl}` }));
+      }
+    } finally {
+      busy = false;
+    }
+  };
+
+  const timer = setInterval(() => void poll(), Math.max(50, Math.round(1000 / hz)));
+  timer.unref?.();
+  void poll();
+
+  let resolveExit: (code: number) => void = () => {};
+  const exited = new Promise<number>((r) => {
+    resolveExit = r;
+  });
+
+  let closed = false;
+  const close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    stopped = true;
+    clearInterval(timer);
+    await served.close();
+    await session.close();
+    resolveExit(0);
+  };
+
+  return {
+    url: served.url,
+    port: served.port,
+    session,
+    language: 'go',
+    mode: 'attach',
+    dumpUrl,
+    exited,
+    redactConfig: mergeConfig(defaultConfig()),
     close,
   };
 }
@@ -393,6 +565,26 @@ function handleCommand(
       return;
     default:
       return;
+  }
+}
+
+/**
+ * Is a Nolanguage engine running next to us?
+ *
+ * 800 ms is a local round-trip with room for a busy machine; a longer wait would
+ * delay the page for a feature that is optional. `NOLANGUAGE_ENGINE_URL`
+ * overrides the address for a non-default port.
+ */
+async function probeEngine(): Promise<string | undefined> {
+  const base = normaliseEngineUrl(process.env.NOLANGUAGE_ENGINE_URL ?? 'http://127.0.0.1:7310');
+  if (!base) return undefined;
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(800) });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { ok?: boolean };
+    return body.ok === true ? base : undefined;
+  } catch {
+    return undefined;
   }
 }
 

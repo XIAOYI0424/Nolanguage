@@ -8,20 +8,33 @@
  */
 import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { startDebugApp, startReplayApp } from './main.js';
-import { describeRecording } from './recorder.js';
+import { languageOf, startAttachApp, startDebugApp, startReplayApp } from './main.js';
+import { goAttachGuide } from './agents/go/guide.js';
+import { defaultConfig, describeConfig, loadRedactConfig, mergeConfig, type RedactConfig } from './redact.js';
+import { describeRecording, readRecording } from './recorder.js';
+import { describeReport, renderSanitized, sanitizeRecording } from './sanitize.js';
+import { writeFileSync } from 'node:fs';
 
 const USAGE = `ndebug — live debug observatory
 
   ndebug <script.py> [options] [-- args for the program]
   ndebug --replay <session.ndlog> [options]
+  ndebug --attach <pprof-url> [options]
+  ndebug --sanitize <in.ndlog> --out <out.ndlog> [options]
 
 Options:
   --port <n>      page port (default 7320, 0 = pick one)
   --hz <n>        samples per second (default 10)
   --record <file> write the session to a .ndlog (replayable)
   --replay <file> play a recording instead of observing a program
+  --attach <url>  observe a Go program through its pprof endpoint
+  --sanitize <f>  write a redacted copy of a recording (safe to share)
+  --out <file>    destination for --sanitize
+  --scrub <re>    regex to blank out in every string (repeatable)
   --speed <n>     replay speed: 1 = real time, 0 = as fast as possible
+  --redact <a,b>  extra field names to hide (substring, case-insensitive)
+  --allow <a,b>   field names to show even if they match a redaction rule
+  --config <file> JSON config: { "redact": { "names": [...], "allow": [...] } }
   --no-open       do not open a browser
   --quiet         no banner
   -h, --help      this text
@@ -31,14 +44,19 @@ Examples:
   ndebug app.py --hz 20 --port 7400
   ndebug app.py --record crash.ndlog -- 60
   ndebug --replay crash.ndlog --speed 4
+  ndebug --attach http://127.0.0.1:6060
+  ndebug app.py --redact sessionid --allow token_count
+  ndebug --sanitize crash.ndlog --out share.ndlog --scrub "sk-[A-Za-z0-9]+"
 `;
 
 export interface CliOptions {
-  mode: 'live' | 'replay';
+  mode: 'live' | 'replay' | 'attach' | 'sanitize';
   /** Live: the script to observe. Replay: empty. */
   script: string;
   /** Replay: the recording. Live: empty. */
   file: string;
+  /** Attach: the pprof address. Otherwise empty. */
+  attach: string;
   port: number;
   hz: number;
   /** Replay only; 1 = real time, 0 = instant. */
@@ -47,6 +65,16 @@ export interface CliOptions {
   quiet: boolean;
   args: string[];
   record?: string;
+  /** Extra names to redact, from `--redact`. */
+  redact: string[];
+  /** Names to exempt, from `--allow`. */
+  allow: string[];
+  /** Config file path, from `--config`. */
+  config: string;
+  /** Sanitize: the output path, from `--out`. */
+  out: string;
+  /** Sanitize: regex sources to blank out, from `--scrub`. */
+  scrub: string[];
 }
 
 export function parseArgs(argv: string[]): CliOptions | { help: true } | { error: string } {
@@ -62,7 +90,14 @@ export function parseArgs(argv: string[]): CliOptions | { help: true } | { error
   let open = true;
   let quiet = false;
   let record: string | undefined;
+  const redactList: string[] = [];
+  const allowList: string[] = [];
+  let configPath = '';
+  let out = '';
+  let sanitize = '';
+  const scrub: string[] = [];
   let replay = '';
+  let attach = '';
   const positionals: string[] = [];
 
   for (let i = 0; i < own.length; i++) {
@@ -99,10 +134,67 @@ export function parseArgs(argv: string[]): CliOptions | { help: true } | { error
       const raw = own[++i];
       if (!raw) return { error: 'replay needs a file path' };
       replay = raw;
+    } else if (a === '--redact') {
+      const raw = own[++i];
+      if (!raw) return { error: 'redact needs a comma-separated list of names' };
+      redactList.push(...raw.split(','));
+    } else if (a === '--allow') {
+      const raw = own[++i];
+      if (!raw) return { error: 'allow needs a comma-separated list of names' };
+      allowList.push(...raw.split(','));
+    } else if (a === '--config') {
+      const raw = own[++i];
+      if (!raw) return { error: 'config needs a file path' };
+      configPath = raw;
+    } else if (a === '--sanitize') {
+      const raw = own[++i];
+      if (!raw) return { error: 'sanitize needs a recording path' };
+      sanitize = raw;
+    } else if (a === '--out') {
+      const raw = own[++i];
+      if (!raw) return { error: 'out needs a file path' };
+      out = raw;
+    } else if (a === '--scrub') {
+      const raw = own[++i];
+      if (!raw) return { error: 'scrub needs a regular expression' };
+      scrub.push(raw);
+    } else if (a === '--attach') {
+      const raw = own[++i];
+      if (!raw) return { error: 'attach needs a pprof address, e.g. http://127.0.0.1:6060' };
+      attach = raw;
     } else if (a === '--no-open') open = false;
     else if (a === '--quiet') quiet = true;
     else if (a.startsWith('-')) return { error: `unknown option: ${a}` };
     else positionals.push(a);
+  }
+
+  if (replay && attach) {
+    return { error: '--replay and --attach are different sources; pick one' };
+  }
+  if (sanitize && (replay || attach)) {
+    return { error: '--sanitize reads a file; it cannot be combined with --replay or --attach' };
+  }
+
+  if (sanitize) {
+    if (positionals.length) return { error: `--sanitize takes no script (got ${positionals[0]})` };
+    if (extra.length) return { error: '--sanitize takes no program arguments' };
+    if (!out) return { error: '--sanitize needs --out <file> (it never overwrites the input)' };
+    return {
+      mode: 'sanitize', script: '', file: sanitize, attach: '', port, hz, speed, open, quiet, args: [],
+      redact: redactList, allow: allowList, config: configPath, out, scrub,
+    };
+  }
+
+  if (attach) {
+    if (positionals.length) {
+      return { error: `--attach takes no script (got ${positionals[0]})` };
+    }
+    if (extra.length) return { error: '--attach takes no program arguments' };
+    return {
+      mode: 'attach', script: '', file: '', attach, port, hz, speed, open, quiet, args: [],
+      redact: redactList, allow: allowList, config: configPath, out, scrub,
+      ...(record ? { record } : {}),
+    };
   }
 
   if (replay) {
@@ -112,7 +204,10 @@ export function parseArgs(argv: string[]): CliOptions | { help: true } | { error
       return { error: `--replay takes no script (got ${positionals[0]})` };
     }
     if (extra.length) return { error: '--replay takes no program arguments' };
-    return { mode: 'replay', script: '', file: replay, port, hz, speed, open, quiet, args: [] };
+    return {
+      mode: 'replay', script: '', file: replay, attach: '', port, hz, speed, open, quiet, args: [],
+      redact: redactList, allow: allowList, config: configPath, out, scrub,
+    };
   }
 
   const script = positionals.shift();
@@ -122,12 +217,18 @@ export function parseArgs(argv: string[]): CliOptions | { help: true } | { error
     mode: 'live',
     script,
     file: '',
+    attach: '',
     port,
     hz,
     speed,
     open,
     quiet,
     args: extra,
+    redact: redactList,
+    allow: allowList,
+    config: configPath,
+    out,
+    scrub,
     ...(record ? { record } : {}),
   };
 }
@@ -144,8 +245,23 @@ export async function runCli(argv: string[]): Promise<number> {
     return 2;
   }
 
+  const redact = resolveRedact(parsed);
+  if ('error' in redact) {
+    process.stderr.write(`ndebug: ${redact.error}\n`);
+    return 2;
+  }
+
   try {
     if (parsed.mode === 'replay') return await runReplay(parsed);
+    if (parsed.mode === 'attach') return await runAttach(parsed);
+    if (parsed.mode === 'sanitize') return runSanitize(parsed, redact.config);
+
+    // A Go file cannot be attached from outside the process, so the answer is a
+    // set of instructions rather than "unsupported".
+    if (languageOf(parsed.script) === 'go') {
+      process.stderr.write(goAttachGuide(parsed.script) + '\n');
+      return 2;
+    }
 
     const app = await startDebugApp({
       script: parsed.script,
@@ -154,6 +270,7 @@ export async function runCli(argv: string[]): Promise<number> {
       open: false,
       args: parsed.args,
       quiet: parsed.quiet,
+      redact: redact.config,
       ...(parsed.record ? { record: parsed.record } : {}),
     });
 
@@ -163,6 +280,7 @@ export async function runCli(argv: string[]): Promise<number> {
         `\n  ndebug · observing ${basename(resolve(parsed.script))}\n` +
           `  page   ${app.url}\n` +
           `  agent  port ${app.session.boundPort} · ${parsed.hz} Hz\n` +
+          `  redact ${describeConfig(app.redactConfig)}\n` +
           (rec ? `  record ${rec.path}${rec.error ? ` (unavailable: ${rec.error})` : ''}\n` : '') +
           `  stop   ctrl+c\n\n`,
       );
@@ -193,6 +311,85 @@ export async function runCli(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * Write a redacted copy of a recording.
+ *
+ * Refusing to overwrite the input is not politeness: a sanitize step that
+ * destroys its source on a bad flag is unrecoverable, and the raw file is the
+ * only thing that can be re-sanitized with better rules later.
+ */
+function runSanitize(parsed: CliOptions, config: RedactConfig): number {
+  const input = resolve(parsed.file);
+  const output = resolve(parsed.out);
+  if (input === output) {
+    process.stderr.write('ndebug: --out must differ from the input (sanitize never overwrites)\n');
+    return 2;
+  }
+
+  const patterns: RegExp[] = [];
+  for (const source of parsed.scrub) {
+    try {
+      patterns.push(new RegExp(source, 'g'));
+    } catch (err) {
+      process.stderr.write(`ndebug: bad --scrub pattern ${JSON.stringify(source)}: ${(err as Error).message}\n`);
+      return 2;
+    }
+  }
+
+  let recording;
+  try {
+    recording = readRecording(input);
+  } catch (err) {
+    process.stderr.write(`ndebug: ${(err as Error).message}\n`);
+    return 1;
+  }
+
+  const result = sanitizeRecording(recording, { redact: config, scrub: patterns });
+  try {
+    writeFileSync(output, renderSanitized(result), 'utf8');
+  } catch (err) {
+    process.stderr.write(`ndebug: cannot write ${output}: ${(err as Error).message}\n`);
+    return 1;
+  }
+
+  if (!parsed.quiet) {
+    process.stdout.write(
+      `\n  ndebug · sanitized ${basename(input)}\n` +
+        `  ${describeRecording(recording)}\n` +
+        `  out    ${output}\n` +
+        `  ${describeReport(result.report)}\n` +
+        (result.report.samples.length ? `  first  ${result.report.samples.slice(0, 5).join(', ')}\n` : '') +
+        '\n',
+    );
+  }
+  return 0;
+}
+
+async function runAttach(parsed: CliOptions): Promise<number> {
+  const app = await startAttachApp({
+    url: parsed.attach,
+    port: parsed.port,
+    hz: parsed.hz,
+    quiet: parsed.quiet,
+  });
+
+  if (!parsed.quiet) {
+    process.stdout.write(
+      `\n  ndebug · attaching to a Go pprof endpoint\n` +
+        `  dump   ${app.dumpUrl}\n` +
+        `  page   ${app.url}\n` +
+        `  poll   ${parsed.hz} Hz · goroutine stacks only (no locals)\n` +
+        `  stop   ctrl+c\n\n`,
+    );
+  }
+  if (parsed.open) openBrowser(app.url);
+
+  // There is no child process to wait for: the user stops it.
+  await waitForStop();
+  await app.close();
+  return 0;
+}
+
 async function runReplay(parsed: CliOptions): Promise<number> {
   const app = await startReplayApp({
     file: parsed.file,
@@ -218,6 +415,24 @@ async function runReplay(parsed: CliOptions): Promise<number> {
   await waitForStop();
   await app.close();
   return 0;
+}
+
+/**
+ * Layer the redaction rules: defaults, then the config file, then the flags.
+ *
+ * `names` can only grow — a config file cannot remove `password` from the list,
+ * because that is the one mistake this feature must make impossible. `allow` is
+ * the escape hatch, and it wins at match time.
+ */
+function resolveRedact(parsed: CliOptions): { config: RedactConfig } | { error: string } {
+  let fromFile: Partial<RedactConfig> | undefined;
+  if (parsed.config) {
+    const loaded = loadRedactConfig(parsed.config);
+    if (!loaded.ok) return { error: loaded.error };
+    fromFile = loaded.config;
+  }
+  const config = mergeConfig(defaultConfig(), fromFile, { names: parsed.redact, allow: parsed.allow });
+  return { config };
 }
 
 /** Resolve on ctrl+c / SIGTERM, or after `timeoutMs` when running unattended. */

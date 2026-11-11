@@ -26,6 +26,7 @@ import { startDebugApp, languageOf } from '../src/debugtool/main.js';
 import { parseArgs } from '../src/debugtool/cli.js';
 import { Recorder, readRecording } from '../src/debugtool/recorder.js';
 import { startReplayApp } from '../src/debugtool/main.js';
+import { normaliseEngineUrl, parseWindow, perfLink } from '../src/debugtool/perfLink.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -168,7 +169,11 @@ check('page: renders a diff list', html.includes('class="df"') && html.includes(
 check('page: says a truncated diff is not proof', html.includes('not proof of equality'));
 check('page: shows a shifted path in the tooltip', html.includes('e.pathBefore'));
 check('page: marks a replay session', html.includes('st.view.replay') && html.includes('replay {{ replayPct }}'));
-check('page: a replay is read-only', html.includes(':disabled="!!st.view.replay"'));
+// Read-only is now driven by capabilities, not by the mode: a Go session and a
+// replay both cannot evaluate, but for different reasons, and a JS session can.
+// A disabled input with the reason beside it beats a button that does nothing.
+check('page: the watch input is gated on capability', html.includes(':disabled="!canWatch"') && html.includes('watchBlockedReason'));
+check('page: the snapshot button is gated on capability', html.includes('v-if="canSnapshot"'));
 check('page: shows the oversized counter', html.includes('st.view.oversized'));
 
 // Every check above is a string search, and a broken Vue template still passes
@@ -308,11 +313,49 @@ check('cli: --replay with a script is refused', 'error' in parseArgs(['--replay'
 check('cli: --record without a path is refused', 'error' in parseArgs(['app.py', '--record']));
 check('cli: --speed out of range is refused', 'error' in parseArgs(['--replay', 'x.ndlog', '--speed', '-1']));
 
+// ------------------------------------------------ 3b. the perf jump
+
+{
+  const win = { from: 1_700_000_000_000, to: 1_700_000_030_000, src: 'ndebug:app.py' };
+  const link = perfLink('http://127.0.0.1:7310', win);
+  check('perf: a link carries the window and the source', link === `http://127.0.0.1:7310/perf?from=${win.from}&to=${win.to}&src=ndebug%3Aapp.py`, String(link));
+  check('perf: a trailing slash does not double up', perfLink('http://127.0.0.1:7310/', win)?.startsWith('http://127.0.0.1:7310/perf?') === true, String(perfLink('http://127.0.0.1:7310/', win)));
+  check('perf: a path in the base is dropped', normaliseEngineUrl('http://h:1/some/path') === 'http://h:1', String(normaliseEngineUrl('http://h:1/some/path')));
+  check('perf: a non-http engine is refused', perfLink('file:///etc/passwd', win) === null && perfLink('javascript:alert(1)', win) === null);
+  check('perf: an empty engine means no link', perfLink('', win) === null && perfLink('   ', win) === null);
+  check('perf: a backwards window is refused', perfLink('http://h:1', { from: 2000, to: 1000, src: '' }) === null);
+  check('perf: a non-finite window is refused', perfLink('http://h:1', { from: NaN, to: 1000, src: '' }) === null);
+
+  const parsed = parseWindow('?from=1700000000000&to=1700000030000&src=ndebug%3Aapp.py');
+  check('perf: the far side parses the window back', parsed?.from === win.from && parsed?.to === win.to && parsed?.src === 'ndebug:app.py', JSON.stringify(parsed));
+  check('perf: a malformed window is ignored, not guessed', parseWindow('?from=abc&to=1') === null && parseWindow('?from=5&to=1') === null && parseWindow('') === null);
+}
+
+{
+  // The page must not invent a link when no engine answered.
+  const without = renderDebugHtml({ port: 7000, target: 'app.py', lang: 'python' });
+  const withEngine = renderDebugHtml({ port: 7000, target: 'app.py', lang: 'python', engineUrl: 'http://127.0.0.1:7310' });
+  check('perf: the page always renders the link slot', without.includes('perfHref'));
+  check('perf: no engine means an empty base', without.includes('window.__NLG_ENGINE__ = ""'), '');
+  check('perf: a probed engine is passed to the page', withEngine.includes('window.__NLG_ENGINE__ = "http://127.0.0.1:7310"'), '');
+}
+
 // ------------------------------------------------------------ 4. the app
 
 check('language: .py is observable', languageOf('a.py') === 'python');
 check('language: .js is observable', languageOf('a.js') === 'javascript' && languageOf('b.mjs') === 'javascript');
-check('language: .go is refused, not silently attached', languageOf('a.go') === null);
+// Go is recognised so the CLI can answer with instructions (`--attach` or the
+// two lines to add) instead of "unsupported". What must not happen is a silent
+// attach that shows an empty page — `startDebugApp` throws the guide instead.
+check('language: .go is recognised for the guide', languageOf('a.go') === 'go');
+check('language: .go is not silently attached', await (async () => {
+  try {
+    await startDebugApp({ script: join(root, 'debugtool', 'samples', 'go', 'app.go'), port: 0, quiet: true });
+    return false;
+  } catch (err) {
+    return /--attach/.test((err as Error).message);
+  }
+})());
 
 const sample = join(root, 'debugtool', 'samples', 'py', 'app.py');
 if (!existsSync(sample)) {
@@ -370,6 +413,35 @@ if (!existsSync(sample)) {
     check('app: the stacks are the target program', hot.some((h) => /work|step|main/.test(h.stack)), hot[0]?.stack ?? '');
     check('app: live locals arrive without asking', ((last?.snapshots as unknown[]) ?? []).length > 0, String(((last?.snapshots as unknown[]) ?? []).length));
 
+    // ---- baseline + diff, over the page's own socket ----
+    //
+    // Timing here is subtle: reading "the latest snapshot time" and *then*
+    // sending `baseline` races the 2 Hz live-locals tick, so the baseline can
+    // capture the very tick we just read and the two sides are identical. The
+    // fix is to stop guessing: the reply carries `baseAt` and `at`, so we keep
+    // asking until a genuinely newer snapshot exists, and only then assert.
+    type DiffReply = { id?: string; summary?: string; baseAt?: number; at?: number; result?: { entries?: Array<{ path: string; kind: string }> } };
+    ws.send(JSON.stringify({ kind: 'baseline', id: 'live-locals' }));
+
+    const diffDeadline = Date.now() + 8000;
+    let dv: DiffReply | undefined;
+    while (Date.now() < diffDeadline) {
+      diffs.length = 0;
+      ws.send(JSON.stringify({ kind: 'diff', id: 'live-locals' }));
+      const waitUntil = Date.now() + 600;
+      while (Date.now() < waitUntil && !diffs.length) await sleep(100);
+      dv = diffs[0] as DiffReply | undefined;
+      // A newer snapshot has arrived since the baseline: this is a real diff.
+      if (dv && typeof dv.at === 'number' && typeof dv.baseAt === 'number' && dv.at > dv.baseAt) break;
+      await sleep(150);
+    }
+
+    const lastView = views[views.length - 1] as Record<string, unknown> | undefined;
+    check('app: the page can capture a baseline', ((lastView?.baselines as string[]) ?? []).indexOf('live-locals') >= 0, JSON.stringify(lastView?.baselines ?? []));
+    check('app: a diff comes back over the socket', dv?.id === 'live-locals' && Array.isArray(dv?.result?.entries), String(dv?.summary ?? 'none'));
+    check('app: the diff compares two different moments', (dv?.at ?? 0) > (dv?.baseAt ?? 0), `${dv?.baseAt} -> ${dv?.at}`);
+    check('app: the diff finds the loop changing', (dv?.result?.entries?.length ?? 0) > 0, dv?.summary ?? 'no entries');
+
     // A watch added from the page must come back with a value.
     ws.send(JSON.stringify({ kind: 'watch-add', expr: 'len(order.items)' }));
     const watchDeadline = Date.now() + 8000;
@@ -389,33 +461,6 @@ if (!existsSync(sample)) {
     }
     check('app: a watch added from the page evaluates in the target', watched?.ok === true, JSON.stringify(watched?.value ?? null));
     check('app: the watch value is the real one', watched?.value?.v === '3', String(watched?.value?.v));
-
-    // ---- baseline + diff, over the page's own socket ----
-    const localsAt = (): number => {
-      const v = views[views.length - 1] as Record<string, unknown> | undefined;
-      const list = (v?.snapshots as Array<{ id: string; at: number }> | undefined) ?? [];
-      const live = list.find((x) => x.id === 'live-locals');
-      return live ? live.at : 0;
-    };
-    const beforeAt = localsAt();
-    ws.send(JSON.stringify({ kind: 'baseline', id: 'live-locals' }));
-
-    // Wait for a *newer* live-locals tick before asking, otherwise the two trees
-    // are identical and the check would assert on timing rather than on the diff.
-    const newerDeadline = Date.now() + 5000;
-    while (Date.now() < newerDeadline && localsAt() <= beforeAt) await sleep(120);
-
-    ws.send(JSON.stringify({ kind: 'diff', id: 'live-locals' }));
-    const diffDeadline = Date.now() + 5000;
-    while (Date.now() < diffDeadline && !diffs.length) await sleep(120);
-
-    const dv = diffs[0] as
-      | { id?: string; summary?: string; result?: { entries?: Array<{ path: string; kind: string }> } }
-      | undefined;
-    const lastView = views[views.length - 1] as Record<string, unknown> | undefined;
-    check('app: the page can capture a baseline', ((lastView?.baselines as string[]) ?? []).indexOf('live-locals') >= 0, JSON.stringify(lastView?.baselines ?? []));
-    check('app: a diff comes back over the socket', dv?.id === 'live-locals' && Array.isArray(dv?.result?.entries), String(dv?.summary ?? 'none'));
-    check('app: the diff finds the loop changing', (dv?.result?.entries?.length ?? 0) > 0, dv?.summary ?? 'no entries');
 
     ws.close();
 
@@ -524,6 +569,73 @@ if (!existsSync(sample)) {
     }
   } finally {
     await app?.close();
+  }
+}
+
+// ------------------------------------------- 4b. redaction reaches the agent
+
+if (!existsSync(sample)) {
+  console.log('SKIP  redaction end-to-end (sample missing)');
+} else {
+  // Walk a snapshot tree and collect what was hidden and what was kept.
+  interface Collected {
+    redacted: string[];
+    prims: Array<[string, string]>;
+  }
+  const collect = (tree: unknown, out: Collected, keyName = ''): void => {
+    if (!tree || typeof tree !== 'object') return;
+    const n = tree as Record<string, unknown>;
+    if (n.k === 'trunc') {
+      if (n.why === 'redacted') out.redacted.push(keyName);
+      return;
+    }
+    if (n.k === 'prim') {
+      out.prims.push([keyName, String(n.v)]);
+      return;
+    }
+    if (n.k === 'obj') for (const [name, val] of (n.fields as Array<[string, unknown]>) ?? []) collect(val, out, name);
+    if (n.k === 'map') {
+      for (const [k, val] of (n.entries as Array<[Record<string, unknown>, unknown]>) ?? []) {
+        collect(val, out, k && k.k === 'prim' ? String(k.v) : '');
+      }
+    }
+    if (n.k === 'seq') for (const item of (n.items as unknown[]) ?? []) collect(item, out, keyName);
+  };
+
+  const redApp = await startDebugApp({
+    script: sample,
+    port: 0,
+    hz: 10,
+    quiet: true,
+    args: ['120'],
+    // `api_token` matches the default `token` rule, so it is only visible if the
+    // allowlist actually reached the agent; `price` is not a default secret, so
+    // it is only hidden if the extra name did.
+    redact: { allow: ['api_token'], names: ['price'] },
+  });
+  try {
+    const deadline = Date.now() + 10_000;
+    let tree: unknown;
+    while (Date.now() < deadline) {
+      const view = redApp.session.view();
+      const live = (view.snapshots as Array<{ id: string; value: unknown }>).find((x) => x.id === 'live-locals');
+      if (live) {
+        tree = live.value;
+        break;
+      }
+      await sleep(150);
+    }
+    const seen: Collected = { redacted: [], prims: [] };
+    collect(tree, seen);
+    check(
+      'redact: an exempted field keeps its value in the target',
+      seen.prims.some(([name, v]) => name === 'api_token' && v.startsWith('sk-')),
+      seen.prims.filter(([n]) => n === 'api_token').map(([, v]) => v.slice(0, 12)).join(',') || 'api_token not found',
+    );
+    check('redact: a custom name is hidden in the target', seen.redacted.includes('price'), seen.redacted.join(',') || 'nothing redacted');
+    check('redact: the default rules still apply to other fields', !seen.prims.some(([n]) => /token/.test(n) && !n.includes('api_token')), seen.prims.map(([n]) => n).join(','));
+  } finally {
+    await redApp.close();
   }
 }
 

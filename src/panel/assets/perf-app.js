@@ -113,6 +113,19 @@
     return 'ok';
   }
 
+  /** `?from=&to=&src=` -> a window, or null. Anything malformed is ignored. */
+  function readWindow(search) {
+    try {
+      var params = new URLSearchParams(search || '');
+      var from = Number(params.get('from'));
+      var to = Number(params.get('to'));
+      if (!isFinite(from) || !isFinite(to) || from <= 0 || to < from) return null;
+      return { from: from, to: to, src: params.get('src') || '' };
+    } catch (err) {
+      return null;
+    }
+  }
+
   var app = createApp({
     setup: function () {
       var st = reactive({
@@ -144,6 +157,56 @@
         // stays visible next to the verdict.
         attr: null,
         attrBusy: '',
+        // A window handed over by another tool (ndebug's "perf" link). Null means
+        // the page behaves exactly as before.
+        window: readWindow(location.search),
+        // Receive time for every client-side history sample, so a window can be
+        // sliced. Seeded server samples get 0 ("time unknown") rather than a
+        // guess — a wrong timestamp is worse than an admitted gap.
+        historyAt: {},
+      });
+
+      /**
+       * The trend for one metric, clipped to the window when there is one.
+       *
+       * `windowed` says whether the clip actually happened. A row with
+       * `windowed: false` under an active window is showing its full history, and
+       * the banner counts those — silently mixing clipped and unclipped trends
+       * would make the chart mean two different things in one view.
+       */
+      function trendOf(name) {
+        var series = st.history[name] || st.series[name] || [];
+        var times = st.historyAt[name] || [];
+        if (!st.window) return { series: series, windowed: false };
+        if (times.length !== series.length || !times.length) return { series: series, windowed: false };
+        var out = [];
+        for (var i = 0; i < series.length; i++) {
+          if (times[i] >= st.window.from && times[i] <= st.window.to) out.push(series[i]);
+        }
+        return { series: out, windowed: true };
+      }
+
+      function clearWindow() {
+        st.window = null;
+        try {
+          history.replaceState(null, '', location.pathname);
+        } catch (err) {
+          /* the page still works; only the URL is stale */
+        }
+      }
+
+      var windowLabel = computed(function () {
+        if (!st.window) return '';
+        return NL.clockOf(st.window.from) + ' → ' + NL.clockOf(st.window.to);
+      });
+
+      /** How many visible rows could not be clipped (no client-side timestamps). */
+      var windowUnfiltered = computed(function () {
+        if (!st.window) return 0;
+        var n = 0;
+        var list = rows.value;
+        for (var i = 0; i < list.length; i++) if (list[i].windowed === false) n++;
+        return n;
       });
 
       var socket = null;
@@ -169,7 +232,7 @@
             p95: s.p95,
             p99: s.p99,
             band: bandOf(s.p95, unit),
-            series: st.history[name] || st.series[name] || [],
+            ...trendOf(name),
           });
         }
         var key = st.sortKey;
@@ -394,10 +457,16 @@
             var arr = st.history[name];
             if (!arr) {
               arr = st.history[name] = serverSeries ? serverSeries.slice(-TREND_LEN) : [];
+              // Seeded samples have no known time. `0` keeps the arrays aligned
+              // and makes them un-sliceable, which is the honest state.
+              st.historyAt[name] = arr.map(function () { return 0; });
               if (arr.length) continue; // the server's tail already includes this digest
             }
             arr.push(st.metrics[name].avg);
             if (arr.length > TREND_LEN) arr.shift();
+            var times = st.historyAt[name] || (st.historyAt[name] = []);
+            times.push(Date.now());
+            while (times.length > arr.length) times.shift();
           }
           return;
         }
@@ -449,6 +518,9 @@
         fmtCell: fmtCell,
         clockOf: clockOf,
         togglePause: function () { st.paused = !st.paused; },
+        clearWindow: clearWindow,
+        windowLabel: windowLabel,
+        windowUnfiltered: windowUnfiltered,
         clearSlow: function () { st.slow = []; },
         explain: explain,
         closeAttr: closeAttr,

@@ -109,6 +109,14 @@ const capabilities: Array<[string, RegExp]> = [
   ['shows the statistics, not just a sentence', /st\.attr\.pValue/.test(shell) && /st\.attr\.effectSize/.test(shell)],
   ['shows the change point', /st\.attr\.changePoint/.test(shell)],
   ['can dismiss the verdict', /closeAttr\(\)/.test(shell) && /function closeAttr/.test(app)],
+  // A window handed over from ndebug. The page must read it, say what it is, and
+  // admit which parts it could not apply.
+  ['reads a window from the query string', /function readWindow\(search\)/.test(app) && /readWindow\(location\.search\)/.test(app)],
+  ['keeps a receive time per trend sample', /historyAt\[name\]/.test(app) && /times\.push\(Date\.now\(\)\)/.test(app)],
+  ['clips the trend to the window', /function trendOf\(name\)/.test(app) && /times\[i\] >= st\.window\.from/.test(app)],
+  ['says which trends it could not clip', /windowUnfiltered/.test(shell) && /windowUnfiltered/.test(app)],
+  ['says the KPI totals are not windowed', /current digest, not the window/.test(shell)],
+  ['can clear the window', /clearWindow\(\)/.test(shell) && /function clearWindow/.test(app)],
 ];
 for (const [name, ok] of capabilities) {
   checks.push([`implements ${name}`, ok, '']);
