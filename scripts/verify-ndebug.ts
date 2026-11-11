@@ -15,7 +15,7 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ndebug.ts
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,8 @@ import { DebugSession } from '../src/debugtool/session.js';
 import { renderDebugHtml } from '../src/debugtool/ui.js';
 import { startDebugApp, languageOf } from '../src/debugtool/main.js';
 import { parseArgs } from '../src/debugtool/cli.js';
+import { Recorder, readRecording } from '../src/debugtool/recorder.js';
+import { startReplayApp } from '../src/debugtool/main.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -93,6 +95,41 @@ check('session: broken JSON is fatal', s2.view().state === 'rejected', s2.view()
 await s2.close();
 await session.close();
 
+// ---- baselines and diffs (no process, no socket) ----
+
+{
+  const s3 = new DebugSession({ hz: 10 });
+  await s3.listen();
+  s3.ingest(line({ v: 1, t: 'hello', token: s3.agentEnv().NLG_DEBUG_TOKEN, lang: 'python', pid: 5, target: 'd.py', agentVersion: '1', caps: [] }));
+
+  const snap = (at: number, price: string): string =>
+    line({
+      v: 1,
+      t: 'snapshot',
+      id: 'live-locals',
+      at,
+      path: 'locals',
+      value: { k: 'obj', t: 'dict', fields: [['price', { k: 'prim', t: 'int', v: price }]] },
+    });
+
+  s3.ingest(snap(1000, '10'));
+  check('session: a baseline needs a snapshot that exists', s3.setBaseline('nope') === false);
+  check('session: a baseline can be captured', s3.setBaseline('live-locals') === true);
+  check('session: the view lists baselines for the page', s3.view().baselines.indexOf('live-locals') >= 0, JSON.stringify(s3.view().baselines));
+  check('session: nothing has changed right after the baseline', s3.diff('live-locals')?.result.entries.length === 0, s3.diff('live-locals')?.summary ?? '');
+
+  s3.ingest(snap(2000, '12'));
+  const dv = s3.diff('live-locals');
+  check('session: the diff sees the new value', dv?.result.entries.length === 1 && dv.result.entries[0].after === '12', JSON.stringify(dv?.result.entries ?? []));
+  check('session: the diff names the field', dv?.result.entries[0].path === '$.price', dv?.result.entries[0].path ?? '');
+  check('session: the diff summarises itself', dv?.summary === '1 changed', dv?.summary ?? '');
+  check('session: diffing without a baseline yields nothing', s3.diff('other') === undefined);
+
+  s3.clearBaseline('live-locals');
+  check('session: clearing a baseline removes it', s3.view().baselines.length === 0 && s3.diff('live-locals') === undefined);
+  await s3.close();
+}
+
 // ------------------------------------------------------------ 2. the page
 
 const html = renderDebugHtml({ port: 7320, target: 'app.py', lang: 'python' });
@@ -125,6 +162,14 @@ check('page: no stray backtick inside the template', (() => {
   return uiSource.slice(open + 8, close).indexOf('`') === -1;
 })());
 
+check('page: offers a baseline capture', html.includes('markBaseline') && html.includes('>baseline</button>'));
+check('page: renders a diff list', html.includes('class="df"') && html.includes('st.diff.result.entries'));
+check('page: says a truncated diff is not proof', html.includes('not proof of equality'));
+check('page: shows a shifted path in the tooltip', html.includes('e.pathBefore'));
+check('page: marks a replay session', html.includes('st.view.replay') && html.includes('replay {{ replayPct }}'));
+check('page: a replay is read-only', html.includes(':disabled="!!st.view.replay"'));
+check('page: shows the oversized counter', html.includes('st.view.oversized'));
+
 // --------------------------------------------------- 3. the CLI contract
 
 const parsed = parseArgs(['app.py', '--port', '7400', '--hz', '20', '--no-open', '--', '60', '--flag']);
@@ -135,6 +180,18 @@ check('cli: no arguments means help', 'help' in parseArgs([]));
 check('cli: an unknown option is an error, not a guess', 'error' in parseArgs(['app.py', '--nope']));
 check('cli: an out-of-range hz is refused', 'error' in parseArgs(['app.py', '--hz', '0']));
 check('cli: a bad port is refused', 'error' in parseArgs(['app.py', '--port', '70000']));
+
+const recArgs = parseArgs(['app.py', '--record', 'run.ndlog', '--', '60']);
+check('cli: --record is parsed', !('error' in recArgs) && !('help' in recArgs) && recArgs.mode === 'live' && recArgs.record === 'run.ndlog', 'error' in recArgs ? recArgs.error : recArgs.mode);
+check('cli: --record does not swallow the program arguments', !('error' in recArgs) && !('help' in recArgs) && recArgs.args.join(' ') === '60');
+
+const replayArgs = parseArgs(['--replay', 'run.ndlog', '--speed', '4', '--port', '7400']);
+check('cli: --replay needs no script', !('error' in replayArgs) && !('help' in replayArgs) && replayArgs.mode === 'replay' && replayArgs.file === 'run.ndlog', 'error' in replayArgs ? replayArgs.error : replayArgs.mode);
+check('cli: --speed is parsed', !('error' in replayArgs) && !('help' in replayArgs) && replayArgs.speed === 4);
+check('cli: --speed 0 means instant, not "default"', !('error' in parseArgs(['--replay', 'x.ndlog', '--speed', '0'])) && (parseArgs(['--replay', 'x.ndlog', '--speed', '0']) as { speed: number }).speed === 0);
+check('cli: --replay with a script is refused', 'error' in parseArgs(['--replay', 'x.ndlog', 'app.py']));
+check('cli: --record without a path is refused', 'error' in parseArgs(['app.py', '--record']));
+check('cli: --speed out of range is refused', 'error' in parseArgs(['--replay', 'x.ndlog', '--speed', '-1']));
 
 // ------------------------------------------------------------ 4. the app
 
@@ -165,6 +222,7 @@ if (!existsSync(sample)) {
     // Speak to the page's own socket, like a browser would.
     const ws = new WebSocket(`ws://127.0.0.1:${app.port}/`);
     const views: Array<Record<string, unknown>> = [];
+    const diffs: Array<Record<string, unknown>> = [];
     let sawAttached = false;
     ws.onmessage = (ev: MessageEvent) => {
       try {
@@ -172,6 +230,8 @@ if (!existsSync(sample)) {
         if (msg.kind === 'view') {
           views.push(msg.view as Record<string, unknown>);
           if ((msg.view as Record<string, unknown>).state === 'attached') sawAttached = true;
+        } else if (msg.kind === 'diff') {
+          diffs.push(msg.diff as Record<string, unknown>);
         }
       } catch {
         /* ignore */
@@ -214,6 +274,33 @@ if (!existsSync(sample)) {
     }
     check('app: a watch added from the page evaluates in the target', watched?.ok === true, JSON.stringify(watched?.value ?? null));
     check('app: the watch value is the real one', watched?.value?.v === '3', String(watched?.value?.v));
+
+    // ---- baseline + diff, over the page's own socket ----
+    const localsAt = (): number => {
+      const v = views[views.length - 1] as Record<string, unknown> | undefined;
+      const list = (v?.snapshots as Array<{ id: string; at: number }> | undefined) ?? [];
+      const live = list.find((x) => x.id === 'live-locals');
+      return live ? live.at : 0;
+    };
+    const beforeAt = localsAt();
+    ws.send(JSON.stringify({ kind: 'baseline', id: 'live-locals' }));
+
+    // Wait for a *newer* live-locals tick before asking, otherwise the two trees
+    // are identical and the check would assert on timing rather than on the diff.
+    const newerDeadline = Date.now() + 5000;
+    while (Date.now() < newerDeadline && localsAt() <= beforeAt) await sleep(120);
+
+    ws.send(JSON.stringify({ kind: 'diff', id: 'live-locals' }));
+    const diffDeadline = Date.now() + 5000;
+    while (Date.now() < diffDeadline && !diffs.length) await sleep(120);
+
+    const dv = diffs[0] as
+      | { id?: string; summary?: string; result?: { entries?: Array<{ path: string; kind: string }> } }
+      | undefined;
+    const lastView = views[views.length - 1] as Record<string, unknown> | undefined;
+    check('app: the page can capture a baseline', ((lastView?.baselines as string[]) ?? []).indexOf('live-locals') >= 0, JSON.stringify(lastView?.baselines ?? []));
+    check('app: a diff comes back over the socket', dv?.id === 'live-locals' && Array.isArray(dv?.result?.entries), String(dv?.summary ?? 'none'));
+    check('app: the diff finds the loop changing', (dv?.result?.entries?.length ?? 0) > 0, dv?.summary ?? 'no entries');
 
     ws.close();
 
@@ -322,6 +409,86 @@ if (!existsSync(sample)) {
     }
   } finally {
     await app?.close();
+  }
+}
+
+// ------------------------------------------------- 5. record and replay
+
+if (!existsSync(sample)) {
+  console.log('SKIP  record/replay (sample missing)');
+} else {
+  const dir = mkdtempSync(join(tmpdir(), 'nlg-rec-'));
+  const recPath = join(dir, 'run.ndlog');
+  try {
+    // ---- record a real session ----
+    const live = await startDebugApp({ script: sample, port: 0, hz: 10, quiet: true, record: recPath, args: ['30'] });
+    const code = await live.exited;
+    await live.close();
+    const stats = live.recorder?.stats();
+    check('record: the file is written', existsSync(recPath) && (stats?.lines ?? 0) > 0, `${stats?.lines ?? 0} events · ${stats?.bytes ?? 0} bytes`);
+    check('record: the target exit code is unaffected', code === 0, String(code));
+
+    const rec = readRecording(recPath);
+    check('record: the header describes the session', rec.header.target === 'app.py' && rec.header.lang === 'python', `${rec.header.target}/${rec.header.lang}`);
+    check('record: every line is readable', rec.lines.length === (stats?.lines ?? -1) && !rec.note, `${rec.lines.length} vs ${stats?.lines ?? -1}${rec.note ? ' — ' + rec.note : ''}`);
+
+    // ---- replay it twice: the second run must produce the same thing ----
+    const r1 = await startReplayApp({ file: recPath, port: 0, speed: 0, quiet: true });
+    await r1.exited;
+    const v1 = r1.session.view();
+    const hot1 = v1.hot.map((h) => h.stack).join(' | ');
+    check('replay: events reach a session', v1.samples > 0, `${v1.samples} samples`);
+    check('replay: the page is told it is a replay', v1.replay?.done === true && v1.replay.total === rec.lines.length, JSON.stringify(v1.replay));
+    check('replay: the agent identity comes from the header', v1.target === 'app.py' && v1.lang === 'python', `${v1.target}/${v1.lang}`);
+    check('replay: the page is served', (await fetch(r1.url, { signal: AbortSignal.timeout(3000) })).status === 200);
+    const r1Health = (await (await fetch(`http://127.0.0.1:${r1.port}/health`, { signal: AbortSignal.timeout(3000) })).json()) as { replay?: { done: boolean } };
+    check('replay: /health reports the replay', r1Health.replay?.done === true, JSON.stringify(r1Health.replay ?? null));
+    await r1.close();
+
+    const r2 = await startReplayApp({ file: recPath, port: 0, speed: 0, quiet: true });
+    await r2.exited;
+    const v2 = r2.session.view();
+    check('replay: a second run produces the same stacks', v2.samples === v1.samples && v2.hot.map((h) => h.stack).join(' | ') === hot1, `${v2.samples} vs ${v1.samples}`);
+    await r2.close();
+
+    // ---- a recording cut short by a crash ----
+    const partialPath = join(dir, 'partial.ndlog');
+    writeFileSync(
+      partialPath,
+      JSON.stringify({ v: 1, t: 'rec-meta', at: 1, tool: 'ndebug', version: 'x', lang: 'python', target: 'a.py', hz: 10, redact: [] }) +
+        '\n' +
+        JSON.stringify({ v: 1, t: 'stack', at: 1, tid: 1, state: 'running', frames: [{ fn: 'm', file: 'a.py', line: 1 }] }) +
+        '\n' +
+        '{"v":1,"t":"sta',
+      'utf8',
+    );
+    const partial = readRecording(partialPath);
+    check('record: a half-written last line is dropped, not fatal', partial.lines.length === 1 && /incomplete/.test(partial.note ?? ''), partial.note ?? '');
+
+    // ---- the size cap ----
+    const capped = Recorder.open({
+      path: join(dir, 'capped.ndlog'),
+      header: { tool: 'ndebug', version: 'x', lang: 'python', target: 'a.py', hz: 10, redact: [] },
+      maxBytes: 300,
+    });
+    capped.write('x'.repeat(400));
+    capped.write('y'.repeat(10));
+    capped.close();
+    check('record: the size cap stops writing', capped.stats().truncated === true && capped.stats().lines === 0, JSON.stringify(capped.stats()));
+
+    // ---- an unwritable path must not break the session ----
+    const asDir = join(dir, 'a-directory');
+    mkdirSync(asDir, { recursive: true });
+    const broken = Recorder.open({ path: asDir, header: { tool: 'ndebug', version: 'x', lang: 'python', target: 'a.py', hz: 10, redact: [] } });
+    let threw = false;
+    try {
+      broken.write('hello');
+    } catch {
+      threw = true;
+    }
+    check('record: an unwritable path disables recording instead of throwing', !threw && broken.stats().error !== undefined, broken.stats().error ?? 'no error recorded');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 });
   }
 }
 

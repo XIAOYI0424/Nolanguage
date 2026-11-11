@@ -181,14 +181,19 @@ def ser(v, depth=0, path="$", key=None, seen=None, budget=None):
         fields = []
         raw = getattr(v, "__dict__", None)
         if isinstance(raw, dict):
-            names = list(raw.keys())
-            for name in names:
+            # `list(raw.keys())` would copy every key of the object *inside the
+            # observed process*, at the live-locals rate (2 Hz). On a 200k-key
+            # object that is a ~20 MB allocation twice a second in someone else's
+            # program — the tool would be the reason it got slow. `len()` is O(1)
+            # and iterating a dict view is lazy, so the work is O(MAX_ITEMS).
+            total = len(raw)
+            for name, value in raw.items():
                 if len(fields) >= MAX_ITEMS or budget[0] <= 0:
                     break
-                fields.append([name, ser(raw[name], depth + 1, "%s.%s" % (path, name), name, seen, budget)])
+                fields.append([name, ser(value, depth + 1, "%s.%s" % (path, name), name, seen, budget)])
             node = {"k": "obj", "t": _typename(v), "fields": fields}
-            if len(names) > len(fields):
-                node["more"] = len(names) - len(fields)
+            if total > len(fields):
+                node["more"] = total - len(fields)
             return node
 
         slots = getattr(type(v), "__slots__", None)

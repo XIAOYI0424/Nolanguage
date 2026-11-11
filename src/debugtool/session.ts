@@ -17,7 +17,7 @@ import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import {
   MAX_EVENTS_PER_SEC,
-  MAX_LINE_BYTES,
+  MAX_INFLIGHT_BYTES,
   PROTOCOL_VERSION,
   encodeCommand,
   parseAgentEvent,
@@ -27,6 +27,8 @@ import {
   type StackEvent,
 } from './protocol.js';
 import { detectStalls, effectiveHz, foldStacks, type HotStack, type Stall, type StackSample } from './sampler.js';
+import { diffNodes, summariseDiff, type DiffResult } from './diff.js';
+import type { Recorder } from './recorder.js';
 
 export type SessionState = 'listening' | 'attached' | 'detached' | 'closed' | 'rejected';
 
@@ -66,8 +68,31 @@ export interface SessionView {
   exceptions: Array<{ at: number; type: string; message: string; frames: Frame[] }>;
   dropped: number;
   badLines: number;
+  /** Lines refused for exceeding the protocol ceiling (a value too big to send). */
+  oversized: number;
   /** Reason for `rejected`, for the page header. */
   note?: string;
+  /** Present while replaying a recording: the page must say so and stay read-only. */
+  replay?: ReplayView;
+  /** Snapshot ids that have a baseline captured, for the diff buttons. */
+  baselines: string[];
+}
+
+export interface ReplayView {
+  file: string;
+  position: number;
+  total: number;
+  speed: number;
+  done: boolean;
+}
+
+export interface DiffView {
+  id: string;
+  /** When the baseline was captured. */
+  baseAt: number;
+  at: number;
+  result: DiffResult;
+  summary: string;
 }
 
 export interface SessionOptions {
@@ -79,13 +104,23 @@ export interface SessionOptions {
   maxDepth?: number;
   /** Extra field names to redact, merged with the agent's defaults. */
   redact?: string[];
+  /** When set, every accepted line is appended to the file verbatim. */
+  recorder?: Recorder;
+  /**
+   * Fixed handshake token instead of a random one.
+   *
+   * Only replay uses it: the recorded `hello` carries the token of the session
+   * that produced it, and a fresh random token would make the replay reject its
+   * own recording at the handshake.
+   */
+  token?: string;
 }
 
 const DEFAULT_MAX_SAMPLES = 2000;
 
 export class DebugSession extends EventEmitter {
   readonly token: string;
-  private readonly opts: Required<Omit<SessionOptions, 'redact'>> & { redact: string[] };
+  private readonly opts: Required<Omit<SessionOptions, 'redact' | 'recorder' | 'token'>> & { redact: string[]; recorder?: Recorder };
   private server?: Server;
   private socket?: Socket;
   private port = 0;
@@ -99,8 +134,12 @@ export class DebugSession extends EventEmitter {
   private exceptions: SessionView['exceptions'] = [];
 
   private hello?: { target: string; lang: string; pid: number; agentVersion: string; caps: string[] };
+  private replay?: ReplayView;
+  /** Snapshot id -> the value captured as "before". */
+  private baselines = new Map<string, SnapshotView>();
   private dropped = 0;
   private badLines = 0;
+  private oversized = 0;
   private windowCount = 0;
   private windowStart = Date.now();
 
@@ -111,8 +150,19 @@ export class DebugSession extends EventEmitter {
       maxSamples: opts.maxSamples ?? DEFAULT_MAX_SAMPLES,
       maxDepth: opts.maxDepth ?? 12,
       redact: opts.redact ?? [],
+      ...(opts.recorder ? { recorder: opts.recorder } : {}),
     };
-    this.token = randomBytes(16).toString('hex');
+    this.token = opts.token ?? randomBytes(16).toString('hex');
+  }
+
+  /**
+   * Start recording after construction.
+   *
+   * The recorder needs the session's token for its header, and the session needs
+   * the recorder for every line — so one of them has to be attached afterwards.
+   */
+  attachRecorder(recorder: Recorder): void {
+    this.opts.recorder = recorder;
   }
 
   /** Bind to a loopback port. Port 0 lets the OS pick (tests rely on it). */
@@ -151,8 +201,17 @@ export class DebugSession extends EventEmitter {
     this.socket = socket;
     socket.setEncoding('utf8');
     let buffer = '';
+    // Set when a line outgrew the ceiling and was abandoned; the next newline is
+    // the resynchronisation point.
+    let discarding = false;
 
     socket.on('data', (chunk: string) => {
+      if (discarding) {
+        const nl = chunk.indexOf('\n');
+        if (nl < 0) return; // still inside the runaway line
+        chunk = chunk.slice(nl + 1);
+        discarding = false;
+      }
       buffer += chunk;
       let nl = buffer.indexOf('\n');
       while (nl >= 0) {
@@ -162,10 +221,13 @@ export class DebugSession extends EventEmitter {
         if (!line.trim()) continue;
         this.ingest(line);
       }
-      // A single line larger than the ceiling means the agent is not following
-      // the protocol; do not grow the buffer to hold it.
-      if (buffer.length > MAX_LINE_BYTES * 2) {
-        this.reject('line too large');
+      // A line that never ends would otherwise grow this buffer without limit.
+      // Dropping it keeps the session: one bad value must not cost the whole
+      // observatory, which is exactly when the user needs it.
+      if (buffer.length > MAX_INFLIGHT_BYTES) {
+        buffer = '';
+        discarding = true;
+        this.oversized += 1;
       }
     });
     socket.on('error', () => this.detach('socket error'));
@@ -186,10 +248,17 @@ export class DebugSession extends EventEmitter {
 
     const parsed = parseAgentEvent(line, PROTOCOL_VERSION);
     if (!parsed.ok) {
-      this.badLines += 1;
+      // "Too large" is a size problem, not a malformed-stream problem: the line
+      // was complete and the next one is still aligned. Counting it separately
+      // keeps `badLines` meaningful as a protocol-health signal.
+      if (parsed.reason === 'line too large') this.oversized += 1;
+      else this.badLines += 1;
       if (parsed.fatal) this.reject(parsed.reason);
       return;
     }
+    // Recorded *after* validation: a file full of lines that the parser rejects
+    // would not replay, and the point of a recording is that it does.
+    this.opts.recorder?.write(line);
     this.apply(parsed.event);
   }
 
@@ -326,6 +395,47 @@ export class DebugSession extends EventEmitter {
     this.emit('detached', reason);
   }
 
+  /**
+   * Capture the current value of a snapshot id as the "before" side.
+   *
+   * The baseline is a reference, not a copy: `SNode` trees are never mutated
+   * after they are built, so holding one costs a pointer and keeps the diff
+   * honest about what was actually seen at that moment.
+   */
+  setBaseline(id: string): boolean {
+    const snap = this.snapshotById.get(id);
+    if (!snap) return false;
+    this.baselines.set(id, snap);
+    return true;
+  }
+
+  clearBaseline(id?: string): void {
+    if (id === undefined) this.baselines.clear();
+    else this.baselines.delete(id);
+  }
+
+  /**
+   * Diff the current value of `id` against its baseline (or another snapshot).
+   * Returns `undefined` when there is nothing to compare yet.
+   */
+  diff(id: string, against?: string): DiffView | undefined {
+    const base = against ? this.snapshotById.get(against) : this.baselines.get(id);
+    const now = this.snapshotById.get(id);
+    if (!base || !now) return undefined;
+    const result = diffNodes(base.value, now.value);
+    return { id, baseAt: base.at, at: now.at, result, summary: summariseDiff(result) };
+  }
+
+  /** Replay bookkeeping; the page reads it to say "this is not live". */
+  beginReplay(info: { file: string; total: number; speed: number }): void {
+    this.replay = { ...info, position: 0, done: false };
+  }
+
+  advanceReplay(position: number, done: boolean): void {
+    if (!this.replay) return;
+    this.replay = { ...this.replay, position, done };
+  }
+
   /** The aggregate the page renders. Cheap: derived from the rings each call. */
   view(): SessionView {
     const hot = foldStacks(this.samples, { stallSamples: Math.max(3, Math.round(this.opts.hz / 2)) });
@@ -342,7 +452,10 @@ export class DebugSession extends EventEmitter {
       exceptions: this.exceptions.slice(-20),
       dropped: this.dropped,
       badLines: this.badLines,
+      oversized: this.oversized,
       ...(this.note ? { note: this.note } : {}),
+      ...(this.replay ? { replay: this.replay } : {}),
+      baselines: [...this.baselines.keys()],
     };
   }
 

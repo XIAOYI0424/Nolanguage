@@ -57,10 +57,15 @@ check('protocol: broken JSON is fatal', (() => {
   const r = parseAgentEvent('{not json');
   return !r.ok && r.fatal;
 })());
-check('protocol: an oversized line is refused', (() => {
+// The line is refused, but **not fatally**: it is complete and the stream is
+// still aligned, so one oversized value must cost that value rather than the
+// session. This used to be `fatal`, and a single 300 KiB snapshot killed the
+// observatory — the exact moment the user needs it. `verify-stress` covers the
+// session-level behaviour; this pins the parser's side of the contract.
+check('protocol: an oversized line is refused without killing the session', (() => {
   const big = JSON.stringify({ v: 1, t: 'bye', reason: 'x'.repeat(MAX_LINE_BYTES + 10) });
   const r = parseAgentEvent(big);
-  return !r.ok && r.fatal;
+  return !r.ok && !r.fatal && r.reason === 'line too large';
 })());
 check('protocol: stack frames are normalised', (() => {
   const r = parseAgentEvent(JSON.stringify({

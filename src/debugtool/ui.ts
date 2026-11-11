@@ -115,6 +115,22 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
   .tn .tr { color:var(--warn); font-size:11px; }
   .tn .more { color:var(--fg3); font-size:11px; font-style:italic; }
 
+  /* ---- diff ---- */
+  .df { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 8px; padding:5px 11px;
+    border-bottom:1px solid var(--line); font-family:var(--mono); font-size:11.5px; }
+  .df .p { color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .df .k { font-size:10px; padding:0 5px; border-radius:7px; border:1px solid var(--line); color:var(--fg2); }
+  .df.added .k { color:var(--ok); border-color:#1F4429; }
+  .df.removed .k { color:var(--bad); border-color:#4E2320; }
+  .df.changed .k { color:var(--warn); border-color:#4A3A12; }
+  .df.unavailable .k { color:var(--fg3); }
+  .df .v { grid-column:1 / -1; color:var(--fg2); font-size:11px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .df .v s { color:var(--bad); text-decoration:line-through; }
+  .df .v b { color:var(--ok); font-weight:500; }
+  .df .v i { color:var(--fg3); font-style:normal; }
+  .replayNote { padding:6px 11px; font-size:10.5px; color:var(--warn); border-bottom:1px solid var(--line); }
+
   footer { display:flex; align-items:center; gap:14px; padding:4px 12px; background:var(--bg2);
     border-top:1px solid var(--line); font-family:var(--mono); font-size:11px; color:var(--fg3); flex:0 0 auto; }
   footer .spacer { flex:1; }
@@ -133,6 +149,8 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
     <span class="stat">sampling <b>{{ hzText }}</b></span>
     <span class="stat">samples <b>{{ st.view.samples || 0 }}</b></span>
     <span class="stat" v-if="st.view.dropped">dropped <b>{{ st.view.dropped }}</b></span>
+    <span class="stat" v-if="st.view.oversized" title="values refused for exceeding the wire ceiling">oversized <b>{{ st.view.oversized }}</b></span>
+    <span class="badge warn" v-if="st.view.replay" title="playing a recording, not a live process">replay {{ replayPct }}</span>
     <button :class="{ primary: st.paused }" @click="togglePause()">{{ st.paused ? 'resume' : 'pause' }}</button>
     <span class="badge" :class="stateClass">{{ stateText }}</span>
   </header>
@@ -144,10 +162,12 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
         <button @click="refresh()" title="Ask the agent for the current locals">snapshot</button>
       </div>
       <div class="watchAdd">
-        <input type="text" v-model="st.draft" placeholder="order.items[0].price" @keydown.enter="addWatch()" spellcheck="false" />
-        <button class="primary" @click="addWatch()">add</button>
+        <input type="text" v-model="st.draft" placeholder="order.items[0].price" @keydown.enter="addWatch()"
+               spellcheck="false" :disabled="!!st.view.replay" />
+        <button class="primary" @click="addWatch()" :disabled="!!st.view.replay">add</button>
       </div>
-      <div class="watchNote">表达式在目标进程里求值（相当于 eval），写副作用就会真的产生副作用。</div>
+      <div class="watchNote" v-if="!st.view.replay">表达式在目标进程里求值（相当于 eval），写副作用就会真的产生副作用。</div>
+      <div class="replayNote" v-else>回放：程序已经结束，表达式无法再求值。这里显示的是录制时求出的值。</div>
       <div class="body">
         <div class="w" v-for="w in st.view.watches" :key="w.expr">
           <span class="e" :title="w.expr">{{ w.expr }}</span>
@@ -204,11 +224,31 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
     <section>
       <div class="head">
         <span class="t">Inspector</span>
-        <span class="badge" v-if="current">{{ current.path }}</span>
+        <span class="badge" v-if="current && !st.diff">{{ current.path }}</span>
+        <span class="badge" :class="st.diff && st.diff.result.entries.length ? 'warn' : 'on'" v-if="st.diff">{{ st.diff.summary || 'no visible change' }}</span>
         <span class="spacer"></span>
-        <button @click="takeSnapshot()">snapshot now</button>
+        <template v-if="!st.diff">
+          <button v-if="!st.view.replay" @click="takeSnapshot()">snapshot now</button>
+          <button @click="markBaseline()" :disabled="!current" title="remember the value now, to compare against later">baseline</button>
+          <button class="primary" @click="showDiff()" :disabled="!canDiff" title="what changed since the baseline">diff</button>
+        </template>
+        <button v-else @click="closeDiff()">value</button>
       </div>
-      <div class="body tree" v-if="current">
+
+      <div class="body" v-if="st.diff">
+        <div class="df" v-for="(e, i) in st.diff.result.entries" :key="i" :class="e.kind">
+          <span class="p" :title="e.pathBefore ? e.path + ' — was ' + e.pathBefore : e.path">{{ e.path }}</span>
+          <span class="k">{{ e.kind }}</span>
+          <span class="v"><s v-if="e.before">{{ e.before }}</s><b v-if="e.after">{{ e.after }}</b><i v-if="e.note"> {{ e.note }}</i></span>
+        </div>
+        <div class="empty" v-if="!st.diff.result.entries.length">
+          Nothing visible changed since the baseline<span v-if="st.diff.result.incomplete"> — but part of the value was truncated, so that is not proof of equality</span>.
+        </div>
+        <div class="empty" v-if="st.diff.result.suppressed">
+          {{ st.diff.result.suppressed }} more changes not listed (the list is capped).
+        </div>
+      </div>
+      <div class="body tree" v-else-if="current">
         <snode :node="current.value" path="$"></snode>
       </div>
       <div class="empty" v-else-if="st.view.state === 'attached' && !hasLocals">
@@ -223,6 +263,7 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
 
   <footer>
     <span class="pill">{{ st.conn }}</span>
+    <span v-if="st.view.replay">recording <b>{{ st.view.replay.file }}</b> · {{ st.view.replay.position }}/{{ st.view.replay.total }}</span>
     <span>target <b>{{ st.view.target || '—' }}</b></span>
     <span>pid <b>{{ st.view.pid || '—' }}</b></span>
     <span class="spacer"></span>

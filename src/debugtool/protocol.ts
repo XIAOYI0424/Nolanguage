@@ -27,8 +27,27 @@ export const PROTOCOL_VERSION = 1;
 /** Hard ceiling for one NDJSON line (agent side must truncate before sending). */
 export const MAX_LINE_BYTES = 256 * 1024;
 
+/**
+ * How much of an unfinished line the reader will hold before giving up on it.
+ *
+ * Four times the line ceiling: enough that a slightly oversized line still
+ * arrives complete and is counted as `oversized`, small enough that a runaway
+ * writer cannot exhaust memory. Past this the buffer is dropped and the reader
+ * resynchronises at the next newline.
+ */
+export const MAX_INFLIGHT_BYTES = 1024 * 1024;
+
 /** Reader-side ceiling; beyond this the engine drops lines and counts them. */
 export const MAX_EVENTS_PER_SEC = 500;
+
+/**
+ * Nodes the engine will accept in one value tree.
+ *
+ * The agents cap themselves at ~4,000; this is the backstop for an agent with
+ * different limits (or a bug). It matters because the page renders whatever the
+ * engine stores: an unbounded tree is a browser tab that never comes back.
+ */
+export const MAX_TREE_NODES = 20_000;
 
 /** One entry of a sampled stack, innermost last. */
 export interface Frame {
@@ -149,7 +168,10 @@ export type ParseResult =
 export function parseAgentEvent(line: string, expectedVersion = PROTOCOL_VERSION): ParseResult {
   const text = line.trim();
   if (!text) return { ok: false, reason: 'empty', fatal: false };
-  if (Buffer.byteLength(text, 'utf8') > MAX_LINE_BYTES) return { ok: false, reason: 'line too large', fatal: true };
+  // Not fatal: the line is complete and the stream is still aligned, so one
+  // oversized value (a 10 MB string someone asked to snapshot) must cost that
+  // value, not the session. The engine counts it and carries on.
+  if (Buffer.byteLength(text, 'utf8') > MAX_LINE_BYTES) return { ok: false, reason: 'line too large', fatal: false };
 
   let raw: unknown;
   try {
@@ -286,10 +308,19 @@ function parseFrames(v: unknown): Frame[] | null {
   return out;
 }
 
-/** Structural validation of a serialized tree — see `validateNode`. */
-export function parseNode(v: unknown, depth = 0): SNode | null {
+/**
+ * Structural validation of a serialized tree.
+ *
+ * The budget is spent *while walking*: a 50,000-node payload becomes a
+ * 20,000-node tree plus a `trunc{size}` leaf, instead of being materialised in
+ * full and then measured. A default parameter is evaluated per call, so each
+ * top-level parse gets its own budget while recursion shares one.
+ */
+export function parseNode(v: unknown, depth = 0, budget: { left: number } = { left: MAX_TREE_NODES }): SNode | null {
   if (depth > 64) return null; // a self-referential payload must not recurse forever
   if (!v || typeof v !== 'object') return null;
+  if (budget.left <= 0) return { k: 'trunc', why: 'size' };
+  budget.left -= 1;
   const n = v as Record<string, unknown>;
   switch (n.k) {
     case 'prim': {
@@ -298,49 +329,65 @@ export function parseNode(v: unknown, depth = 0): SNode | null {
       return { k: 'prim', t, v: typeof n.v === 'string' ? n.v : String(n.v ?? '') };
     }
     case 'seq': {
-      const items = Array.isArray(n.items) ? n.items.map((i) => parseNode(i, depth + 1)) : [];
-      if (items.some((i) => i === null)) return null;
+      const raw = Array.isArray(n.items) ? n.items : [];
+      const items: SNode[] = [];
+      for (const item of raw) {
+        // Stop adding when the budget is gone. Emitting one `trunc` per remaining
+        // item would keep the array exactly as large as the payload we are
+        // trying to refuse (measured: a 50k-node tree stayed 50k nodes).
+        if (budget.left <= 0) break;
+        const parsed = parseNode(item, depth + 1, budget);
+        if (!parsed) return null;
+        items.push(parsed);
+      }
+      const hidden = (typeof n.more === 'number' && n.more > 0 ? n.more : 0) + (raw.length - items.length);
       return {
         k: 'seq',
         t: str(n.t) ?? 'seq',
-        n: num(n.n, items.length),
-        items: items as SNode[],
-        ...(typeof n.more === 'number' && n.more > 0 ? { more: n.more } : {}),
+        n: num(n.n, raw.length),
+        items,
+        ...(hidden > 0 ? { more: hidden } : {}),
       };
     }
     case 'map': {
       if (!Array.isArray(n.entries)) return null;
+      const raw = n.entries;
       const entries: Array<[SNode, SNode]> = [];
-      for (const e of n.entries) {
+      for (const e of raw) {
         if (!Array.isArray(e) || e.length !== 2) return null;
-        const k = parseNode(e[0], depth + 1);
-        const val = parseNode(e[1], depth + 1);
+        if (budget.left <= 0) break;
+        const k = parseNode(e[0], depth + 1, budget);
+        const val = parseNode(e[1], depth + 1, budget);
         if (!k || !val) return null;
         entries.push([k, val]);
       }
+      const hidden = (typeof n.more === 'number' && n.more > 0 ? n.more : 0) + (raw.length - entries.length);
       return {
         k: 'map',
         t: str(n.t) ?? 'map',
-        n: num(n.n, entries.length),
+        n: num(n.n, raw.length),
         entries,
-        ...(typeof n.more === 'number' && n.more > 0 ? { more: n.more } : {}),
+        ...(hidden > 0 ? { more: hidden } : {}),
       };
     }
     case 'obj': {
       if (!Array.isArray(n.fields)) return null;
+      const raw = n.fields;
       const fields: Array<[string, SNode]> = [];
-      for (const f of n.fields) {
+      for (const f of raw) {
         if (!Array.isArray(f) || f.length !== 2) return null;
+        if (budget.left <= 0) break;
         const key = str(f[0]);
-        const val = parseNode(f[1], depth + 1);
+        const val = parseNode(f[1], depth + 1, budget);
         if (!key || !val) return null;
         fields.push([key, val]);
       }
+      const hidden = (typeof n.more === 'number' && n.more > 0 ? n.more : 0) + (raw.length - fields.length);
       return {
         k: 'obj',
         t: str(n.t) ?? 'object',
         fields,
-        ...(typeof n.more === 'number' && n.more > 0 ? { more: n.more } : {}),
+        ...(hidden > 0 ? { more: hidden } : {}),
         ...(typeof n.cycle === 'string' ? { cycle: n.cycle } : {}),
       };
     }

@@ -147,12 +147,20 @@ export function serializeJs(value: unknown, limits: SerializeLimits = DEFAULT_LI
       }
       if (ArrayBuffer.isView(obj) && !(obj instanceof DataView)) {
         const arr = obj as unknown as ArrayLike<number>;
-        const shown = Array.from(arr).slice(0, limits.maxItems);
+        // `Array.from(arr)` copies the **whole** buffer: a 10M-element
+        // Float64Array became a 10M-element JS array (measured: 151 MiB, 263 ms)
+        // just to show 50 numbers. Read the prefix instead.
+        const shown: SNode[] = [];
+        const limit = Math.min(arr.length, limits.maxItems);
+        for (let i = 0; i < limit; i++) {
+          if (budget <= 0) break;
+          shown.push({ k: 'prim', t: 'float', v: String(arr[i]) });
+        }
         return {
           k: 'seq',
           t: typeName(obj),
           n: arr.length,
-          items: shown.map((n, i) => ({ k: 'prim' as const, t: 'float' as const, v: String(n) })),
+          items: shown,
           ...(arr.length > shown.length ? { more: arr.length - shown.length } : {}),
         };
       }

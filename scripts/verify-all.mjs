@@ -45,6 +45,10 @@ const stages = [
   { name: 'Debug · observatory (protocol + channel)', script: 'scripts/verify-debugtool.ts' },
   // The standalone app: session, page, and a real attach through the CLI path.
   { name: 'Debug · observatory app (ndebug)', script: 'scripts/verify-ndebug.ts' },
+  // Snapshot diff: pure logic, so it belongs in the fast gate.
+  { name: 'Debug · snapshot diff', script: 'scripts/verify-diff.ts', pure: true },
+  // Bounds: big values, big trees, runaway lines, and the agent's own cost.
+  { name: 'Debug · stress (bounds)', script: 'scripts/verify-stress.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.

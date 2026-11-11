@@ -34,6 +34,12 @@ ndebug /path/to/app.py
 
 # 3. 换个端口 / 采样率，不自动开浏览器
 ndebug app.py --port 7400 --hz 20 --no-open
+
+# 4. 录下来，事后还能再看一遍
+ndebug app.py --record crash.ndlog -- 80
+
+# 5. 回放（不需要原程序，也不需要 Python）
+ndebug --replay crash.ndlog --speed 4
 ```
 
 `--` 之后的一切原样传给被观测的程序（上例里 `80` 是示例的循环次数）。
@@ -85,7 +91,48 @@ npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 - `↺ $` 表示循环引用回到某个路径——对象里真的有个环，不是显示错误。
 - 末尾 `… 38 more` 表示被省略的数量。
 
-**页脚** —— 观测台自己的开销：连接状态、目标、pid、实际采样率、丢弃计数。**观测工具必须承认自己的成本。**
+**`baseline` / `diff`** —— 回答"到底什么变了"。
+
+- `baseline` 记住当前值，之后点 `diff` 列出差异：路径、旧值 → 新值。
+- 路径指向**当前**这棵树（插入一项后，后面所有下标会顺移，行里显示的是新位置；旧位置放在悬停提示里）。
+- 列表里的 `unavailable` 不是"没变"，是**这一段被截断了，根本没比**——所以"没有差异"只有在没有 `unavailable` 时才成立。
+- 列表最多 200 行，超出会明确写"还有 N 条未列出"。
+
+**页脚** —— 观测台自己的开销：连接状态、目标、pid、实际采样率、丢弃计数、超限计数。**观测工具必须承认自己的成本。**
+
+---
+
+## 录制与回放
+
+程序崩了之后，观测台里最有价值的东西也一起没了。`--record` 把 agent 说的话原样写到 `.ndlog`：
+
+```bash
+ndebug app.py --record crash.ndlog -- 80
+```
+
+文件就是**线上格式本身**（NDJSON，每行一个事件）+ 一行 `rec-meta` 头。这意味着：
+
+- 回放走的是**同一个解析器**，协议一改，旧录像会立刻报错，而不是被悄悄重新解释；
+- 文件可以直接 `grep`、`jq`，也可以拿去写别的分析。
+
+```bash
+ndebug --replay crash.ndlog            # 按原始节奏重放
+ndebug --replay crash.ndlog --speed 4  # 四倍速
+ndebug --replay crash.ndlog --speed 0  # 直接跳到最终状态
+```
+
+回放不需要原程序、不需要 Python、不需要网络——它是**读文件**。
+
+几条刻意的限制：
+
+| 限制 | 为什么 |
+|---|---|
+| 回放时 Watch 输入禁用 | 程序已经结束，表达式求不了值；显示的是录制时求出的值 |
+| 默认上限 64 MiB | 长时间挂着不该悄悄占满磁盘；到上限就停并在退出时说明 |
+| 写失败只是关掉录制 | 磁盘满 / 文件被占 / 没权限，都不能影响观测本身 |
+| 尾部半行会被丢弃 | 崩溃时最后一行常常是半截；丢掉它并标注，而不是让整个文件读不了 |
+
+录制文件里带着当次会话的握手 token（回放要用它复现握手）。它守护的是一个**已经关闭的**回环端口，但仍然算凭据——所以录像当日志对待，别直接贴到公开 issue 里。
 
 ---
 
@@ -116,6 +163,9 @@ npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 | 局部变量 | 每次最多 24 个名字，2 Hz | 变量多的函数不会刷屏 |
 | 表达式 | **只执行你手动输入的** | 不自动跑任何线上来的东西 |
 | 脱敏 | token/secret/password/apikey/... | 在进程内完成，不依赖 UI 遮挡 |
+| 单行上限 | 256 KiB | 超了只丢这一条并计数（`oversized`），**不断开会话** |
+| 未完成行 | 1 MiB 后放弃并重新对齐 | 一行永远不结束不能把内存吃光 |
+| 引擎侧树预算 | 20,000 节点 | agent 限额是 4,000；这是防止别的 agent 把页面撑爆的兜底 |
 
 **注意**：监视表达式是 `eval`，它会**真的执行代码**。写 `x.append(1)` 就会改变程序状态。工具不阻止你，但你需要知道。
 
@@ -144,6 +194,9 @@ npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 | JS 的 watch 报 `ReferenceError` | 只认全局作用域 | 把要看的对象挂到 `globalThis` 上，或用 `globalThis.x` |
 | 采样率远低于设定 | 程序在 GIL 上长时间占用 | 正常现象；降低 `--hz` 反而更稳 |
 | `dropped` 在涨 | 事件产生快于消费 | 降低 `--hz` |
+| `oversized` 在涨 | 某个值超过了 256 KiB 的单行上限 | 正常保护；要看那个值就单独监视它的字段，别整个对象 |
+| `diff` 按钮是灰的 | 还没有为当前快照点过 `baseline` | 先点 `baseline`，改变发生后再点 `diff` |
+| 回放时 `waiting for agent` | 录像里没有 `hello`（文件被截断在开头） | 换一个录像；头部行缺失的文件也能放，但没有目标信息 |
 
 ---
 
@@ -151,7 +204,9 @@ npm run build:ndebug      # -> dist/NDebug.exe (约 84 MB)
 
 ```bash
 npm run verify:debugtool   # 协议 / 序列化 / 采样聚合 + 真实进程通道（36 条）
-npm run verify:ndebug      # 会话 / 页面 / 端到端 attach + watch（33 条）
+npm run verify:ndebug      # 会话 / 页面 / 端到端 attach + watch + diff + 录制回放（91 条）
+npm run verify:diff        # 快照 diff 纯逻辑（46 条）
+npm run verify:stress      # 大对象 / 大树 / 失控行 / agent 进程内开销（29 条）
 npm run build:ndebug       # 打 dist/NDebug.exe
 ```
 
@@ -163,7 +218,9 @@ src/debugtool/                 应用代码
   protocol.ts                  线上格式（NDJSON v1）+ 校验
   serializer.ts                安全序列化（TS 侧规范实现）
   sampler.ts                   热栈折叠 / 卡顿检测
-  session.ts                   一个被观测程序：socket + 环形缓冲 + 聚合
+  session.ts                   一个被观测程序：socket + 环形缓冲 + 聚合 + 基线/diff
+  diff.ts                      两棵快照树的差异（纯函数）
+  recorder.ts                  录制 / 读取 / 定时回放
   ui.ts                        自包含页面
   assets/debug-app.js          页面逻辑（Vue 3，内联）
   agents/python/               注入的 agent（sitecustomize，文本内嵌进 exe）
@@ -171,7 +228,7 @@ src/debugtool/                 应用代码
   main.ts                      库：startDebugApp()
   cli.ts                       唯一入口：ndebug 命令行
 scripts/build-ndebug.mjs       单文件 exe 构建
-scripts/verify-{debugtool,ndebug}.ts
+scripts/verify-{debugtool,ndebug,diff,stress}.ts
 ```
 
 三条不能破的规则：

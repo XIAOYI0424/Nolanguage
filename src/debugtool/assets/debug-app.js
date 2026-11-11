@@ -43,6 +43,9 @@
           exceptions: [],
           dropped: 0,
           badLines: 0,
+          oversized: 0,
+          baselines: [],
+          replay: null,
         },
         draft: '',
         /** Freeze the view: sampling keeps running, the panel stops moving. */
@@ -50,6 +53,8 @@
         selected: '',
         /** Snapshot id the user pinned by pressing "snapshot now". */
         pin: '',
+        /** The last diff, or null while the tree is shown. */
+        diff: null,
       });
 
       var socket = null;
@@ -89,6 +94,13 @@
             // agent keeps sending, so resuming shows the present, not a backlog.
             if (st.paused) return;
             st.view = msg.view;
+            return;
+          }
+          if (msg.kind === 'diff') {
+            // A diff is a captured comparison, not a live stream: it keeps the
+            // moment it was asked for so the numbers cannot drift under the
+            // reader while they are looking at them.
+            st.diff = msg.diff;
             return;
           }
           if (msg.kind === 'snapshot') {
@@ -162,6 +174,20 @@
         return caps.indexOf('locals') >= 0;
       });
 
+      /** Diffing needs a baseline captured for the snapshot currently shown. */
+      var canDiff = computed(function () {
+        var snap = current.value;
+        if (!snap) return false;
+        var list = st.view.baselines || [];
+        return list.indexOf(snap.id) >= 0;
+      });
+
+      var replayPct = computed(function () {
+        var r = st.view.replay;
+        if (!r || !r.total) return '0%';
+        return Math.round((r.position / r.total) * 100) + '%';
+      });
+
       var hzText = computed(function () {
         var hz = st.view.actualHz || 0;
         return hz > 0 ? hz.toFixed(1) + ' Hz' : st.view.hz + ' Hz (requested)';
@@ -201,6 +227,23 @@
         st.paused = !st.paused;
       }
 
+      function markBaseline() {
+        var snap = current.value;
+        if (!snap) return;
+        send({ kind: 'baseline', id: snap.id });
+      }
+
+      function showDiff() {
+        var snap = current.value;
+        if (!snap) return;
+        st.diff = null;
+        send({ kind: 'diff', id: snap.id });
+      }
+
+      function closeDiff() {
+        st.diff = null;
+      }
+
       function pct(share) {
         var v = Math.round((share || 0) * 100);
         return (v < 1 ? '<1' : String(v)) + '%';
@@ -224,6 +267,11 @@
         stateClass: stateClass,
         hzText: hzText,
         hasLocals: hasLocals,
+        canDiff: canDiff,
+        replayPct: replayPct,
+        markBaseline: markBaseline,
+        showDiff: showDiff,
+        closeDiff: closeDiff,
         addWatch: addWatch,
         removeWatch: removeWatch,
         select: select,
