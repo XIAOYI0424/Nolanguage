@@ -172,32 +172,116 @@ check('page: a replay is read-only', html.includes(':disabled="!!st.view.replay"
 check('page: shows the oversized counter', html.includes('st.view.oversized'));
 
 // Every check above is a string search, and a broken Vue template still passes
-// all of them while rendering a blank page. Mount the real thing once: the
-// template compiles at mount time, so a syntax error surfaces here and nowhere
-// else.
-{
-  let JSDOM: unknown;
+// all of them while rendering a blank page. So the page is mounted for real
+// twice: once as it arrives, and once with a diff pushed through a fake socket —
+// `st.diff` is null at mount time, so nothing else would ever render a row.
+const jsdom = (() => {
   try {
-    JSDOM = createRequire(join(root, 'package.json'))('jsdom').JSDOM as unknown;
+    return createRequire(join(root, 'package.json'))('jsdom') as { JSDOM: new (markup: string, opts: Record<string, unknown>) => {
+      window: { document: Document; WebSocket?: unknown; close: () => void };
+    } };
   } catch {
-    console.log('SKIP  page mount (jsdom unavailable)');
+    return undefined;
   }
-  if (JSDOM) {
-    const Ctor = JSDOM as new (markup: string, opts: Record<string, unknown>) => {
-      window: { document: Document; close: () => void };
-    };
-    const dom = new Ctor(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://127.0.0.1:7000/' });
+})();
+
+if (!jsdom) {
+  console.log('SKIP  page mount (jsdom unavailable)');
+} else {
+  const mount = (withSocket: boolean): { doc: Document; socket: { onmessage?: (ev: { data: string }) => void } | null; close: () => void } => {
+    let socket: { onmessage?: (ev: { data: string }) => void } | null = null;
+    const dom = new jsdom.JSDOM(html, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://127.0.0.1:7000/',
+      ...(withSocket
+        ? {
+            beforeParse(window: { WebSocket: unknown }) {
+              // A socket that opens but never talks: the page's retry loop would
+              // otherwise keep the suite alive forever.
+              window.WebSocket = class {
+                readyState = 1;
+                onopen?: () => void;
+                onmessage?: (ev: { data: string }) => void;
+                constructor() {
+                  socket = this as unknown as { onmessage?: (ev: { data: string }) => void };
+                  setTimeout(() => this.onopen?.(), 0);
+                }
+                send(): void {}
+                close(): void {}
+              };
+            },
+          }
+        : {}),
+    });
+    return { doc: dom.window.document, socket, close: () => dom.window.close() };
+  };
+
+  {
+    const page = mount(false);
     await sleep(400);
-    const doc = dom.window.document;
-    const buttons = Array.from(doc.querySelectorAll('button')).map((b) => (b.textContent ?? '').trim());
-    check('page: the Vue app actually mounts', (doc.querySelector('#app')?.children.length ?? 0) > 0, `${buttons.length} buttons`);
+    const buttons = Array.from(page.doc.querySelectorAll('button')).map((b) => (b.textContent ?? '').trim());
+    check('page: the Vue app actually mounts', (page.doc.querySelector('#app')?.children.length ?? 0) > 0, `${buttons.length} buttons`);
     check('page: the inspector offers baseline and diff', buttons.indexOf('baseline') >= 0 && buttons.indexOf('diff') >= 0, buttons.join(','));
     check('page: diff starts disabled without a baseline', (() => {
-      const btn = Array.from(doc.querySelectorAll('button')).find((b) => (b.textContent ?? '').trim() === 'diff');
+      const btn = Array.from(page.doc.querySelectorAll('button')).find((b) => (b.textContent ?? '').trim() === 'diff');
       return btn !== undefined && btn.hasAttribute('disabled');
     })());
-    // The page retries its socket forever; without this the suite never exits.
-    dom.window.close();
+    page.close();
+  }
+
+  {
+    const page = mount(true);
+    await sleep(300);
+    page.socket?.onmessage?.({
+      data: JSON.stringify({
+        kind: 'view',
+        view: {
+          state: 'attached', target: 'app.py', lang: 'python', pid: 1, agentVersion: '1',
+          hz: 10, actualHz: 9.9, samples: 12, hot: [], stalls: [], watches: [], exceptions: [],
+          dropped: 0, badLines: 0, oversized: 0, baselines: ['live-locals'],
+          snapshots: [{ id: 'live-locals', at: 100, path: 'locals', value: { k: 'prim', t: 'int', v: '1' } }],
+        },
+      }),
+    });
+    await sleep(150);
+    page.socket?.onmessage?.({
+      data: JSON.stringify({
+        kind: 'diff',
+        diff: {
+          id: 'live-locals',
+          baseAt: 100,
+          at: 200,
+          summary: '1 changed · 1 added',
+          result: {
+            entries: [
+              { path: '$.price', kind: 'changed', before: '10', after: '12' },
+              { path: '$.note', kind: 'added', after: "'hi'" },
+              { path: '$[2].qty', kind: 'changed', before: '1', after: '3', pathBefore: '$[1].qty' },
+              { path: '$.big', kind: 'unavailable', before: '[depth Tree]', note: 'before: depth' },
+            ],
+            suppressed: 7,
+            incomplete: true,
+            summary: { added: 1, removed: 0, changed: 2, unavailable: 1 },
+          },
+        },
+      }),
+    });
+    await sleep(300);
+
+    const rows = Array.from(page.doc.querySelectorAll('.df'));
+    const kinds = rows.map((r) => (r.querySelector('.k')?.textContent ?? '').trim());
+    const paths = rows.map((r) => (r.querySelector('.p')?.textContent ?? '').trim());
+    check('page: a diff renders one row per change', rows.length === 4, String(rows.length));
+    check('page: each row keeps its kind for styling', kinds.join(',') === 'changed,added,changed,unavailable', kinds.join(','));
+    check('page: rows carry the path to look at', paths[0] === '$.price' && paths[2] === '$[2].qty', paths.join(' '));
+    check('page: a changed row shows both sides', (rows[0]?.querySelector('.v')?.textContent ?? '').includes('12'), rows[0]?.querySelector('.v')?.textContent ?? '');
+    check('page: a shifted row keeps its original path', rows[2]?.querySelector('.p')?.getAttribute('title')?.includes('$[1].qty') === true, rows[2]?.querySelector('.p')?.getAttribute('title') ?? '');
+    check('page: the capped count is stated', (page.doc.body.textContent ?? '').includes('7 more changes'));
+    // The one that matters: entries exist *and* the tree was truncated, so the
+    // list must say it is not complete.
+    check('page: an incomplete diff says so even with entries', (page.doc.body.textContent ?? '').includes('changes inside it are not in this list'));
+    page.close();
   }
 }
 

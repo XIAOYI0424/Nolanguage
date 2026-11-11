@@ -241,6 +241,12 @@ export function renderDebugHtml(opts: DebugPageOptions): string {
           <span class="k">{{ e.kind }}</span>
           <span class="v"><s v-if="e.before">{{ e.before }}</s><b v-if="e.after">{{ e.after }}</b><i v-if="e.note"> {{ e.note }}</i></span>
         </div>
+        <!-- Truncation has to be stated even when there *are* entries: otherwise
+             the list reads as "this is everything that changed", and the changes
+             hiding inside the truncated branch are silently omitted. -->
+        <div class="empty" v-if="st.diff.result.incomplete && st.diff.result.entries.length">
+          Part of the value was truncated, so changes inside it are not in this list.
+        </div>
         <div class="empty" v-if="!st.diff.result.entries.length">
           Nothing visible changed since the baseline<span v-if="st.diff.result.incomplete"> — but part of the value was truncated, so that is not proof of equality</span>.
         </div>
