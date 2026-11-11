@@ -132,6 +132,15 @@ async function main(): Promise<void> {
   // touching the developer's real profile.
   const appDataDir = join(sandbox, 'appdata');
   await mkdir(appDataDir, { recursive: true });
+  // The packaged build unpacks its embedded extensions under `%TEMP%` on every
+  // start. Pointing TEMP at the sandbox keeps that write inside the tree the test
+  // is allowed to touch, and keeps concurrent runs from sharing one cache.
+  const tempDir = join(sandbox, 'temp');
+  await mkdir(tempDir, { recursive: true });
+  // Stand-in for the user profile: `~/.nolanguage` lands here instead of in the
+  // developer's real home.
+  const homeDir = join(sandbox, 'home');
+  await mkdir(homeDir, { recursive: true });
 
   // Start the exe, retrying on a different port if that one is taken. A stale
   // server holding the preferred port must not look like a broken build.
@@ -149,11 +158,25 @@ async function main(): Promise<void> {
       // PANEL_WORKSPACE pins the editor buffer dir into the sandbox: the default
       // is `%TEMP%/nolanguage-ide-<pid>`, which a sandboxed harness may not allow
       // the child to create.
+      //
+      // TEMP/TMP do the same for the embedded extension tree
+      // (`%TEMP%/nolanguage-embedded`), which the packaged build writes on every
+      // start. Two reasons beyond the sandbox: a denied write there aborts
+      // startup with EPERM and no server, and the real `%TEMP%` is shared, so two
+      // concurrent smoke runs would fight over the same files.
       env: {
         ...process.env,
         PANEL_PORT: String(PORT),
         PANEL_WORKSPACE: workspaceDir,
         NOLANGUAGE_DATA: appDataDir,
+        TEMP: tempDir,
+        TMP: tempDir,
+        // The plugin home is `~/.nolanguage` (sessions, per-language data), and
+        // `homedir()` reads USERPROFILE on Windows. Without this the packaged exe
+        // writes into the developer's real profile — which a sandboxed harness
+        // denies, so a run session silently never starts.
+        USERPROFILE: homeDir,
+        HOME: homeDir,
         NOLANGUAGE_QUIET: '0',
         NOLANGUAGE_NO_BROWSER: '1',
       },

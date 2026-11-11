@@ -44,14 +44,23 @@ Go 没有 `sitecustomize`、没有 `--require`，也没有从进程外注入钩�
 - 三处边界写在页面上：KPI 总计不是窗口内的；没有客户端时间戳的趋势标 `windowed: false` 并计数；窗口非法就不生成链接（`file:`/`javascript:` 一律拒绝）。
 - 趋势的接收时间随值一起记，服务器播种的历史标 `0`（时间未知）而不是猜。
 
+### 修：打包冒烟测试会写开发者的真实目录
+
+`smoke-exe.ts` 只把 `PANEL_WORKSPACE` 和 `NOLANGUAGE_DATA` 钉进沙盒，另外三处仍在外面：
+
+- `%TEMP%` —— 打包版每次启动都要把内嵌扩展解到 `%TEMP%\nolanguage-embedded`。沙箱拒绝写入时，exe **直接启动失败**（`EPERM`），而测试只看到"server never came up"。顺带这也是并发跑两次冒烟会互相踩的原因。
+- `~/.nolanguage`（`USERPROFILE`）—— python 运行会话的目录在这里。写不进去时 run 会静默超时，表现为"python run exits 0 — exit=undefined"。
+
+现在 `TEMP` / `TMP` / `USERPROFILE` / `HOME` 全部指进测试自己的沙盒目录。**测试不该往开发者真实的家目录里写东西**，而且这条路径原本会把沙箱策略问题伪装成产品回归——这轮就差点被它骗过去。
+
 ### 发现：`scripts/` 从来没被类型检查过
 
 `tsconfig.json` 是 `include: ["src"]`，40 多个验证脚本一行都没进过 `tsc`。实测补上后有 **111 个存量类型错误**。这跟"vitest 静默丢测试文件"是同一类问题：**测试基建本身没有守卫**。本轮不硬修（会动到大量别人的套件），已记进 DESIGN 的下一步，并在新写的代码里避开这个盲区（例如把 `perfLink` 的字段名对齐成查询串里的 `src`，让调用方无从写错）。
 
 ### 验证
 
-- `verify-all`：**1995/1995 · 42 套件**；`tsc` 0；`npm test` 38/38。
-- 新增：`verify-ndebug-go`（44 条，含对真实 Go 程序 attach）、`verify-redact`（36 条，纯逻辑，进快速闸门）、`verify-sanitize`（29 条）；`verify-ndebug` 104 → **119 条**（含脱敏端到端与 12 条互跳断言）；`check-perf-html` 53 → **59 条**。
+- `verify-all`：**1999/1999 · 42 套件**；`tsc` 0；`npm test` 38/38。
+- 新增：`verify-ndebug-go`（44 条，含对真实 Go 程序 attach）、`verify-redact`（36 条，纯逻辑，进快速闸门）、`verify-sanitize`（29 条）；`verify-ndebug` 104 → **123 条**（含脱敏端到端、12 条互跳断言、4 条用 jsdom 验证链接真的渲染）；`check-perf-html` 53 → **59 条**。
 - 纯逻辑闸门：**369/369 · 12 套件**。
 - 打包 exe 实测：`--help` 有四个新区块；`ndebug app.go` 打印完整指引；录制 16 行 → `--sanitize` 后 token 两处都消失、15 个事件仍可回放。
 

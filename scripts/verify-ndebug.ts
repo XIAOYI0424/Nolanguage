@@ -193,9 +193,9 @@ const jsdom = (() => {
 if (!jsdom) {
   console.log('SKIP  page mount (jsdom unavailable)');
 } else {
-  const mount = (withSocket: boolean): { doc: Document; socket: { onmessage?: (ev: { data: string }) => void } | null; close: () => void } => {
+  const mount = (markup: string, withSocket: boolean): { doc: Document; socket: { onmessage?: (ev: { data: string }) => void } | null; close: () => void } => {
     let socket: { onmessage?: (ev: { data: string }) => void } | null = null;
-    const dom = new jsdom.JSDOM(html, {
+    const dom = new jsdom.JSDOM(markup, {
       runScripts: 'dangerously',
       pretendToBeVisual: true,
       url: 'http://127.0.0.1:7000/',
@@ -223,7 +223,7 @@ if (!jsdom) {
   };
 
   {
-    const page = mount(false);
+    const page = mount(html, false);
     await sleep(400);
     const buttons = Array.from(page.doc.querySelectorAll('button')).map((b) => (b.textContent ?? '').trim());
     check('page: the Vue app actually mounts', (page.doc.querySelector('#app')?.children.length ?? 0) > 0, `${buttons.length} buttons`);
@@ -236,7 +236,7 @@ if (!jsdom) {
   }
 
   {
-    const page = mount(true);
+    const page = mount(html, true);
     await sleep(300);
     page.socket?.onmessage?.({
       data: JSON.stringify({
@@ -286,6 +286,34 @@ if (!jsdom) {
     // The one that matters: entries exist *and* the tree was truncated, so the
     // list must say it is not complete.
     check('page: an incomplete diff says so even with entries', (page.doc.body.textContent ?? '').includes('changes inside it are not in this list'));
+    page.close();
+  }
+
+  {
+    // The perf jump is the one affordance whose visibility depends on data
+    // arriving (`startedAt` is 0 until the first view), so a string check cannot
+    // prove it renders.
+    const withEngine = renderDebugHtml({ port: 7000, target: 'app.py', lang: 'python', engineUrl: 'http://127.0.0.1:7310' });
+    const page = mount(withEngine, true);
+    await sleep(300);
+    const startedAt = Date.now() - 5000;
+    page.socket?.onmessage?.({
+      data: JSON.stringify({
+        kind: 'view',
+        view: {
+          state: 'attached', target: 'app.py', lang: 'python', pid: 1, agentVersion: '1',
+          hz: 10, actualHz: 9.9, samples: 3, hot: [], stalls: [], watches: [], exceptions: [],
+          dropped: 0, badLines: 0, oversized: 0, baselines: [], startedAt, replay: null, snapshots: [],
+        },
+      }),
+    });
+    await sleep(300);
+    const link = page.doc.querySelector('a.perfLink');
+    const href = link?.getAttribute('href') ?? '';
+    check('page: the perf link renders once the session has started', link !== null, href || 'no link');
+    check('page: the link carries the session window', href.startsWith('http://127.0.0.1:7310/perf?from=') && href.includes(`from=${startedAt}`), href);
+    check('page: the link names the source', href.includes('src=ndebug%3Aapp.py'), href);
+    check('page: the link cannot touch the opener', link?.getAttribute('rel') === 'noopener' && link?.getAttribute('target') === '_blank', String(link?.getAttribute('rel')));
     page.close();
   }
 }
