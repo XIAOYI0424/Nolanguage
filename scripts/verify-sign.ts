@@ -69,7 +69,9 @@ try {
   check('clear: the file then reads as unsigned', readSignaturePresence(fakeExe) === false);
   check('clear: a second call is a no-op', clearEmbeddedSignature(fakeExe) === false);
 } finally {
-  rmSync(peDir, { recursive: true, force: true });
+  // `rmSync` on Windows can hit ENOTEMPTY when a file was just closed; retrying
+  // is the fix, and a leftover temp directory is not worth failing 25 assertions.
+  rmSync(peDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 const dist = join(here, '..', 'dist', 'Nolanguage.exe');
@@ -157,7 +159,7 @@ if (process.env.NOLANGUAGE_SIGN_TEST === '1' && process.platform === 'win32' && 
       `${info.status} embedded=${info.embedded}`,
     );
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 } else {
   console.log('SKIP  signing round trip (set NOLANGUAGE_SIGN_TEST=1 to sign a throwaway exe)');
