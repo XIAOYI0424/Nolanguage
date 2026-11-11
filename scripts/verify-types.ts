@@ -1,15 +1,16 @@
 /**
- * Type-check the verification scripts — as a ratchet, not an all-or-nothing gate.
+ * Type-check the verification scripts.
  *
  * `tsconfig.json` includes only `src`, so the 43 suites under `scripts/` were
  * never seen by `tsc`. When they were finally included, 108 type errors fell out
  * — every one of them invisible until then, and none of them caught by the
  * suites themselves, because TypeScript is erased at run time.
  *
- * Fixing 108 errors across other people's suites in one pass is how a refactor
- * breaks things quietly. So this is a budget instead: each file may carry the
- * number of errors listed in `types-budget.json`, may not grow, and no new file
- * may appear. Fixing errors means lowering the number.
+ * 0.7.13 made them visible and fixed 83; 0.7.14 fixed the last 25. **The budget
+ * is now empty**, which turns this from a ratchet into a hard gate: any type
+ * error anywhere in `scripts/` fails the build. The ratchet machinery is kept
+ * because it is what got the number to zero, and because a future refactor may
+ * want to land a large mechanical change without hand-fixing every call site.
  *
  *   npm run verify:types     # enforce
  *   npm run types:budget     # rewrite the budget from the current state
@@ -125,6 +126,18 @@ if (UPDATE) {
   // loudly, because a budget that is never lowered stops describing anything.
   if (shrunk.length) console.log(`NOTE  types: ${shrunk.length} file(s) improved — run npm run types:budget to record it (${shrunk.join(', ')})`);
   check('types: the budget still describes the code', true, `${total} errors in ${current.size} files`);
+}
+
+// ---- 5. say which mode we are in ----
+{
+  // An empty budget is a different promise than a filled one, and the summary
+  // line should not leave the reader guessing which they are looking at.
+  const empty = Object.keys(file.budget).length === 0;
+  check(
+    empty ? 'types: budget is empty — zero tolerance' : 'types: budget is non-empty — ratchet only',
+    true,
+    empty ? `${total} errors` : `${total} errors in ${current.size} files`,
+  );
 }
 
 const passed = results.filter((r) => r.ok).length;

@@ -1,16 +1,5 @@
 {
-  "//": "Type errors the verification scripts are allowed to carry, per file. This is a ratchet: a file may not grow, no new file may appear, and fixing errors means lowering the number here. Run `npm run types:budget` after a fix.",
-  "budget": {
-    "scripts/verify-plugins.ts": 5,
-    "scripts/debug-completion.ts": 5,
-    "scripts/verify-langplugins.ts": 4,
-    "scripts/verify-baseline.ts": 4,
-    "scripts/verify-extensions.ts": 2,
-    "scripts/verify-stage3.ts": 1,
-    "scripts/verify-script-host.ts": 1,
-    "scripts/verify-pycharm.ts": 1,
-    "scripts/verify-ide.ts": 1,
-    "scripts/smoke-exe.ts": 1
-  },
-  "why": "src/ is typechecked by `tsc -p tsconfig.json`; scripts/ was never included, so 43 verification suites grew 108 type errors unnoticed. This file makes the remainder visible and stops it growing. Each entry is a known, harmless-at-runtime mismatch in test code (object literals missing optional fields, a test reaching a private field of its own fake). They should be burned down, not added to."
+  "//": "Type errors the verification scripts are allowed to carry, per file. This is a ratchet: a file may not grow, no new file may appear, and fixing errors means lowering the number here. The budget is now EMPTY — the ratchet has become a hard gate, so any type error in scripts/ fails the build. Do not add entries; fix the error.",
+  "budget": {},
+  "why": "src/ is typechecked by `tsc -p tsconfig.json`; scripts/ was never included, so 43 verification suites grew 108 type errors unnoticed. 0.7.13 made them visible (108 → 25) and 0.7.14 burned the rest down to zero. The 25 that were left were not cosmetic: `debug-completion.ts` called `diagnose(code)` against a `diagnose(languageId, code)` signature, so it passed the source text as a language id; `verify-plugins.ts` computed `memoryBytes` from a `runnerBytes` field that no longer existed; `verify-baseline.ts` built `PerfEvent`s with no `category` and a `PerfMetric` with no `unit`; `verify-extensions.ts` declared a numeric command result as `string` and compared it to `6765`. Every one of those ran without complaint because types are erased."
 }

@@ -7,8 +7,8 @@
  * parsing, env-wins-over-manifest, default fallback, and the [64MB, 4GB]
  * clamp with the 256MB default.
  */
-import { parseHumanBytes, resolveMemLimitBytes } from '../src/runtimes/script-host.ts';
-import type { RunConfig } from '../src/runtimes/types.ts';
+import { parseHumanBytes, resolveMemLimitBytes } from '../src/runtimes/script-host.js';
+import type { RunConfig } from '../src/runtimes/types.js';
 
 let passed = 0;
 let failed = 0;

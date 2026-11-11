@@ -1,6 +1,6 @@
 [package]
 name = "nolanguage"
-version = "0.7.13"
+version = "0.7.14"
 description = "Nolanguage — unified multi-language dev & execution platform"
 authors = ["Nolanguage"]
 edition = "2021"

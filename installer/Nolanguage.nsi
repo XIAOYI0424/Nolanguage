@@ -32,7 +32,7 @@ SetCompressor /SOLID lzma
 !endif
 
 !define APP_NAME      "Nolanguage"
-!define APP_VERSION   "0.7.13"
+!define APP_VERSION   "0.7.14"
 !define APP_PUBLISHER "Nolanguage"
 !define APP_WEB_ARG   "--open-browser"
 !define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"

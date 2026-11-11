@@ -5,7 +5,7 @@
  * suggestion; a check that fails the build is a constraint. Everything here is
  * derived from the actual import graph, so it cannot drift from the code.
  *
- * Five rules:
+ * Six rules:
  *
  *   R1  **Layers.** A slice may import only from a strictly lower layer, or from
  *       its own. The layer of every slice is declared in `architecture.json`,
@@ -23,7 +23,14 @@
  *       only the slices listed for it — never the app shell, never the kernel.
  *   R5  **Budgets.** A file over `maxFileLines` or a slice over `maxSliceFiles`
  *       must be listed with a reason. Budgets are how "it grew" becomes visible
- *       before it becomes a problem.
+ *       before it becomes a problem. An exception that no longer describes
+ *       anything over budget fails too, for the same reason a retired cycle
+ *       entry does.
+ *   R6  **Purity.** The debugger's wire format and analysis modules are listed
+ *       in the ledger and may import no `node:` builtin. That is what makes the
+ *       protocol implementable by another collector, and the arithmetic testable
+ *       without a debuggee. `recorder.ts` is deliberately not listed: it writes
+ *       files, which is its job.
  *
  * The ledger (`architecture.json`) may only shrink. A new violation fails; a
  * listed one that got worse fails; a listed one that disappeared fails until the
@@ -219,6 +226,8 @@ interface Ledger {
   allowedCycles: Array<{ members: string[]; why: string }>;
   budgets: { maxFileLines: number; maxSliceFiles: number };
   budgetExceptions: Record<string, string>;
+  /** Files (relative to `src/`) that must stay free of `node:` builtins, with the reason. */
+  purity: Record<string, string>;
 }
 
 const ledger = JSON.parse(readFileSync(join(ROOT, 'scripts', 'architecture.json'), 'utf8')) as Ledger;
@@ -317,6 +326,73 @@ const ledger = JSON.parse(readFileSync(join(ROOT, 'scripts', 'architecture.json'
   for (const f of files) perSlice.set(sliceOf(f), (perSlice.get(sliceOf(f)) ?? 0) + 1);
   const big = [...perSlice.entries()].filter(([s, n]) => n > ledger.budgets.maxSliceFiles && !(s in ledger.budgetExceptions));
   check(`R5 budgets: no slice over ${ledger.budgets.maxSliceFiles} files`, big.length === 0, big.map(([s, n]) => `${s}(${n})`).join(' ') || 'ok');
+
+  // An exception that no longer describes anything is worse than no exception:
+  // it reads as "this is still too big" long after it stopped being true, and
+  // the next person inherits a reason that has expired. Same rule as R2's cycle
+  // ledger — a bookkeeping entry has to keep describing the code.
+  const overFiles = new Set(
+    files
+      .map((f) => ({ rel: relative(SRC, f).split('\\').join('/'), lines: (texts.get(f) ?? '').split('\n').length }))
+      .filter((x) => x.lines > ledger.budgets.maxFileLines)
+      .map((x) => x.rel),
+  );
+  const overSlices = new Set([...perSlice.entries()].filter(([, n]) => n > ledger.budgets.maxSliceFiles).map(([s]) => s));
+  const stale = Object.keys(ledger.budgetExceptions).filter((k) => !overFiles.has(k) && !overSlices.has(k));
+  check(
+    'R5 budgets: every exception still describes something over budget',
+    stale.length === 0,
+    stale.length ? `${stale.join(', ')} — remove from scripts/architecture.json` : 'ok',
+  );
+}
+
+// ---- R6: purity ----
+
+/** Every `node:` builtin a file imports, static or dynamic. */
+function nodeBuiltinsOf(text: string): string[] {
+  const out: string[] = [];
+  IMPORT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = IMPORT_RE.exec(text))) {
+    if (m[1].startsWith('node:')) out.push(m[1]);
+  }
+  return out;
+}
+
+// The detector decides whether a module is transport-free, so it gets the same
+// treatment as the cycle detector: prove it sees both import forms before
+// trusting a green result. A regex that matches nothing reports "pure" forever.
+{
+  const probe = [
+    "import { createServer } from 'node:net';",
+    "import { join } from 'node:path';",
+    "const lazy = await import('node:fs/promises');",
+    "import local from './local.js';",
+  ].join('\n');
+  const found = nodeBuiltinsOf(probe);
+  check(
+    'self-test: node: builtins are detected (static and dynamic)',
+    found.length === 3 && found.includes('node:net') && found.includes('node:fs/promises'),
+    found.join(', '),
+  );
+}
+
+{
+  const missing = Object.keys(ledger.purity).filter((rel) => !texts.has(join(SRC, rel)));
+  check('R6 purity: every listed module exists', missing.length === 0, missing.join(', ') || `${Object.keys(ledger.purity).length} modules`);
+
+  const impure: string[] = [];
+  for (const rel of Object.keys(ledger.purity)) {
+    const text = texts.get(join(SRC, rel));
+    if (text === undefined) continue;
+    const builtins = nodeBuiltinsOf(text);
+    if (builtins.length) impure.push(`${rel} → ${builtins.join(', ')}`);
+  }
+  check(
+    "R6 purity: the debugger's wire and analysis modules import no node: builtin",
+    impure.length === 0,
+    impure.join(' · ') || 'ok',
+  );
 }
 
 // ------------------------------------------------------------------ verdict

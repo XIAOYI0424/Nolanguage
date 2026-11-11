@@ -560,7 +560,7 @@ async function testTauriBridge(): Promise<void> {
   check('tauri: every message is an engine_send invoke',
     FakeTauri.invokes.length > 0 &&
     FakeTauri.invokes.every((i) => i.cmd === 'engine_send' || i.cmd === 'plugin:event|listen' || /^plugin:window\|/.test(i.cmd)),
-    FakeTauri.invokes.map((i) => (i.cmd === 'engine_send' ? String(i.args?.msg?.kind) : i.cmd)).join(','));
+    FakeTauri.invokes.map((i) => (i.cmd === 'engine_send' ? String((i.args?.msg as { kind?: string } | undefined)?.kind) : i.cmd)).join(','));
   check('tauri: the handshake reaches the engine over IPC', !!FakeTauri.sent('listExtensions'));
 
   // ---- title bar: the OS chrome is off, so the shell owns the buttons ----

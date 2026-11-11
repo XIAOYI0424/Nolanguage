@@ -252,7 +252,7 @@ async function main(): Promise<void> {
         environment: LOG_ENV,
       },
       {
-        id: 'p2', timestamp: Date.now(), type: 'event', name: 'perf:slowPath',
+        id: 'p2', timestamp: Date.now(), type: 'event', category: 'perf', name: 'perf:slowPath',
         duration: 320, status: 'ok', traceId: 'TR-1',
         resource: { scope: 'kernel' }, scope: {}, correlation: { gitCommit: 'deadbeef' },
         environment: LOG_ENV,
@@ -305,7 +305,7 @@ async function main(): Promise<void> {
 
     // Perf side.
     sink.writePerf({
-      id: 'sp1', timestamp: Date.now(), type: 'metric', name: 'x.y', value: 1,
+      id: 'sp1', timestamp: Date.now(), type: 'metric', name: 'x.y', value: 1, unit: 'count',
       resource: { scope: 'kernel' }, scope: {}, correlation: {}, environment: LOG_ENV,
     });
     await sink.close();
@@ -584,7 +584,7 @@ async function main(): Promise<void> {
         environment: LOG_ENV,
       },
       {
-        id: 'pf2', timestamp: now, type: 'event', name: 'perf:slowPath', duration: 320,
+        id: 'pf2', timestamp: now, type: 'event', category: 'perf', name: 'perf:slowPath', duration: 320, status: 'ok',
         traceId: 'TR-1', resource: { scope: 'kernel' }, scope: {},
         correlation: { gitCommit: 'deadbeef', configHash: 'abcdef012345', sessionId: 's1' },
         environment: LOG_ENV,
@@ -724,7 +724,7 @@ async function main(): Promise<void> {
       bs.historyForCommit('t1').length === 2 && bs.historyForCommit('t1')[0].createdAt > bs.historyForCommit('t1')[1].createdAt);
     check('latestBaseline excludes the given id', bs.latest(bB.id)!.id !== bB.id);
     check('latestBaselineForCommit works',
-      bs.store.latestBaselineForCommit('c2')!.id === b2.id);
+      store.latestBaselineForCommit('c2')!.id === b2.id);
     check('getLogById still returns null for an unknown id', store.getLogById('nope') === undefined);
 
     // Reopen the file-backed store to prove persistence survives the process.

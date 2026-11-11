@@ -127,7 +127,7 @@ async function main(): Promise<void> {
   check(
     'RPC metrics carry the caller traceId',
     !!startLog && sharedPerf.length >= 1,
-    startLog ? `traceId ${startLog.traceId.slice(0, 8)} → ${sharedPerf.length} PerfRecord(s)` : 'no start log',
+    startLog ? `traceId ${(startLog.traceId ?? '').slice(0, 8)} → ${sharedPerf.length} PerfRecord(s)` : 'no start log',
   );
   check(
     'perf records are language-server scoped',

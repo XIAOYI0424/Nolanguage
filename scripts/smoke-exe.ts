@@ -234,7 +234,7 @@ async function main(): Promise<void> {
   try {
     const wsStatus = health.workspace as {
       lsp: { available: boolean; serverName: string };
-      languages: Array<{ id: string; binary: string; binarySource: string; version?: string }>;
+      languages: Array<{ id: string; available: boolean; binary: string; binarySource: string; version?: string }>;
     };
     check(wsStatus.lsp.available === true, 'python LSP is ready', wsStatus.lsp.serverName);
     const go = wsStatus.languages.find((l) => l.id === 'go');

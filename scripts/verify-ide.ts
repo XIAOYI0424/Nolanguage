@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     check(
       'workspace frame advertises the languages',
       Array.isArray((wsMsg as { languages?: unknown[] })?.languages) &&
-        ((wsMsg as { languages: Array<{ id: string }> }).languages).some((l) => l.id === 'go'),
+        ((wsMsg as unknown as { languages: Array<{ id: string }> }).languages).some((l) => l.id === 'go'),
       ((wsMsg as { languages?: Array<{ id: string }> })?.languages ?? []).map((l) => l.id).join(','),
     );
     check(

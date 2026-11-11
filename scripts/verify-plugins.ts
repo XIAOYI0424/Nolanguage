@@ -49,9 +49,10 @@ const MB = 1024 * 1024;
 
 /** A workspace stub: no processes, just the numbers the budget cares about. */
 class FakeProvider {
-  constructor(private profiles: ResourceProfile[]) {}
+  // Public on purpose: the assertions below read `p.profiles` directly, and this
+  // is a stub, not a class under test.
+  constructor(public profiles: ResourceProfile[]) {}
   stopped: string[] = [];
-  profiles_list = (): ResourceProfile[] => this.profiles;
   set(p: ResourceProfile[]): void {
     this.profiles = p;
   }
@@ -70,7 +71,7 @@ class FakeProvider {
 function profile(id: string, lspBytes: number, extra: Partial<ResourceProfile> = {}): ResourceProfile {
   return {
     languageId: id,
-    memoryBytes: lspBytes + (extra.runnerBytes ?? 0),
+    memoryBytes: lspBytes,
     lspMemoryBytes: lspBytes,
     lspRunning: true,
     eager: false,
@@ -140,7 +141,7 @@ async function testIdle(): Promise<void> {
 
   // …and forgetting it lets the next pass have it.
   mgr.forget('busy');
-  p.set(p.profiles_list().map((x) => (x.languageId === 'busy' ? { ...x, lspRunning: true, lastUsedAt: start } : x)));
+  p.set(p.profiles.map((x: ResourceProfile) => (x.languageId === 'busy' ? { ...x, lspRunning: true, lastUsedAt: start } : x)));
   await mgr.enforce();
   check('idle: forget() releases the protection', p.stopped.includes('busy'), p.stopped.join(','));
 }

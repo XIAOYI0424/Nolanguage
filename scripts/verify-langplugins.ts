@@ -300,7 +300,7 @@ async function testTemplate(kernel: Kernel, pythonBin: string): Promise<void> {
   check('template: a failing build stops the run', rf.exitCode === 3, `exit=${rf.exitCode}`);
   check('template: a failing build is a compile error', rf.compileError === true && rf.phase === 'build', `${rf.phase} compileError=${rf.compileError}`);
 
-  const invalid = new TemplateRuntime().validate({ mode: 'template' }, 'x');
+  const invalid = new TemplateRuntime().validate({ mode: 'template' });
   check('template: validate rejects a config with no steps', !invalid.ok, invalid.errors[0] ?? '');
 }
 
@@ -336,7 +336,7 @@ async function testReplSession(kernel: Kernel, pythonBin: string): Promise<void>
   const missing = new ReplSessionRuntime().createRunner(config, { ...ctx, toolchain: undefined });
   check('repl-session: a missing toolchain reports unavailable', missing.available === false, missing.binary);
 
-  const bad = new ReplSessionRuntime().validate({ mode: 'repl-session' }, 'x');
+  const bad = new ReplSessionRuntime().validate({ mode: 'repl-session' });
   check('repl-session: validate requires a command', !bad.ok, bad.errors[0] ?? '');
 }
 
@@ -367,7 +367,7 @@ async function testDirectorySession(kernel: Kernel, pythonBin: string): Promise<
   check('directory-session: the other mode\'s source is cleared', !existsSync(join(sessionDir, 'main.py')));
   check('directory-session: the scaffold survives a mode switch', existsSync(join(sessionDir, 'module.cfg')));
 
-  const bad = new DirectorySessionRuntime().validate({ mode: 'directory-session', sourceExt: '.py' }, 'x');
+  const bad = new DirectorySessionRuntime().validate({ mode: 'directory-session', sourceExt: '.py' });
   check('directory-session: validate requires steps', !bad.ok, bad.errors[0] ?? '');
 }
 
@@ -433,7 +433,7 @@ async function testScriptHost(kernel: Kernel): Promise<void> {
   const hr = await hang.run({ code: '' });
   check('script-host: a hung script is killed', hr.timedOut === true, `timedOut=${hr.timedOut}`);
 
-  const bad = new ScriptHostRuntime().validate({ mode: 'script-host', sourceExt: '.x' }, 'x');
+  const bad = new ScriptHostRuntime().validate({ mode: 'script-host', sourceExt: '.x' });
   check('script-host: validate requires a script path', !bad.ok, bad.errors[0] ?? '');
 }
 

@@ -194,7 +194,7 @@ async function runtimeChecks(): Promise<number> {
   check('host has its own pid (≠ kernel)', !!st.pid && st.pid !== process.pid, `pid=${st.pid} kernel=${process.pid}`);
 
   // --- kernel command bus proxy ---
-  const viaBus = await kernel.commands.execute<string>('demo.hello.fib', 20);
+  const viaBus = await kernel.commands.execute<number>('demo.hello.fib', 20);
   check('kernel command bus proxies into the host', viaBus === 6765, String(viaBus));
 
   // --- heartbeats → host metrics ---
@@ -328,7 +328,7 @@ async function warmTierChecks(): Promise<void> {
     check('extension logs are persisted in the warm tier', ext.length > 0, `${ext.length} of ${queried.length} row(s)`);
     check(
       'persisted rows keep the extension component',
-      ext.some((r) => r.component.startsWith('extension.')),
+      ext.some((r) => (r.component ?? '').startsWith('extension.')),
       ext[0]?.component ?? '(none)',
     );
     const fused = runLogQuery(store, { components: ['extension.demo.hello'], limit: 20 });

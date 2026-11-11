@@ -43,8 +43,15 @@
     "maxSliceFiles": 25
   },
   "budgetExceptions": {
-    "panel/server.ts": "the WebSocket switch plus the HTTP routes; splitting it further needs the handlers/ extraction finished (tracked since 0.7.9)",
     "panel/WorkspaceService.ts": "the workspace aggregate: languages, LSP, buffers and the registry mirror in one object. Splitting it is a design change, not a move",
-    "panel": "the app shell is 30 files by nature (one page per UI plus its server side); the budget counts files, and this slice is the one that renders"
+    "panel": "the app shell is 27 files by nature (one page per UI plus its server side, plus handlers/); the budget counts files, and this slice is the one that renders"
+  },
+  "purity": {
+    "debugtool/protocol.ts": "the wire format itself: a collector in another process, or another language, has to implement it from this file alone",
+    "debugtool/serializer.ts": "turns live objects into wire nodes; pure so a test can check the output without a debuggee",
+    "debugtool/sampler.ts": "fold-stacks and stall detection: arithmetic over samples, checkable without a process",
+    "debugtool/diff.ts": "snapshot diffing over wire nodes; same reason",
+    "debugtool/ui.ts": "renders the page as a string; whatever serves it owns the transport",
+    "debugtool/perfLink.ts": "URL normalisation; pure"
   }
 }

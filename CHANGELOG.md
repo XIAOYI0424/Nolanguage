@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.7.14 — 2026-11-11
+
+### 类型棘轮收口：25 → 0，预算变空（从此是硬门）
+
+0.7.13 把 `scripts/` 纳入 `tsc` 后剩 25 条，这次全部修完，`types-budget.json` 的 `budget` 变成 `{}`。空预算意味着**任何类型错误都失败**——棘轮变成了硬门。
+
+没有一条是"注释级"的，全是类型擦除后才隐形的真错：
+
+| 文件 | 错在哪 |
+|---|---|
+| `debug-completion.ts` | 调 `diagnose(code)`，签名是 `diagnose(languageId, code)`——把源码当语言 id 传了。调试脚本不在套件里，一直没人发现 |
+| `verify-plugins.ts` | 用早已不存在的 `extra.runnerBytes` 算 `memoryBytes`，恒为 `undefined ?? 0` |
+| `verify-baseline.ts` | `PerfEvent` 没写 `category`、`PerfMetric` 没写 `unit`；直接读 `bs.store`（私有，但同一个块里已有 `store`） |
+| `verify-extensions.ts` | 返回数字的命令声明成 `string`，再跟 `6765` 比 |
+| `verify-langplugins.ts` | 四处 `validate(config, 'x')`，而 `validate` 只收一个参数 |
+| `smoke-exe.ts` | 手写的 health 类型漏了 `available`，于是 `!!go?.available !== false` 恒真 |
+| `verify-script-host.ts` | 用 `.ts` 后缀 import，全仓只有它这样 |
+
+### `panel/server.ts` 1566 → 970 行，账本例外删除
+
+拆的依据是职责，不是行数：**`server.ts` 路由消息，`handlers/run.ts` 拥有进程**。
+
+- `handleTerm` / `handleRunScript` / `handleRun` / `handleDebug` / `handleDebugCmd` → `panel/handlers/run.ts`
+- `ConnState` / `stateFor` / `connState` → `panel/conn-state.ts`（两边都要，放任一边都会产生文件级环）
+- 顺带把关闭回调从"读一次、删一次"改成 `takeConnection(conn)`：删除并返回，不可能漏删
+
+### R5 补上"例外必须仍然成立"
+
+原来预算例外只单向生效：可以豁免，但豁免**永不失效**。于是 `panel/server.ts` 降到 970 行之后，账本里那句"WebSocket switch plus HTTP routes"还在描述一个不存在的状态。现在新增一条检查——例外对应的文件/切片必须仍然超预算，否则失败。加完立刻抓到了这条过期例外。
+
+### R6：`debugtool` 的纯净规则
+
+新增产品规则：`debugtool` 的**线协议与分析模块**不得 import 任何 `node:` 内置模块。
+
+| 文件 | 为什么 |
+|---|---|
+| `protocol.ts` / `serializer.ts` | 线格式必须能被另一进程、另一语言实现 |
+| `sampler.ts` / `diff.ts` | 折叠栈、卡顿、快照 diff 都是纯算术，要能**没有被调试进程**也能测 |
+| `ui.ts` | 页面是字符串；传输由服务它的人负责 |
+| `perfLink.ts` | URL 归一化 |
+
+`recorder.ts` 故意不在列表里——它写文件，那是它的职责。
+
+规则带自检：`nodeBuiltinsOf` 先证明自己同时看得见静态 `import` 和动态 `import()`，才被允许判断真实代码。一个匹配不到东西的正则，会永远报告"纯净"。
+
+### 验证
+
+- `verify-arch`：**18/18** · `156 files · 444 imports` · 零环 · 零过期例外
+- `verify-types`：5/5 · **0 错误** · 预算为空
+- 两条新规则都做了**注入验证**：往 `protocol.ts` 加一句 `node:fs`、往 `verify-ide.ts` 加一句类型错误，都当场 FAIL，还原即 PASS
+
 ## 0.7.13 — 2026-11-11
 
 ### 还掉 0.7.12 记账的两组环：**切片图现在是 DAG**

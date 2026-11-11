@@ -1,8 +1,8 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.13 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.14 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
-这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`154 files · 435 imports · 14/14`，**零个已声明环**。
+这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`156 files · 444 imports · 18/18`，**零个已声明环**。
 
 ---
 
@@ -62,7 +62,7 @@
 
 ---
 
-## 三、五条规则
+## 三、六条规则
 
 ### R1 · 层序
 
@@ -89,8 +89,28 @@
 ### R5 · 预算
 
 > 单文件 ≤ 1200 行，单切片 ≤ 25 个文件；超了必须在 `budgetExceptions` 里写理由。
+> **例外也有寿命**：一条例外如果对应的文件/切片已经不再超预算，构建失败，直到你把它删掉。
 
-预算不是为了好看，是为了让"它变大了"在变成问题之前可见。
+预算不是为了好看，是为了让"它变大了"在变成问题之前可见。0.7.14 加了"例外必须仍然成立"这一半——原来只有一半：可以豁免，但豁免永不失效。`panel/server.ts` 就是这样一条过期例外：它从 1566 行降到 970 行之后，账本里那句"WebSocket switch plus HTTP routes"还在描述一个已经不存在的状态。
+
+### R6 · 纯净（`debugtool` 的产品规则）
+
+> `debugtool` 的**线协议与分析模块**（账本 `purity` 列表）不得 import 任何 `node:` 内置模块。
+
+这不是洁癖，是两条可验证的产品承诺：
+
+| 文件 | 为什么必须纯净 |
+|---|---|
+| `protocol.ts` | 线格式本身。另一个进程、另一种语言的采集器要能只读这个文件就实现它 |
+| `serializer.ts` | 把活对象变成线节点。纯净才能在**没有被调试进程**的情况下测它的输出 |
+| `sampler.ts` | 折叠栈、卡顿检测：对样本做算术，同样不需要进程 |
+| `diff.ts` | 快照 diff，同上 |
+| `ui.ts` | 把页面渲染成字符串；谁来服务它，谁就负责传输 |
+| `perfLink.ts` | URL 归一化 |
+
+`recorder.ts` **故意不在列表里**：它写文件，那是它的职责。规则的价值在于划出"哪些模块不许碰世界"。
+
+这条规则有自检：`nodeBuiltinsOf` 先对一段同时含静态 `import` 和动态 `import()` 的样本证明自己看得见两种形式，才被允许判断真实代码。一个匹配不到任何东西的正则，会永远报告"纯净"。
 
 ---
 
@@ -105,7 +125,8 @@
     { "members": ["cli","desktop"], "why": "..." }
   ],
   "budgets": { "maxFileLines": 1200, "maxSliceFiles": 25 },
-  "budgetExceptions": { "panel/server.ts": "..." }
+  "budgetExceptions": { "panel/WorkspaceService.ts": "...", "panel": "..." },
+  "purity": { "debugtool/protocol.ts": "...", ... }   // 不得 import node:
 }
 ```
 
@@ -177,12 +198,39 @@
 - 修好了但没下调数字 → **不失败**，但会 `NOTE` 提醒（修东西不该被记账挡住）
 - `npm run types:budget` 从当前状态重写（刻意手动：会自我更新的预算不是约束，是日志）
 
-0.7.13 已把 `verify-pycharm` 的 48 条（一个 `socket` 可选性）、`check-panel-html`/`check-perf-html` 的 33 条（`RegExp` 当布尔用）修干净，剩 25 条记在预算里。
+0.7.13 修了 83 条（`verify-pycharm` 的 48 条来自一个 `socket` 可选性，两个页面的 33 条来自 `RegExp` 当布尔用），0.7.14 修完最后 25 条，**预算现在是空数组**——棘轮已经变成硬门：`scripts/` 里任何类型错误都失败。
+
+最后 25 条没有一条是"注释级"的，它们都是**类型擦除后才隐形的真错**：
+
+| 文件 | 错在哪 |
+|---|---|
+| `debug-completion.ts` | 调 `diagnose(code)`，而签名是 `diagnose(languageId, code)`——它把源码当成语言 id 传了进去。这是调试脚本，不在套件里，所以没人发现 |
+| `verify-plugins.ts` | 用 `extra.runnerBytes` 算 `memoryBytes`，而这个字段早已不存在，恒为 `undefined ?? 0` |
+| `verify-baseline.ts` | 构造 `PerfEvent` 没写 `category`、`PerfMetric` 没写 `unit`；还直接读 `bs.store`（私有） |
+| `verify-extensions.ts` | 把返回数字的命令声明成 `string`，再跟 `6765` 比较 |
+| `verify-langplugins.ts` | 四处 `validate(config, 'x')`，而 `validate` 只收一个参数 |
+
+**同一个根因**：类型只在编译期存在，而这些文件从没被编译过。
 
 **顺带发现两件事**：`verify-plugins` 里调用了从未定义的 `skip()`（没有 shell 包装器的机器上会 `ReferenceError`）；两个页面的 30 条"能力检查"把裸正则当布尔 push，**一直无条件通过**——改成 `.test()` 后立刻抓到一条真漂移（`clockOf(s.at)` 在 shell 里而不是 app 里）。
 
-## 八、还没做的
+## 八、`server.ts` 拆完了（0.7.14）
 
-1. **25 条类型错误** —— 已冻结，只能变少。多数是测试自己写的对象字面量缺字段、访问自己 fake 的私有成员。
-2. **`panel` 仍是 30 个文件、`server.ts` 1567 行** —— 已记账，不再增长，但没有变小。
-3. **`debugtool` 只做到"不依赖上层"** —— 它还没有自己的 `verify-arch` 约束（比如"不得 import kernel"之外的产品规则）。
+`panel/server.ts` 从 **1566 行降到 970 行**，账本里那条例外已经删除。
+
+拆的依据不是行数，是**职责**：`server.ts` 路由消息，`handlers/run.ts` 拥有**进程**。
+
+| 搬走的 | 去哪 | 为什么 |
+|---|---|---|
+| `handleTerm` / `handleRunScript` / `handleRun` / `handleDebug` / `handleDebugCmd` | `panel/handlers/run.ts`（602 行） | 这五个是唯一 spawn 子进程、持有 DAP 会话的处理器；`server.ts` 只做分派 |
+| `ConnState` / `stateFor` / `connState` | `panel/conn-state.ts`（55 行） | 两边都要它；放在任一边，另一边就得反向 import，产生文件级环 |
+| `dbgVarsReduce` / `dbgVarsReduceRecord` / `collectStopState` / `execAsync` | 随 `handleDebug` 一起走 | 只被它用 |
+
+顺带收紧了连接生命周期：`takeConnection(conn)` **删除并返回**状态，关闭回调不再需要"读一次、删一次"两步——原来如果 `st` 为空就漏删，现在不可能。
+
+## 九、还没做的
+
+1. **`panel` 仍是 27 个文件** —— 超过 25 的预算，例外还在。它是一页一个 UI 加服务端，切法应该是"按页"，不是按行。
+2. **`WorkspaceService.ts` 1229 行** —— **超预算**，靠例外活着。它是"语言、LSP、缓冲区、注册表镜像"四件事捏在一个对象里；拆它是设计改动，不是搬文件。
+3. **阶段 11 归因引擎**（CUSUM + Welch t + Cohen's d + 二分）—— `handlers/attribution.ts` 已有骨架。
+4. **IDE Markdown 预览窗格 / outline（#40）**、**`verify-exec.ts`（#45）**。
