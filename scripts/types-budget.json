@@ -1,0 +1,16 @@
+{
+  "//": "Type errors the verification scripts are allowed to carry, per file. This is a ratchet: a file may not grow, no new file may appear, and fixing errors means lowering the number here. Run `npm run types:budget` after a fix.",
+  "budget": {
+    "scripts/verify-plugins.ts": 5,
+    "scripts/debug-completion.ts": 5,
+    "scripts/verify-langplugins.ts": 4,
+    "scripts/verify-baseline.ts": 4,
+    "scripts/verify-extensions.ts": 2,
+    "scripts/verify-stage3.ts": 1,
+    "scripts/verify-script-host.ts": 1,
+    "scripts/verify-pycharm.ts": 1,
+    "scripts/verify-ide.ts": 1,
+    "scripts/smoke-exe.ts": 1
+  },
+  "why": "src/ is typechecked by `tsc -p tsconfig.json`; scripts/ was never included, so 43 verification suites grew 108 type errors unnoticed. This file makes the remainder visible and stops it growing. Each entry is a known, harmless-at-runtime mismatch in test code (object literals missing optional fields, a test reaching a private field of its own fake). They should be burned down, not added to."
+}

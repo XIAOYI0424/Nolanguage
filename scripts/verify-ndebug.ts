@@ -180,10 +180,30 @@ check('page: shows the oversized counter', html.includes('st.view.oversized'));
 // all of them while rendering a blank page. So the page is mounted for real
 // twice: once as it arrives, and once with a diff pushed through a fake socket —
 // `st.diff` is null at mount time, so nothing else would ever render a row.
+/**
+ * The slice of the DOM this suite touches.
+ *
+ * `tsconfig` has no `dom` lib (the engine never runs in a browser) and
+ * `@types/jsdom` is not a dependency, so the few members used here are declared
+ * structurally rather than pulling a DOM lib into the whole project.
+ */
+interface ProbeElement {
+  textContent: string | null;
+  children: ArrayLike<unknown>;
+  getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+  querySelector(selector: string): ProbeElement | null;
+}
+
+interface ProbeDocument extends ProbeElement {
+  querySelectorAll(selector: string): ArrayLike<ProbeElement>;
+  body: { textContent: string | null };
+}
+
 const jsdom = (() => {
   try {
     return createRequire(join(root, 'package.json'))('jsdom') as { JSDOM: new (markup: string, opts: Record<string, unknown>) => {
-      window: { document: Document; WebSocket?: unknown; close: () => void };
+      window: { document: ProbeDocument; WebSocket?: unknown; close: () => void };
     } };
   } catch {
     return undefined;
@@ -193,7 +213,7 @@ const jsdom = (() => {
 if (!jsdom) {
   console.log('SKIP  page mount (jsdom unavailable)');
 } else {
-  const mount = (markup: string, withSocket: boolean): { doc: Document; socket: { onmessage?: (ev: { data: string }) => void } | null; close: () => void } => {
+  const mount = (markup: string, withSocket: boolean): { doc: ProbeDocument; socket: { onmessage?: (ev: { data: string }) => void } | null; close: () => void } => {
     let socket: { onmessage?: (ev: { data: string }) => void } | null = null;
     const dom = new jsdom.JSDOM(markup, {
       runScripts: 'dangerously',
@@ -329,13 +349,17 @@ check('cli: an unknown option is an error, not a guess', 'error' in parseArgs(['
 check('cli: an out-of-range hz is refused', 'error' in parseArgs(['app.py', '--hz', '0']));
 check('cli: a bad port is refused', 'error' in parseArgs(['app.py', '--port', '70000']));
 
+/** `parseArgs` returns a union; TS cannot narrow it through two `in` negations. */
+const isCli = (x: ReturnType<typeof parseArgs>): x is Exclude<ReturnType<typeof parseArgs>, { help: true } | { error: string }> =>
+  'mode' in x;
+
 const recArgs = parseArgs(['app.py', '--record', 'run.ndlog', '--', '60']);
-check('cli: --record is parsed', !('error' in recArgs) && !('help' in recArgs) && recArgs.mode === 'live' && recArgs.record === 'run.ndlog', 'error' in recArgs ? recArgs.error : recArgs.mode);
-check('cli: --record does not swallow the program arguments', !('error' in recArgs) && !('help' in recArgs) && recArgs.args.join(' ') === '60');
+check('cli: --record is parsed', isCli(recArgs) && recArgs.mode === 'live' && recArgs.record === 'run.ndlog', 'error' in recArgs ? recArgs.error : String(recArgs));
+check('cli: --record does not swallow the program arguments', isCli(recArgs) && recArgs.args.join(' ') === '60');
 
 const replayArgs = parseArgs(['--replay', 'run.ndlog', '--speed', '4', '--port', '7400']);
-check('cli: --replay needs no script', !('error' in replayArgs) && !('help' in replayArgs) && replayArgs.mode === 'replay' && replayArgs.file === 'run.ndlog', 'error' in replayArgs ? replayArgs.error : replayArgs.mode);
-check('cli: --speed is parsed', !('error' in replayArgs) && !('help' in replayArgs) && replayArgs.speed === 4);
+check('cli: --replay needs no script', isCli(replayArgs) && replayArgs.mode === 'replay' && replayArgs.file === 'run.ndlog', 'error' in replayArgs ? replayArgs.error : String(replayArgs));
+check('cli: --speed is parsed', isCli(replayArgs) && replayArgs.speed === 4);
 check('cli: --speed 0 means instant, not "default"', !('error' in parseArgs(['--replay', 'x.ndlog', '--speed', '0'])) && (parseArgs(['--replay', 'x.ndlog', '--speed', '0']) as { speed: number }).speed === 0);
 check('cli: --replay with a script is refused', 'error' in parseArgs(['--replay', 'x.ndlog', 'app.py']));
 check('cli: --record without a path is refused', 'error' in parseArgs(['app.py', '--record']));
@@ -402,7 +426,7 @@ if (!existsSync(sample)) {
     const served = await res.text();
     check('app: the page is served over HTTP', res.status === 200 && served.includes('Live stacks'), String(res.status));
 
-    const health = await (await fetch(`http://127.0.0.1:${app.port}/health`, { signal: AbortSignal.timeout(3000) })).json();
+    const health = (await (await fetch(`http://127.0.0.1:${app.port}/health`, { signal: AbortSignal.timeout(3000) })).json()) as { ok?: boolean };
     check('app: /health reports the session', health.ok === true, JSON.stringify(health));
 
     // Speak to the page's own socket, like a browser would.
@@ -525,7 +549,7 @@ if (!existsSync(sample)) {
       busyError = (err as Error).message;
     }
     check('app: a busy port is reported, not swallowed', /cannot serve the page/.test(busyError), busyError.slice(0, 60));
-    const stillAlive = await (await fetch(`http://127.0.0.1:${busy.port}/health`, { signal: AbortSignal.timeout(2000) })).json();
+    const stillAlive = (await (await fetch(`http://127.0.0.1:${busy.port}/health`, { signal: AbortSignal.timeout(2000) })).json()) as { ok?: boolean };
     check('app: the first instance keeps running after the collision', stillAlive.ok === true, JSON.stringify(stillAlive));
     await busy.close();
 

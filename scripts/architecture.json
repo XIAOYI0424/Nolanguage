@@ -23,10 +23,11 @@
     "exec": 10,
     "js": 11,
     "panel": 12,
-    "cli": 13,
+    "cli": 14,
     "desktop": 13,
-    "debugtool": 14,
-    "(root)": 15
+    "debugtool": 15,
+    "(root)": 16,
+    "commands": 10
   },
   "products": {
     "debugtool": [
@@ -36,22 +37,7 @@
       "vendor"
     ]
   },
-  "allowedCycles": [
-    {
-      "members": [
-        "kernel",
-        "perf"
-      ],
-      "why": "PerfSpine builds its own command/event/service buses to record internal metrics, so perf depends on kernel while the kernel owns the perf spine. Breaking it means giving PerfSpine a narrow host interface instead of constructing a kernel; deferred, tracked here so it cannot grow."
-    },
-    {
-      "members": [
-        "cli",
-        "desktop"
-      ],
-      "why": "Two entry points share the language listing and dump helpers. They belong in a lower slice (panel or a commands slice); deferred because both files are pure formatting and the move touches the installer."
-    }
-  ],
+  "allowedCycles": [],
   "budgets": {
     "maxFileLines": 1200,
     "maxSliceFiles": 25

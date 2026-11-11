@@ -238,6 +238,19 @@ function mountPage(
   for (const block of blocks) w.eval(block);
   return { window: w, socket: bridge === 'tauri' ? undefined : FakeSocket.instances[FakeSocket.instances.length - 1] };
 }
+/**
+ * The socket the page opened, or a loud failure.
+ *
+ * `mountPage` types it as optional because the Tauri bridge has none; every call
+ * site that destructures `socket` mounted the webview bridge, so a missing one
+ * means the page never connected — worth failing here rather than 34 "possibly
+ * undefined" errors further down.
+ */
+function needSocket(mounted: { socket?: FakeSocket }): FakeSocket {
+  if (!mounted.socket) throw new Error('the page did not open a socket (webview bridge expected)');
+  return mounted.socket;
+}
+
 async function settle(w: any, ms = 20): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
   await new Promise((r) => w.setTimeout(r, ms));
@@ -273,7 +286,13 @@ function openViaFile(w: any, name: string): boolean {
 
 async function testBoot(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  // `mountPage` types `socket` as optional because the Tauri bridge has none.
+  // This block mounts the webview bridge, so a missing socket means the page
+  // never opened one — fail loudly here instead of 48 "possibly undefined" below.
+  const mounted = mountPage(html);
+  const w = mounted.window;
+  if (!mounted.socket) throw new Error('the page did not open a socket (webview bridge expected)');
+  const socket = mounted.socket;
   await settle(w);
 
   // The label is the menu's own text node; its dropdown (`.pop`) is a child
@@ -474,7 +493,9 @@ async function testBoot(): Promise<void> {
 // the status bar, and the language sent to the execution plane.
 async function testJavaScript(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   check('js: Search Everywhere finds main.js', openViaFile(w, 'main.js'));
@@ -636,7 +657,9 @@ async function testTauriBridge(): Promise<void> {
 // tree — which keeps its own, more specific one.
 async function testContextMenus(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   const menu = () => q(w, '#ctxMenu');
@@ -784,7 +807,9 @@ async function testContextMenus(): Promise<void> {
 // carried back with the session — all four are behaviour, so all four are here.
 async function testLanguageSwitch(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   check('lang: opened main.js', openViaFile(w, 'main.js'));
@@ -983,7 +1008,9 @@ async function testLanguageRestore(): Promise<void> {
     current: 'main.js',
     langs: { 'main.js': 'python' },
   });
-  const { window: w, socket } = mountPage(html, seed);
+  const mountedPage = mountPage(html, seed);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   check('lang: a restored session applies the stored override',
@@ -1083,7 +1110,9 @@ function testTokens(): void {
 // by self-drawn modals, balloons, inline edits, dropdowns and the Find panel.
 async function testInteractions(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   const ctxMenu = () => q(w, '#ctxMenu');
@@ -1193,7 +1222,9 @@ async function testI18n(): Promise<void> {
 
 async function testMcp(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   // Open the sidebar tool window the way a user does.
@@ -1278,7 +1309,9 @@ async function testUpdateNotice(): Promise<void> {
  */
 async function testKeymap(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
   const ed = q(w, '#ta') as any;
 
@@ -1415,7 +1448,9 @@ async function testKeymap(): Promise<void> {
  */
 async function testDebugViews(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   socket.deliver({
@@ -1521,7 +1556,9 @@ async function testDebugViews(): Promise<void> {
  */
 async function testBreakpointsAndAttach(): Promise<void> {
   FakeSocket.instances = [];
-  const { window: w, socket } = mountPage(html);
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
   await settle(w);
 
   const line3 = () => qa(w, '#glines .gline')[2];

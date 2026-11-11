@@ -1,8 +1,8 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.12 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.13 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
-这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`153 files · 435 imports · 14/14`。
+这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`154 files · 435 imports · 14/14`，**零个已声明环**。
 
 ---
 
@@ -111,12 +111,14 @@
 
 **账本只能缩小。** 新增违规 → 失败；已记账的违规变多 → 失败；已记账的违规消失了 → 也失败（逼你删掉过期条目）。
 
-当前账本只有 2 组环：
+**当前账本里一组环都没有。** 切片图是一个 DAG。
 
-| 组 | 为什么还没解 | 要解需要做什么 |
-|---|---|---|
-| `kernel ↔ perf` | `PerfSpine` 自己构造了 command/event/service 三总线来记录内部指标，所以 perf 依赖 kernel；而 kernel 又持有 perf 脊柱 | 给 `PerfSpine` 一个窄的 host 接口，而不是让它造一个 kernel |
-| `cli ↔ desktop` | 两个入口共用"语言列表"和"dump"两个纯格式化模块 | 把这两个文件移到 `panel`（或新建 `commands` 切片） |
+两笔曾经记在这里的债，0.7.13 还掉了：
+
+| 曾经的组 | 怎么解的 |
+|---|---|
+| `kernel ↔ perf` | `PerfSpine` 原本强转 `kernel.events as EventBusImpl` 去调埋点钩子。改成 `perf/host.ts` 声明**端口**（`PerfHost`），kernel 侧适配（`onCommand` / `tracer` / `logger` / `events` / `services`）。perf 不再知道 kernel 存在 |
+| `cli ↔ desktop` | `cli/` 里 `lang.ts`、`dump.ts` 只依赖 `langs`，却被 `desktop` 反向引用。拆成 `commands/` 切片（层 10）：`desktop → commands`、`cli → desktop`，环消失 |
 
 ---
 
@@ -164,9 +166,23 @@
 
 ---
 
-## 七、还没做的
+## 七、类型也要被约束（`verify-types`）
 
-1. **`kernel ↔ perf`** —— 需要 `PerfSpine` 换掉"自建总线"，是设计改动。
-2. **`cli ↔ desktop`** —— 两个纯格式化模块的搬迁。
-3. **`scripts/` 不在 `tsc` 范围内** —— 43 个验证脚本从没被类型检查过（实测 111 个存量错误）。架构契约能保证"边"是对的，保证不了"类型"是对的。
-4. **`panel` 仍是 30 个文件、`server.ts` 1567 行** —— 已记账，不再增长，但没有变小。
+架构契约保证"边"是对的，保证不了"类型"是对的：`tsconfig.json` 只 `include: ["src"]`，44 个验证脚本从没进过 `tsc`。补上之后有 **108 个存量错误**。
+
+一次修 108 个别人的套件是"安静弄坏东西"的标准做法，所以这里也用账本：`scripts/types-budget.json` 记录每个文件允许携带的错误数。
+
+- 某个文件变多 → 失败
+- 出现新文件带错误 → 失败
+- 修好了但没下调数字 → **不失败**，但会 `NOTE` 提醒（修东西不该被记账挡住）
+- `npm run types:budget` 从当前状态重写（刻意手动：会自我更新的预算不是约束，是日志）
+
+0.7.13 已把 `verify-pycharm` 的 48 条（一个 `socket` 可选性）、`check-panel-html`/`check-perf-html` 的 33 条（`RegExp` 当布尔用）修干净，剩 25 条记在预算里。
+
+**顺带发现两件事**：`verify-plugins` 里调用了从未定义的 `skip()`（没有 shell 包装器的机器上会 `ReferenceError`）；两个页面的 30 条"能力检查"把裸正则当布尔 push，**一直无条件通过**——改成 `.test()` 后立刻抓到一条真漂移（`clockOf(s.at)` 在 shell 里而不是 app 里）。
+
+## 八、还没做的
+
+1. **25 条类型错误** —— 已冻结，只能变少。多数是测试自己写的对象字面量缺字段、访问自己 fake 的私有成员。
+2. **`panel` 仍是 30 个文件、`server.ts` 1567 行** —— 已记账，不再增长，但没有变小。
+3. **`debugtool` 只做到"不依赖上层"** —— 它还没有自己的 `verify-arch` 约束（比如"不得 import kernel"之外的产品规则）。

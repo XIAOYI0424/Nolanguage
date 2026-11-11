@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.13 — 2026-11-11
+
+### 还掉 0.7.12 记账的两组环：**切片图现在是 DAG**
+
+| 曾经的环 | 怎么解的 |
+|---|---|
+| `kernel ↔ perf` | `PerfSpine` 原本强转 `kernel.events as EventBusImpl` 去调埋点钩子（所以它必须 import 实现类）。改成 `perf/host.ts` 声明**端口** `PerfHost`：`onCommand` / `tracer` / `logger` / `events` / `services`，由 kernel 侧适配。perf 不再知道 kernel 存在 |
+| `cli ↔ desktop` | `cli/lang.ts`、`cli/dump.ts` 只依赖 `langs`，却被 `desktop/main.ts` 反向引用。拆成 `commands/` 切片（层 10）：`desktop → commands`、`cli → desktop` 单向 |
+
+账本 `allowedCycles` 现在是**空数组**，`verify-arch` 14/14，`154 files · 435 imports`。
+
+**端口化暴露了一个真 bug**：`Kernel` 里 `logger` 是 LogSpine 在 `perf.install` **之后**才赋值的。原来的实现是每次调用时读 `this.kernel.logger`（惰性，所以没事）；改成端口后我在 install 时就取了值，拿到 `undefined`——直到第一条慢命令被检测到才炸。改成惰性委托 `logger: { forComponent: (c) => this.logger.forComponent(c) }`，并在注释里写清原因。
+
+### `scripts/` 终于进了 `tsc`（以预算的形式）
+
+`tsconfig.json` 只 `include: ["src"]`，44 个验证脚本从没被类型检查过。新增 `tsconfig.scripts.json` 后掉出 **108 个存量错误**。
+
+一次修 108 个别人的套件是"安静弄坏东西"的标准做法，所以做成**棘轮**：`scripts/types-budget.json` 记录每个文件允许携带的错误数。
+
+- 文件变多 → 失败；新文件带错误 → 失败；修好但没下调 → `NOTE`（不挡修复）
+- `npm run types:budget` 从当前状态重写（刻意手动——会自我更新的预算不是约束，是日志）
+
+已修 83 条：`verify-pycharm` 48（一个 `socket` 可选性 → 一个 `needSocket()` 助手）、`check-panel-html` + `check-perf-html` 33（`RegExp` 当布尔用）。剩 25 条冻结在预算里。
+
+### 又抓到两处"测试在撒谎"
+
+- **30 条能力检查一直在无条件通过**：两个页面的 `capabilities` / `behaviour` 数组声明成 `Array<[string, RegExp]>`，但被当布尔 push 进结果——正则对象永远 truthy。改成 `.test()` 后立刻抓到一条真漂移：`time-stamps each slow span` 检查的是 app 脚本，而 `clockOf(s.at)` 在 shell 模板里。
+- **`verify-plugins` 调用了一个从未定义的 `skip()`**：在没有 shell 包装器的机器上，那条分支会 `ReferenceError` 而不是跳过。
+
+### 验证
+
+- `verify-all`：**2019/2019 · 44 套件**；`tsc` 0；`npm test` 38/38。
+- `verify-arch` 14/14（零环）；`verify-types` 4/4（25 条已冻结）。
+
 ## 0.7.12 — 2026-11-11
 
 ### 架构契约：把"分层"从文档变成构建失败

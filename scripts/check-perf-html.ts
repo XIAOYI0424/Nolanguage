@@ -74,33 +74,37 @@ checks.push(['the in-DOM Vue template compiles', !templateError && templateSize 
 
 // ---- capability assertions ----
 const app = blocks.join('\n');
-const capabilities: Array<[string, RegExp]> = [
-  ['consumes the metrics digest', /msg\.kind === 'metrics'/],
-  ['consumes the slow-path stream', /msg\.kind === 'slow'/],
-  ['reads the perf record mix', /perfSummary[\s\S]{0,40}byType|msg\.perfSummary/],
-  ['plots the full percentile set', /p50[\s\S]{0,400}p95[\s\S]{0,400}p99/],
-  ['renders count/min/avg/max columns', /min:[\s\S]{0,80}max:[\s\S]{0,80}avg:/],
-  ['attributes metrics to a subsystem', /function scopeOf/],
+// Every entry is a boolean. They used to be a mix of `RegExp` and boolean, and a
+// bare regex pushed as `ok` is always truthy — so 26 of these checks passed
+// without testing anything. Each one now runs `.test()` against the app source.
+const capabilities: Array<[string, boolean]> = [
+  ['consumes the metrics digest', /msg\.kind === 'metrics'/.test(app)],
+  ['consumes the slow-path stream', /msg\.kind === 'slow'/.test(app)],
+  ['reads the perf record mix', /perfSummary[\s\S]{0,40}byType|msg\.perfSummary/.test(app)],
+  ['plots the full percentile set', /p50[\s\S]{0,400}p95[\s\S]{0,400}p99/.test(app)],
+  ['renders count/min/avg/max columns', /min:[\s\S]{0,80}max:[\s\S]{0,80}avg:/.test(app)],
+  ['attributes metrics to a subsystem', /function scopeOf/.test(app)],
   ['groups by command/rpc/lsp/execution', /command\\\./.test(app) && /execution\\\./.test(app)],
-  ['classifies metric units (bytes/rate/count/ms)', /function unitOf/],
+  ['classifies metric units (bytes/rate/count/ms)', /function unitOf/.test(app)],
   ['treats host uptime as a gauge, not a latency', /\\.uptime\$/.test(app)],
-  ['formats values according to their unit', /function fmtUnit/],
-  ['bands only durations, never gauges', /function bandOf\(p95, unit\)/],
-  ['excludes gauges from the worst-latency KPI', /unit === 'ms'[\s\S]{0,220}worst = all\[i\]\.p95/],
-  ['keeps gauges out of the duration sort group', /a\.unit !== b\.unit/],
-  ['accumulates trend history', /st\.history\[name\]/],
-  ['caps trend history length', /TREND_LEN/],
-  ['renders a trend chart component', /app\.component\('trend-chart'/],
-  ['renders per-row sparklines', /app\.component\('spark-line'/],
-  ['correlates a slow span to its trace id', /shortId\(s\.traceId\)/],
-  ['time-stamps each slow span', /clockOf\(s\.at\)/],
-  ['bucketises slow paths into a histogram', /slowHistogram/],
-  ['sorts metrics by any column', /function sortBy/],
-  ['highlights the selected metric', /selectedRow/],
-  ['exposes pause control', /togglePause/],
-  ['exposes slow-path clear', /clearSlow/],
-  ['exposes a slow-path filter', /st\.slowFilter/],
-  ['reconnects after disconnect', /setTimeout\(open,/],
+  ['formats values according to their unit', /function fmtUnit/.test(app)],
+  ['bands only durations, never gauges', /function bandOf\(p95, unit\)/.test(app)],
+  ['excludes gauges from the worst-latency KPI', /unit === 'ms'[\s\S]{0,220}worst = all\[i\]\.p95/.test(app)],
+  ['keeps gauges out of the duration sort group', /a\.unit !== b\.unit/.test(app)],
+  ['accumulates trend history', /st\.history\[name\]/.test(app)],
+  ['caps trend history length', /TREND_LEN/.test(app)],
+  ['renders a trend chart component', /app\.component\('trend-chart'/.test(app)],
+  ['renders per-row sparklines', /app\.component\('spark-line'/.test(app)],
+  ['correlates a slow span to its trace id', /shortId\(s\.traceId\)/.test(app)],
+  // The timestamp is rendered in the shell's template, not in the app script.
+  ['time-stamps each slow span', /clockOf\(s\.at\)/.test(shell)],
+  ['bucketises slow paths into a histogram', /slowHistogram/.test(app)],
+  ['sorts metrics by any column', /function sortBy/.test(app)],
+  ['highlights the selected metric', /selectedRow/.test(app)],
+  ['exposes pause control', /togglePause/.test(app)],
+  ['exposes slow-path clear', /clearSlow/.test(app)],
+  ['exposes a slow-path filter', /st\.slowFilter/.test(app)],
+  ['reconnects after disconnect', /setTimeout\(open,/.test(app)],
   // Stage 11 — attribution. The page must offer the action, send the message
   // the server answers, and render the evidence rather than only a sentence.
   ['offers the explain action', /explain change/.test(shell)],

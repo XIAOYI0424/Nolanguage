@@ -57,6 +57,8 @@ const stages = [
   { name: 'Debug · sanitize a recording', script: 'scripts/verify-sanitize.ts' },
   // The architecture contract: layers, cycles, product boundary, budgets.
   { name: 'Arch · contract', script: 'scripts/verify-architecture.ts', pure: true },
+  // scripts/ was never in tsconfig's include; this ratchets the remainder down.
+  { name: 'Arch · types in scripts', script: 'scripts/verify-types.ts' },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.

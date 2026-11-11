@@ -1,4 +1,5 @@
 import type { Tracer } from '../perf/Tracer.js';
+import type { PerfEventSource, PerfServiceRegistry } from '../perf/types.js';
 import type { CorrelationBus } from '../correlation/CorrelationBus.js';
 import type { Logger } from '../log/Logger.js';
 import type { LoggerFactory } from '../log/LoggerFactory.js';
@@ -57,7 +58,7 @@ export interface CommandBus {
 
 export type EventHandler<T = unknown> = (payload: T) => void | Promise<void>;
 
-export interface EventBus {
+export interface EventBus extends PerfEventSource {
   on<T = unknown>(event: string, handler: EventHandler<T>): Disposable;
   once<T = unknown>(event: string, handler: EventHandler<T>): Disposable;
   emit<T = unknown>(event: string, payload?: T): Promise<void>;
@@ -80,7 +81,7 @@ export interface ServiceContext {
 
 export type ServiceFactory<T = unknown> = (ctx: ServiceContext) => T;
 
-export interface ServiceRegistry {
+export interface ServiceRegistry extends PerfServiceRegistry {
   register<T = unknown>(id: string, factory: ServiceFactory<T>, opts?: ServiceOptions): Disposable;
   consume<T = unknown>(id: string): T;
   has(id: string): boolean;

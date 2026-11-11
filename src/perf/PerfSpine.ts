@@ -1,9 +1,6 @@
 import { ulid } from '../util/ulid.js';
 import { performance } from 'node:perf_hooks';
-import type { Kernel } from '../kernel/types.js';
-import { CommandBusImpl } from '../kernel/CommandBus.js';
-import { EventBusImpl } from '../kernel/EventBus.js';
-import { ServiceRegistryImpl } from '../kernel/ServiceRegistry.js';
+import type { PerfHost } from './host.js';
 import { LiveMetrics } from './LiveMetrics.js';
 import { PerfStore } from './PerfStore.js';
 import type {
@@ -34,7 +31,7 @@ export class PerfSpine {
   private slowSpans: Span[] = [];
   private env?: PerfEnvironment;
   private correlation?: CorrelationBus;
-  private kernel?: Kernel;
+  private host?: PerfHost;
   /** Live taps: every accepted PerfRecord, used by the warm-tier sink. */
   private taps: ((record: PerfRecord) => void)[] = [];
 
@@ -69,12 +66,12 @@ export class PerfSpine {
     }
   }
 
-  install(kernel: Kernel): void {
-    this.kernel = kernel;
+  install(host: PerfHost): void {
+    this.host = host;
 
-    kernel.commands.use(async (ctx, next) => {
+    host.onCommand(async (ctx, next) => {
       const t0 = performance.now();
-      const span = kernel.tracer.startSpan('command.execute', { attributes: { commandId: ctx.id } });
+      const span = host.tracer.startSpan('command.execute', { attributes: { commandId: ctx.id } });
       try {
         const result = await next(ctx.args);
         const dur = performance.now() - t0;
@@ -91,7 +88,7 @@ export class PerfSpine {
       }
     });
 
-    (kernel.events as EventBusImpl).observe((event, dur, count) => {
+    host.events.observe?.((event, dur, count) => {
       this.emit(this.envelope('kernel', {
         type: 'event', category: 'event', name: event, status: 'ok', duration: dur,
       } as PerfEvent));
@@ -99,7 +96,7 @@ export class PerfSpine {
       this.metrics.record('event.throughput', (count / Math.max(dur, 0.001)) * 1000);
     });
 
-    (kernel.services as ServiceRegistryImpl).setActivationObserver((id, ms, ok) => {
+    host.services?.setActivationObserver((id, ms, ok) => {
       this.emit(this.envelope('kernel', {
         type: 'metric', name: `service.activate.${id}`, value: ms, unit: 'ms',
       } as PerfMetric));
@@ -138,7 +135,7 @@ export class PerfSpine {
     this.slowSpans.push(span);
     // Broadcast for the dev panel (Stage 2): slow paths are pushed the instant
     // they happen (spec 十: 慢路径立即捕获).
-    void this.kernel?.events.emit('perf:slowPath', {
+    void this.host?.events.emit('perf:slowPath', {
       id: span.id,
       traceId: span.traceId,
       name: span.name,
@@ -146,7 +143,7 @@ export class PerfSpine {
       commandId: id,
       at: Date.now(),
     });
-    this.kernel?.logger
+    this.host?.logger
       .forComponent('perf.spine')
       .warn('Slow command detected', {
         commandId: id,
@@ -200,14 +197,14 @@ export class PerfSpine {
   /** Public slow-path check for non-command work (e.g. RPC roundtrips). */
   checkSlow(name: string, durationMs: number, attributes: Record<string, unknown> = {}): boolean {
     if (durationMs < this.slowThresholdMs) return false;
-    const span = (this.kernel?.tracer ?? new TracerImpl()).startSpan(name, { attributes });
+    const span = (this.host?.tracer ?? new TracerImpl()).startSpan(name, { attributes });
     span.end();
     // The span's own lifetime is ~0; record the *measured* duration instead so
     // the slow-path panel shows the real cost.
     span.duration = durationMs;
     span.endTime = span.startTime + durationMs;
     this.slowSpans.push(span);
-    void this.kernel?.events.emit('perf:slowPath', {
+    void this.host?.events.emit('perf:slowPath', {
       id: span.id,
       traceId: span.traceId,
       name,

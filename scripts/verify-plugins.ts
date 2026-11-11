@@ -29,6 +29,15 @@ import { ProfileManager, parseMemoryHint, runtimeMemoryBytes, type ResourceProfi
 import { validateManifest } from '../src/langs/manifest.js';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
+/**
+ * A skipped check. `skip()` was already being called below without ever being
+ * defined — on a machine without the shell wrapper the suite would have thrown
+ * `ReferenceError` instead of skipping.
+ */
+function skip(name: string, why: string): void {
+  console.log(`SKIP  ${name}  — ${why}`);
+}
+
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);

@@ -110,7 +110,7 @@ if (process.argv.includes('--extension-host')) {
  */
 function runLangCli(args: string[]): void {
   void (async () => {
-    const { runLang } = await import('../cli/lang.js');
+    const { runLang } = await import('../commands/lang.js');
     process.exitCode = await runLang(args);
   })().catch((err: unknown) => {
     process.stderr.write(`lang failed: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -121,7 +121,7 @@ function runLangCli(args: string[]): void {
 /** `Nolanguage.exe --dump-plugins` — a report, so it never starts the server. */
 function runDumpPlugins(): void {
   void (async () => {
-    const { dumpPlugins } = await import('../cli/dump.js');
+    const { dumpPlugins } = await import('../commands/dump.js');
     process.exitCode = await dumpPlugins();
   })().catch((err: unknown) => {
     process.stderr.write(`--dump-plugins failed: ${err instanceof Error ? err.message : String(err)}\n`);

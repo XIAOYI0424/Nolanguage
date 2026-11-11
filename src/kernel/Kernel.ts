@@ -178,7 +178,21 @@ export class Kernel implements IKernel {
     // Resolve the real git commit *before* the spines install, otherwise every
     // record carries `gitCommit: 'unknown'` (the spines cache it once).
     await this.correlation.prime();
-    this.perf.install(this);
+    // The kernel adapts itself to the spine's port instead of the spine reaching
+    // up into the kernel: `onCommand` is the one shape that differs (the spine
+    // wants a middleware sink, the bus offers `use`).
+    this.perf.install({
+      onCommand: (mw) => {
+        this.commands.use(mw);
+      },
+      tracer: this.tracer,
+      // Lazy: the logger factory is assigned by the log spine, which installs
+      // after this call. Capturing the value here would hand the spine
+      // `undefined` and only fail when a slow command was first detected.
+      logger: { forComponent: (component: string) => this.logger.forComponent(component) },
+      events: this.events,
+      services: this.services,
+    });
     this.log.install(this);
     this.attachStore();
     this.started = true;

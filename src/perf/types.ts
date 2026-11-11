@@ -104,3 +104,42 @@ export interface MetricSummary {
   p95: number;
   p99: number;
 }
+
+/**
+ * Shapes the perf spine needs from its host, kept import-free on purpose.
+ *
+ * `PerfHost` itself lives in `host.ts`: it names `Tracer` and `LoggerFactory`,
+ * and a vocabulary file that grows an import stops being vocabulary.
+ */
+export interface PerfSpanLike {
+  readonly traceId: string;
+  end(attrs?: Record<string, unknown>): unknown;
+  recordException(err: Error): void;
+}
+
+export interface PerfCommandContext {
+  id: string;
+  args: unknown[];
+}
+
+export type PerfCommandMiddleware = (
+  ctx: PerfCommandContext,
+  next: (args: unknown[]) => Promise<unknown>,
+) => Promise<unknown>;
+
+export type PerfEventObserver = (event: string, durationMs: number, count: number) => void;
+export type PerfActivationObserver = (id: string, ms: number, ok: boolean) => void;
+
+/** The two instrumentation hooks a bus may expose. */
+export interface PerfEventSource {
+  observe(cb: PerfEventObserver): void;
+}
+
+export interface PerfServiceRegistry {
+  setActivationObserver(cb: PerfActivationObserver): void;
+}
+
+/** What the spine broadcasts on: the slow-path panel listens to this. */
+export interface PerfEventSink {
+  emit(event: string, payload?: unknown): Promise<void> | void;
+}

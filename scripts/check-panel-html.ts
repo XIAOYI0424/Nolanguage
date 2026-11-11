@@ -73,14 +73,16 @@ checks.push(['the in-DOM Vue template compiles', !templateError && templateSize 
 
 // ---- behaviour ----
 const app = blocks.join('\n');
-const behaviour: Array<[string, RegExp]> = [
-  ['websocket client', /new WebSocket\(url\)/],
-  ['metric sparklines', /function sparkBars/],
-  ['level filtering', /st\.filterLevel/],
+// Booleans, not regexes: a bare `RegExp` pushed as `ok` is always truthy, so
+// these checks passed without testing anything until they were made real.
+const behaviour: Array<[string, boolean]> = [
+  ['websocket client', /new WebSocket\(url\)/.test(app)],
+  ['metric sparklines', /function sparkBars/.test(app)],
+  ['level filtering', /st\.filterLevel/.test(app)],
   ['pause/clear controls', /togglePauseLogs/.test(app) && /clearLogs/.test(app)],
-  ['reconnects after disconnect', /setTimeout\(open,/],
-  ['dedupes log records', /st\.seen\[r\.id\]/],
-  ['caps the log buffer', /MAX_LOGS/],
+  ['reconnects after disconnect', /setTimeout\(open,/.test(app)],
+  ['dedupes log records', /st\.seen\[r\.id\]/.test(app)],
+  ['caps the log buffer', /MAX_LOGS/.test(app)],
   ['groups metrics', /^command\\\./.test(app) || /command\\\./.test(app)],
 ];
 for (const [name, ok] of behaviour) {
