@@ -8,6 +8,12 @@ name: CI
 # in ~2 minutes, the integration job answers "does the system still work?" in
 # ~10. A single job that only runs the expensive one gets skipped by habit; a
 # single job that only runs the cheap one never tests the artifact.
+#
+# Every step is an npm script, never an inline command line. That is not tidiness:
+# it is what makes "CI would pass" checkable from a developer's machine, because
+# `npm run ci:pure` runs the same three commands in the same order. When the
+# command lived only in this file, the only place it could ever run was a runner,
+# and the claim could not be tested at all.
 on:
   push:
   pull_request:
@@ -45,10 +51,18 @@ jobs:
       - name: Unit tests (vitest)
         run: npm test
 
-      # 10 suites: statistics, migration readers, handshake table, signing
-      # wiring, page self-containment. No ports, no spawns, no exe.
+      # Every suite marked `pure: true` in scripts/verify-all.mjs: statistics,
+      # migration readers, handshake table, signing wiring, page
+      # self-containment, the architecture and doc contracts. No ports, no
+      # spawns, no exe. The count is deliberately not written here — it was 10
+      # when this comment was written and 14 by the time anyone checked.
       - name: Pure suites
-        run: node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-all.mjs --pure
+        run: npm run verify:pure
+
+      # The workflow is a claim too: every `npm run` it names has to exist, and
+      # it has to install from the lockfile rather than resolving afresh.
+      - name: Check the workflow
+        run: npm run verify:ci
 
   # Gate 4-7 — everything that boots a server, spawns a toolchain, mounts a DOM
   # or runs the packaged binary. Depends on `pure` so a logic failure stops the
@@ -70,9 +84,6 @@ jobs:
         with:
           go-version: 'stable'
 
-      # No runtime dependencies; 8 dev ones (types, vitest, esbuild, postject, jsdom, ...).
-      # `npm ci` is exact and fast;
-      # package-lock.json is committed.
       - name: Install dependencies
         run: npm ci
 
@@ -91,49 +102,19 @@ jobs:
       # cheap, and a suite that passes without the exe but fails with it is
       # exactly the regression this job exists to catch.
       - name: Verify all suites
-        run: node scripts/verify-all.mjs --no-warnings
+        run: npm run verify
 
       # Gate — the artifact users actually run: build the NSIS installer,
       # install it silently, start the app, and probe /health.
       - name: Build installer
         run: npm run build:setup
 
+      # The body of this check is installer/smoke-install.ps1, so it can also be
+      # run locally (`npm run ci:install-smoke`). It does modify the machine
+      # while it runs — registry entries, Start Menu shortcuts — which is why it
+      # is not part of the default suite.
       - name: Silent install + health smoke
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $setup = 'installer/Nolanguage-Setup.exe'
-          if (-not (Test-Path $setup)) { throw "installer missing: $setup" }
-
-          # `/D` overrides InstallDirRegKey, so the target does not depend on
-          # whatever a previous install on this machine remembered. It must be
-          # the last argument.
-          $dir = Join-Path $env:RUNNER_TEMP 'nl-smoke'
-          if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
-          Start-Process -FilePath $setup -ArgumentList '/S', "/D=$dir" -Wait
-
-          $exe = Join-Path $dir 'Nolanguage.exe'
-          if (-not (Test-Path $exe)) { throw "install did not produce $exe" }
-
-          # Consoleless build: no window, so probe the HTTP surface instead.
-          Start-Process -FilePath $exe -ArgumentList '--no-open'
-
-          $health = $null
-          for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 1
-            try {
-              $health = Invoke-RestMethod 'http://127.0.0.1:7310/health' -TimeoutSec 2
-              if ($health.status -eq 'ok') { break }
-            } catch { }
-          }
-          if (-not $health -or $health.status -ne 'ok') { throw 'health check failed' }
-          Write-Host "health: status=$($health.status) version=$($health.appVersion) signature=$($health.build.sha256.Substring(0,12))"
-
-          Get-Process Nolanguage -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep -Seconds 2
-          Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -Wait
-          Start-Sleep -Seconds 2
-          if (Test-Path (Join-Path $dir 'Nolanguage.exe')) { throw 'uninstall left the executable behind' }
+        run: npm run ci:install-smoke
 
       # Gate — Tauri shell package. Optional: it compiles Rust and may need to
       # download NSIS/WiX on a cold runner, so a network hiccup must not fail the

@@ -12,4 +12,4 @@
  * `major.minor.patch`. `scripts/verify-handshake.ts` asserts the two never
  * drift apart.
  */
-export const APP_VERSION = '0.7.16-workspace';
+export const APP_VERSION = '0.7.17-workspace';

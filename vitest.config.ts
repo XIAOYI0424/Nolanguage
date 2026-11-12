@@ -42,6 +42,13 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // Files run one at a time. The suite is 38 tests in about two seconds, so
+    // parallelism buys nothing — and it costs something: two workers collecting
+    // at once race on the same SSR transform cache, and on a machine where the
+    // temp directory is brokered one of the two writes is denied. Vitest does
+    // not fail on that, it drops the file and reports the rest as a pass (this
+    // happened to `pure.test.ts`: 29 tests vanished from a green run).
+    fileParallelism: false,
     pool: 'forks',
     server: {
       deps: {

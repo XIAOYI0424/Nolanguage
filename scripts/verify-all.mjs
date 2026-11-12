@@ -63,6 +63,9 @@ const stages = [
   // reads the summary that suite writes; if the order ever changes, this suite
   // fails loudly rather than passing on a missing file.
   { name: 'Docs · claims match the code', script: 'scripts/verify-docs.ts', pure: true },
+  // The workflow is a claim too: every command it names must exist, and it must
+  // install from the lockfile.
+  { name: 'CI · the workflow is honest', script: 'scripts/verify-ci.ts', pure: true },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.
@@ -175,6 +178,16 @@ const selected = stages.filter((stage) => {
 if (pureOnly || skipExe || only) {
   console.log(`  filter: ${selected.length}/${stages.length} suites` +
     (pureOnly ? ' (pure)' : '') + (skipExe ? ' (no exe)' : '') + (only ? ` (matching "${only}")` : ''));
+}
+
+// A filter that selects nothing must fail. Otherwise `--pure` in CI goes green
+// having run zero suites — the same lie as a suite that crashes before its first
+// assertion, one level up. It is reachable: drop the `pure: true` markers, or
+// mistype `--only`, and the summary would read "0/0 checks passed".
+if (selected.length === 0) {
+  console.error('\n  FAIL  the filter selected no suites — nothing was verified');
+  console.error(`        flags: ${argv.join(' ') || '(none)'}  ·  ${stages.length} suites available`);
+  process.exit(1);
 }
 
 for (const [i, stage] of selected.entries()) {

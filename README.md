@@ -132,13 +132,15 @@ Nolanguage.exe --dump-plugins
 ## 验证
 
 ```bash
-npm run verify           # 45 套件（真进程，含打包 exe smoke）；断言总数以本次输出为准
-npm test                 # vitest 单测（9 用例）
+npm run ci:pure          # CI 快门：typecheck + 单测 + 纯逻辑套件（约 15 秒）
+npm run verify           # 46 套件（真进程，含打包 exe smoke）；断言总数以本次输出为准
+npm test                 # vitest 单测（2 个文件 38 用例；丢了文件会失败）
 npm run typecheck        # tsc --noEmit，0 错误
 npm run verify:sidecar   # 校验 dist 与 Tauri sidecar 的 sha256 一致
 ```
 
 CI（`.github/workflows/ci.yml`）把上述全部当作阻塞闸门，另外会构建 NSIS 安装包、静默安装并探测 `/health`。
+每个步骤都是一个 npm 脚本，所以 `npm run ci:pure` 在本机跑的就是 CI 快门；`npm run verify:ci` 检查 workflow 里每个命令都真实存在。
 
 ## 安装包
 
