@@ -12,7 +12,7 @@
 
 /** Persistent Python REPL worker (pure stdlib). */
 export const PYTHON_WORKER_SRC = [
-  'import sys, json, io, traceback, time',
+  'import sys, json, io, traceback, time, contextlib',
   'NS = {}',
   '',
   'def read_frame():',
@@ -24,7 +24,7 @@ export const PYTHON_WORKER_SRC = [
   '',
   'def write_frame(obj):',
   '    b = json.dumps(obj).encode("utf-8")',
-  '    sys.stdout.buffer.write(str(len(b)).encode() + b"\\n")',
+  '    sys.stdout.buffer.write(str(len(b)).encode() + b"\\n" + b)',
   '    sys.stdout.buffer.flush()',
   '',
   'while True:',

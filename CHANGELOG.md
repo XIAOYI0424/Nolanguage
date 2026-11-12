@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.19 — 2026-11-12
+
+### #45 · 执行平面的验证套件 —— 装上就抓到 Python 沙箱从未工作
+
+`src/exec/` 有 932 行（预热池、worker 协议、日志汇聚），**没有任何套件**。新增 `verify-exec.ts`（29 条，真进程）之后第一次运行就红了两处，都是真 bug：
+
+| bug | 后果 |
+|---|---|
+| Python worker 用了 `contextlib.redirect_stdout`，但**从来没 import `contextlib`** | 重定向从不生效，片段的 `print` 直接写进帧协议的 stdout，把协议打乱 |
+| `write_frame` 只写长度头，**从不写 JSON 正文** | 每一次响应都是"头有、身无"；池子读不到正文，只能等到超时 |
+
+叠加效果：**每一次 Python 的 `code.run` / `sandbox.run` 都等到 8 秒超时**，之后整个池子降级（`list()` 变空、后续全部超时）。IDE 的 Run 按钮走 `PythonRunner`（冷启动），所以这条路径从没被人走到 —— 它只对 MCP 的 `code.run` 生效。
+
+修完实测：冷启动 → 热复用 → 抛异常如实返回（`ok:false, exit:1`）→ **worker 存活**、下一次照常 → `reset` 回到冷启动。
+
+套件覆盖：预热复用 / Python 命名空间延续 / 会话隔离 / 超时 / reset / `list()` 的真实计数 / worker 输出落到日志脊（`user-code` + sessionId）/ JS 进程复用但 vm 上下文全新 / 命令总线（`sandbox.run` + `code.run` 别名）/ Go 构建与编译错误（缺工具链时 SKIP）/ worker 源码无相对导入。
+
+### #40 · Markdown 预览窗格 + outline
+
+服务端早就完整（`mdRender` → 净化后的 HTML + headings + stats），**客户端从来没发过这个请求**。现在补上那一半：
+
+- **预览窗格**：编辑区右侧分栏（`.edwrap` 本来就是横向 flex，所以是 `.codewrap` 的兄弟节点，不是新布局）。入口：工具栏按钮、`View → Markdown Preview`、`Alt+P`。
+- **outline**：窗格内可折叠的标题列，**同时**接管 Structure 工具窗（`Alt+7`）—— Markdown 没有符号可解析，它的"结构"就是渲染器给出的 heading 列表，两处共用同一份数据。
+- 点击任意标题把光标移到该行（`gotoLine` 是 0 基，heading 行号是 1 基）。
+- **页面从不解析 Markdown**：请求带 `requestId`，过期响应被丢弃（否则两次渲染重叠时窗格会闪回旧内容）；输入 250ms 防抖。
+
+### 顺带修的两处
+
+- **`verify-pycharm` 的脚手架会启动一个已关闭的页面**：窗口 `close()` 之后，排队的 `onopen` 仍会触发 `bootProject`，而 jsdom 清空 `document` 却不置 `closed`，于是崩在 `document.getElementById`。现在 socket 归属它创建时的页面，页面没了就不再 boot。
+- 两处模板字符串里写了反引号（`pycharm-shell.ts`、`pycharm-css.ts`）—— 正是这套代码被拆成 8 个 `.js` 分片之前的老毛病。`verify-pycharm` 的守卫当场地抓住了第三处（在分片注释里）。
+
+### 验证
+
+- `verify-exec`：**29/29**（含 Go 构建）
+- `verify-pycharm`：**275/275**（新增 9 条预览断言，走完整闭环：打开 .md → 请求 → 渲染 → outline → 跳行 → 过期丢弃）
+- `verify-all`：**47 套件**
+- `tsc`：0（src + scripts）
+
 ## 0.7.18 — 2026-11-12
 
 ### 账本里的例外清零

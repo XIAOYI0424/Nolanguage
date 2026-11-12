@@ -491,7 +491,7 @@
   var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [], dismissed: false };
   var HOV = { timer: 0, reqId: 0, cx: 0, cy: 0 };
 
-  ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); scheduleCheck(); });
+  ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); scheduleCheck(); schedulePreview(); });
   ta.addEventListener('scroll', syncScroll);
   ta.addEventListener('keyup', updateCaret);
   ta.addEventListener('click', updateCaret);

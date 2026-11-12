@@ -50,6 +50,8 @@
       { label: 'Appearance: Darcula', sc: '', act: function () { setTheme('darcula'); } },
       { label: 'Appearance: Light', sc: '', act: function () { setTheme('light'); } },
       { sep: true },
+      { label: 'Markdown Preview', sc: 'Alt+P', act: function () { mdToggle(); } },
+      { sep: true },
       { label: 'Tool Window Bars', act: function () { $('strip').style.display = ($('strip').style.display === 'none' ? '' : 'none'); } },
       { label: 'Status Bar', act: function () { var s = document.querySelector('.status'); s.style.display = (s.style.display === 'none' ? '' : 'none'); } },
       { sep: true },

@@ -41,6 +41,7 @@ export const PYCHARM_SHELL = `
       <button class="tbtn iconly" id="stopBtn" title="Stop" data-i18n-title="toolbar.Stop"><span class="ic" data-ic="stop" data-size="16"></span></button>
     </div>
     <span class="spacer"></span>
+    <button class="tbtn iconly" id="mdPrevBtn" title="Markdown Preview  (Alt+P)" data-i18n-title="toolbar.Preview"><span class="ic" data-ic="file" data-size="16"></span></button>
     <button class="tbtn iconly" id="searchBtn" title="Search Everywhere  (double Shift)" data-i18n-title="toolbar.Search"><span class="ic" data-ic="search" data-size="16"></span></button>
     <button class="tbtn iconly" id="themeBtn" title="Toggle theme" data-i18n-title="toolbar.Theme"><span class="ic" data-ic="ai" data-size="16"></span></button>
     <button class="tbtn iconly" id="settingsBtn" title="Settings  (Ctrl+Alt+S)" data-i18n-title="toolbar.Settings"><span class="ic" data-ic="settings" data-size="16"></span></button>
@@ -69,6 +70,24 @@ export const PYCHARM_SHELL = `
           <div class="curline" id="curline"></div>
           <pre id="hl" aria-hidden="true"><code id="hlCode"></code></pre>
           <textarea id="ta" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"></textarea>
+        </div>
+        <!-- Markdown preview (#40): the right half of the editor split. The
+             page never parses Markdown: mdRender returns sanitised HTML plus the
+             heading list, and the Structure window reuses those headings.
+             No backticks in this file — it is one template literal, and a stray
+             one truncates it (that has happened twice already). -->
+        <div class="mdprev hidden" id="mdprev">
+          <div class="mdprev-head">
+            <span class="title">Preview</span>
+            <span class="mdprev-meta" id="mdMeta"></span>
+            <span class="grow"></span>
+            <button class="tbtn iconly" id="mdOutlineBtn" title="Outline"><span class="ic" data-ic="structure" data-size="14"></span></button>
+            <button class="tbtn iconly" id="mdPrevClose" title="Close preview"><span class="ic" data-ic="close" data-size="14"></span></button>
+          </div>
+          <div class="mdprev-body">
+            <div class="mdoutline" id="mdOutline"></div>
+            <div class="mdhtml" id="mdHtml"></div>
+          </div>
         </div>
         <div class="cmp" id="cmp"></div>
         <div class="hover-tip" id="hoverTip"></div>

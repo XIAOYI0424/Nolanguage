@@ -169,7 +169,7 @@ check('shell: inline script parses', (() => {
 //   - the assembled script must have substituted every one of them.
 const CLIENT_DIR = join(ROOT, 'src', 'ui', 'client');
 const fragmentFiles = readdirSync(CLIENT_DIR).filter((f) => f.endsWith('.js')).sort();
-check('client: split into 6-8 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 8, fragmentFiles.join(','));
+check('client: split into 6-9 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 9, fragmentFiles.join(','));
 check(
   'client: every fragment on disk is wired into the assembler',
   fragmentFiles.length === CLIENT_FRAGMENTS.length &&
@@ -197,6 +197,15 @@ check(
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
+  /**
+   * The page currently being mounted.
+   *
+   * A socket belongs to whichever page was open when it was created — including
+   * the reconnects the client opens by itself. Without this, a queued open event
+   * from a page that has already been closed would still boot it, and booting a
+   * closed window throws inside the client because `document` is undefined.
+   */
+  static currentWindow: { closed?: boolean } | null = null;
   onopen: ((ev?: unknown) => void) | null = null;
   onclose: ((ev?: unknown) => void) | null = null;
   onerror: ((ev?: unknown) => void) | null = null;
@@ -205,7 +214,15 @@ class FakeSocket {
   sent: Record<string, unknown>[] = [];
   constructor(public url: string) {
     FakeSocket.instances.push(this);
-    setTimeout(() => { this.readyState = 1; if (this.onopen) this.onopen({}); }, 0);
+    const page = FakeSocket.currentWindow;
+    setTimeout(() => {
+      // No page, or the page is gone: this event has nothing left to boot.
+      // `closed` is not reliable here (jsdom clears the document without
+      // setting it), so the real question is whether the page still has one.
+      if (!page || !(page as { document?: unknown }).document) return;
+      this.readyState = 1;
+      if (this.onopen) this.onopen({});
+    }, 0);
   }
   send(data: string): void { this.sent.push(JSON.parse(data)); }
   close(): void { this.readyState = 3; }
@@ -227,6 +244,11 @@ function mountPage(
   const vc = new VirtualConsole();
   const dom = new JSDOM(markup, { runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc, url });
   const w = dom.window as any;
+  // Sockets created while this page is the current one belong to it; closing the
+  // page clears that, so a late open event cannot boot a closed window.
+  FakeSocket.currentWindow = w;
+  const closeWindow = w.close.bind(w);
+  w.close = () => { if (FakeSocket.currentWindow === w) FakeSocket.currentWindow = null; closeWindow(); };
   if (bridge === 'tauri') FakeTauri.install(w);
   else w.WebSocket = FakeSocket;
   if (seed) { try { w.localStorage.setItem('nolanguage.pycharm.v1', seed); } catch { /* no storage */ } }
@@ -1637,6 +1659,71 @@ console.log('');
 testRestore();
 console.log('');
 testTokens();
+
+// ------------------------------------------------- Markdown preview (#40)
+// The pane is only useful if the whole loop works: open a .md file, ask the
+// engine, render the answer, and let the outline move the caret. Checking that
+// the markup exists would pass with a pane that never renders anything.
+console.log('');
+{
+  const html = renderPyCharmHtml(7310);
+  const mounted = mountPage(html);
+  const w = mounted.window as any;
+  const socket = needSocket(mounted);
+  await settle(w, 30);
+
+  const doc = w.document;
+  const pane = doc.getElementById('mdprev');
+  check('preview: the pane exists and starts hidden', !!pane && pane.classList.contains('hidden'), pane ? pane.className : 'missing');
+
+  // The project tree is the only way in from a cold page: deliver a listing and
+  // click the row, exactly like a user would.
+  socket.deliver({ kind: 'fsListing', path: '', entries: [{ name: 'README.md', path: 'README.md', kind: 'file' }] });
+  await settle(w, 20);
+  const row = Array.from(doc.querySelectorAll('.tnode') as ArrayLike<any>)
+    .find((n: any) => n.getAttribute('data-path') === 'README.md');
+  check('preview: the project tree lists the markdown file', !!row);
+  if (row) (row as any).dispatchEvent(new w.MouseEvent('click', { bubbles: true, button: 0 }));
+  await settle(w, 20);
+
+  const btn = doc.getElementById('mdPrevBtn') as any;
+  btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await settle(w, 20);
+
+  const req = socket.lastSentOf('mdRender');
+  check('preview: opening it asks the engine to render', !!req && req.language === 'markdown', JSON.stringify(req || {}));
+  check('preview: the request carries a requestId', typeof req?.requestId === 'number', String(req?.requestId));
+  check('preview: the pane is visible after the toggle', !pane.classList.contains('hidden'), pane.className);
+
+  socket.deliver({
+    kind: 'mdPreview', ok: true, requestId: req?.requestId,
+    html: '<h1 id="t">Title</h1><p>body</p>',
+    title: 'Title', headings: [{ level: 1, text: 'Title', slug: 't', line: 3 }],
+    stats: { blocks: 2, words: 2, codeBlocks: 0, links: 0, headings: 1 }, ms: 4, truncated: false,
+  });
+  await settle(w, 20);
+
+  const body = doc.getElementById('mdHtml') as any;
+  const outline = doc.getElementById('mdOutline') as any;
+  check('preview: the engine answer is rendered into the pane', !!body && body.innerHTML.includes('<h1'), String(body?.innerHTML).slice(0, 48));
+  check('preview: the headings become the outline', !!outline && outline.querySelectorAll('.mdoh').length === 1, String(outline?.innerHTML).slice(0, 48));
+
+  // A render that finished after a newer keystroke must not win.
+  socket.deliver({
+    kind: 'mdPreview', ok: true, requestId: Number(req?.requestId) - 1,
+    html: '<p>stale</p>', title: '', headings: [], stats: {}, ms: 1, truncated: false,
+  });
+  await settle(w, 20);
+  check('preview: a stale render is ignored', !String(body?.innerHTML).includes('stale'), String(body?.innerHTML).slice(0, 40));
+
+  // gotoLine is 0-based, a heading line is 1-based: line 3 means index 2.
+  const oh = outline.querySelector('.mdoh') as any;
+  oh.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await settle(w, 20);
+  const ta = doc.getElementById('ta') as any;
+  const caretLine = String(ta.value).slice(0, ta.selectionStart).split('\n').length;
+  check('preview: clicking an outline row jumps to its heading', caretLine === 3, 'line ' + caretLine);
+}
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

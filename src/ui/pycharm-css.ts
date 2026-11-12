@@ -198,6 +198,50 @@ export const PYCHARM_CSS = `
     display:flex; align-items:center; justify-content:center; color:var(--text-tertiary); opacity:0; cursor:pointer; }
   .gline.foldable:hover .fold { opacity:1; }
   .gline .fold:hover { background:var(--bg-hover); color:var(--icon-active); }
+  /* Markdown preview (#40): a right split inside the editor row. edwrap is
+     already a flex row, so this is a sibling of codewrap, not a new layout.
+     No backticks in this file either: it is one template literal. */
+  .mdprev { flex:0 0 42%; min-width:260px; max-width:64%; display:flex; flex-direction:column;
+    min-height:0; border-left:1px solid var(--border); background:var(--bg-primary); }
+  .mdprev.hidden { display:none; }
+  .mdprev-head { flex:0 0 auto; height:32px; display:flex; align-items:center; gap:6px;
+    padding:0 6px 0 10px; border-bottom:1px solid var(--border); font-size:12px; color:var(--text-secondary); }
+  .mdprev-head .title { color:var(--text-primary); font-weight:600; }
+  .mdprev-meta { color:var(--text-tertiary); font-size:11px; white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; }
+  .mdprev-head .grow { flex:1; }
+  .mdprev-body { flex:1; display:flex; min-height:0; }
+  .mdoutline { display:none; flex:0 0 190px; overflow:auto; padding:6px 0;
+    border-right:1px solid var(--border-soft); font-size:12px; }
+  .mdprev.outline .mdoutline { display:block; }
+  .mdoh { padding:3px 10px; cursor:pointer; color:var(--text-secondary); white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; }
+  .mdoh:hover { background:var(--bg-hover); color:var(--text-primary); }
+  .mdoh.lv1 { color:var(--text-primary); font-weight:600; }
+  .mdoh.lv2 { padding-left:20px; }
+  .mdoh.lv3 { padding-left:30px; }
+  .mdoh.lv4 { padding-left:40px; }
+  .mdoh.lv5 { padding-left:50px; }
+  .mdoh.lv6 { padding-left:60px; }
+  .mdhtml { flex:1; min-width:0; overflow:auto; padding:12px 18px; color:var(--text-primary);
+    font:13px/1.65 var(--sans); }
+  .mdhtml .empty, .mdoutline .empty { color:var(--text-tertiary); font-size:12px; padding:8px 10px; }
+  .mdhtml h1, .mdhtml h2, .mdhtml h3, .mdhtml h4, .mdhtml h5, .mdhtml h6 { margin:1.1em 0 .5em; line-height:1.3; }
+  .mdhtml h1 { font-size:1.7em; border-bottom:1px solid var(--border-soft); padding-bottom:.25em; }
+  .mdhtml h2 { font-size:1.4em; border-bottom:1px solid var(--border-soft); padding-bottom:.2em; }
+  .mdhtml h3 { font-size:1.18em; }
+  .mdhtml p { margin:.6em 0; }
+  .mdhtml code { font-family:var(--mono); font-size:.92em; background:var(--bg-tertiary);
+    padding:1px 4px; border-radius:3px; }
+  .mdhtml pre { background:var(--bg-secondary); border:1px solid var(--border-soft);
+    border-radius:5px; padding:10px 12px; overflow:auto; }
+  .mdhtml pre code { background:none; padding:0; }
+  .mdhtml blockquote { margin:.6em 0; padding:.2em 12px; border-left:3px solid var(--border); color:var(--text-secondary); }
+  .mdhtml table { border-collapse:collapse; margin:.7em 0; }
+  .mdhtml th, .mdhtml td { border:1px solid var(--border); padding:4px 8px; }
+  .mdhtml img { max-width:100%; }
+  .mdhtml a { color:var(--accent); }
+  .mdhtml ul, .mdhtml ol { margin:.5em 0; padding-left:1.6em; }
   .codewrap { position:relative; flex:1; min-width:0; overflow:hidden; }
   .codewrap pre, .codewrap textarea {
     position:absolute; inset:0; margin:0; padding:10px 14px; border:0;

@@ -1,5 +1,5 @@
 /**
- * The workspace shell's client script, as eight text fragments.
+ * The workspace shell's client script, as nine text fragments.
  *
  * Why it is split: the script used to be **one 4,200-line template literal**
  * inside `pycharm-client.ts`. A single backtick anywhere in it — including in a
@@ -21,6 +21,7 @@
  *  20-editor       editor, CodeMirror adapter, tokeniser, catalogue, ctx menu
  *  30-panels       buffers/tabs, tool windows, project tree (+ editing)
  *  40-docks        MCP, performance, flame graph, logs, problems
+ *  45-preview      Markdown preview pane + outline (#40)
  *  50-runtime      run / debug / coverage / formatting / terminal / messages
  *  60-menus        menus, theme, language mode, modals, settings, run configs
  *  70-shell        pickers, search, toolbar, keymap, interpreter, boot
@@ -30,6 +31,7 @@ import state from './client/10-state.js?raw';
 import editor from './client/20-editor.js?raw';
 import panels from './client/30-panels.js?raw';
 import docks from './client/40-docks.js?raw';
+import preview from './client/45-preview.js?raw';
 import runtime from './client/50-runtime.js?raw';
 import menus from './client/60-menus.js?raw';
 import shell from './client/70-shell.js?raw';
@@ -47,6 +49,7 @@ export const CLIENT_FRAGMENTS: ClientFragment[] = [
   { file: '20-editor.js', text: editor },
   { file: '30-panels.js', text: panels },
   { file: '40-docks.js', text: docks },
+  { file: '45-preview.js', text: preview },
   { file: '50-runtime.js', text: runtime },
   { file: '60-menus.js', text: menus },
   { file: '70-shell.js', text: shell },

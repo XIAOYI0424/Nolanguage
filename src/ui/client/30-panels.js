@@ -378,6 +378,9 @@
     $('stFile').textContent = name;
     renderStLang();
     renderTabs(); renderEditor(); updateCaret();
+    // A Markdown buffer needs a render before its outline can exist; switching
+    // away must drop the pane instead of showing the previous file's HTML.
+    mdAfterDocSwitch();
     // Stale marks from the previous document must not follow the caret here.
     clearDiags();
     if (lspLang()) BRIDGE.send({ kind: 'check', code: ta.value, language: lspLang() });
@@ -744,6 +747,10 @@
   function hideCtx() { var m = $('ctxMenu'); if (m) m.classList.remove('open'); }
   function bootProject() { loadDir(''); openFile(currentFile || 'main.py'); }
   function structureTree(code) {
+    // Markdown has no symbols to parse: its structure is the heading list the
+    // renderer already produced, so the same rows serve the pane and this window.
+    var md = mdStructureRows();
+    if (md !== null) return md;
     var lines = code.split('\n'), nodes = [];
     lines.forEach(function (l, i) {
       var m = /^(\s*)(def|class)\s+([A-Za-z_]\w*)/.exec(l);

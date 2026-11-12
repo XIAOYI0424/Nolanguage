@@ -672,6 +672,11 @@
         if (m.language && m.language !== currentLang) break;
         setDiags(m.items || []);
         break;
+      case 'mdPreview':
+        // The preview pane and the Structure window both read this; the handler
+        // drops answers whose requestId is stale.
+        mdOnPreview(m);
+        break;
       case 'runResult':
         if (m.cancelled) {
           RUN_ACTIVE = false;

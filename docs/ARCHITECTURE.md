@@ -1,6 +1,6 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.18 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.19 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
 这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 451 imports · 18/18`，**零个已声明环**。
 
@@ -317,4 +317,6 @@ C6 的第一版是错的：它扫描整个文件，于是**注释里**提到的�
 
 1. **`budgetExceptions` 是空的** —— 没有文件或切片超预算。**这是第一次**：以后再有文件变胖，只能真的拆，不能记账。
 2. **插件市场远程安装 + `trust.signature` 验签**。
-3. **IDE Markdown 预览窗格 / outline（#40）**、**`verify-exec.ts`（#45）**。
+3. **`ci:install-smoke` 只在开发机上验证过** —— GitHub runner 上的临时目录与权限策略未实测。
+
+0.7.19 关掉了两项：#40（Markdown 预览窗格 + outline）与 #45（执行平面的验证套件）。#45 装上后立刻抓到两个真 bug —— Python 沙箱**从未真正工作过**：worker 缺 `contextlib` 导入（stdout 重定向不生效，`print` 直接污染帧协议），且 `write_frame` 只写长度头、**从不写 JSON 正文**。两者叠加的效果是每一次 `code.run`（Python）都等到超时，之后整个池子降级。

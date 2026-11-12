@@ -82,6 +82,11 @@ const stages = [
   // JavaScript runs on the Stage 9 warm pool: node discovery, the pool's
   // per-session worker semantics, and the missing-LSP degrade path.
   { name: 'Stage 9 · JavaScript (node + warm pool)', script: 'scripts/verify-javascript.ts' },
+  // The pool itself: warm reuse, namespace carry-over, session isolation,
+  // timeouts, reset, the log spine, and the frame protocol both workers speak.
+  // Its absence is how two Python-worker defects lived here unnoticed: a missing
+  // `contextlib` import and a frame writer that never sent the body.
+  { name: 'Stage 9 · execution plane (warm pool)', script: 'scripts/verify-exec.ts' },
   // Stage 10: user-code profiling — Python cProfile hotspots, Go pprof (SKIP
   // when the toolchain is absent), the profiler.* commands and the WS round trip.
   { name: 'Stage 10 · Profiler (Python cProfile + Go pprof)', script: 'scripts/verify-profiler.ts' },
