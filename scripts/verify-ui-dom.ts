@@ -17,8 +17,8 @@
 import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { renderPanelHtml } from '../src/panel/ui.js';
-import { renderPerfHtml } from '../src/panel/perf-ui.js';
+import { renderPanelHtml } from '../src/ui/ui.js';
+import { renderPerfHtml } from '../src/ui/perf-ui.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');

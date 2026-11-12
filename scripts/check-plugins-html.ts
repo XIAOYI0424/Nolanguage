@@ -11,7 +11,7 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/check-plugins-html.ts
  */
-import { renderPluginsHtml } from '../src/panel/plugins-ui.js';
+import { renderPluginsHtml } from '../src/ui/plugins-ui.js';
 
 const html = renderPluginsHtml();
 const checks: Array<[string, boolean, string]> = [];

@@ -18,8 +18,8 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, readdirSync } from 'node:fs';
 import { renderPyCharmHtml, PY_PATTERN } from '../src/panel/pycharm-ui.js';
-import { CLIENT_FRAGMENTS } from '../src/panel/ui/client-assets.js';
-import { pyCharmClientScript } from '../src/panel/ui/pycharm-client.js';
+import { CLIENT_FRAGMENTS } from '../src/ui/client-assets.js';
+import { pyCharmClientScript } from '../src/ui/pycharm-client.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -161,13 +161,13 @@ check('shell: inline script parses', (() => {
   try { new Function(code); return true; } catch { return false; }
 })());
 
-// The client script is assembled from text fragments (`src/panel/ui/client/*.js`).
+// The client script is assembled from text fragments (`src/ui/client/*.js`).
 // The old shape was one 4,200-line template literal, and a single backtick in a
 // comment truncated it twice. Three invariants now hold that line:
 //   - no fragment may contain a backtick (there is no literal left to end),
 //   - only the known seed tokens may interpolate,
 //   - the assembled script must have substituted every one of them.
-const CLIENT_DIR = join(ROOT, 'src', 'panel', 'ui', 'client');
+const CLIENT_DIR = join(ROOT, 'src', 'ui', 'client');
 const fragmentFiles = readdirSync(CLIENT_DIR).filter((f) => f.endsWith('.js')).sort();
 check('client: split into 6-8 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 8, fragmentFiles.join(','));
 check(

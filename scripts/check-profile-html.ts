@@ -11,7 +11,7 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/check-profile-html.ts
  */
-import { renderProfileHtml } from '../src/panel/profile-ui.js';
+import { renderProfileHtml } from '../src/ui/profile-ui.js';
 
 const html = renderProfileHtml(7310);
 const checks: Array<[string, boolean, string]> = [];

@@ -27,10 +27,10 @@ const mainSource = read('src/desktop/main.ts');
 const serverSource = read('src/panel/server.ts');
 // The shell's client code lives in text fragments now (0.7.5 split); read the
 // assembled source, not the thin assembler.
-const clientSource = readdirSync(join(here, '..', 'src', 'panel', 'ui', 'client'))
+const clientSource = readdirSync(join(here, '..', 'src', 'ui', 'client'))
   .filter((f) => f.endsWith('.js'))
   .sort()
-  .map((f) => readFileSync(join(here, '..', 'src', 'panel', 'ui', 'client', f), 'utf8'))
+  .map((f) => readFileSync(join(here, '..', 'src', 'ui', 'client', f), 'utf8'))
   .join('\n');
 
 const OWN: BuildIdentity = { appVersion: '0.7.2-workspace', exeSize: 96_000_000 };

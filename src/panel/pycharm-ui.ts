@@ -11,10 +11,10 @@
  * This file keeps only what is genuinely server-side: the Python token pattern,
  * the sample workspace and the expui icon geometry, plus the string assembly.
  */
-import { PYCHARM_CSS } from './ui/pycharm-css.js';
-import { PYCHARM_SHELL } from './ui/pycharm-shell.js';
-import { pyCharmClientScript } from './ui/pycharm-client.js';
-import { CODEMIRROR_CSS, CODEMIRROR_JS } from './ui/codemirror-assets.js';
+import { PYCHARM_CSS } from '../ui/pycharm-css.js';
+import { PYCHARM_SHELL } from '../ui/pycharm-shell.js';
+import { pyCharmClientScript } from '../ui/pycharm-client.js';
+import { CODEMIRROR_CSS, CODEMIRROR_JS } from '../ui/codemirror-assets.js';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { officialRoots } from '../langs/pluginRoots.js';

@@ -1,8 +1,8 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.17 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.18 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
-这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`156 files · 444 imports · 18/18`，**零个已声明环**。
+这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 451 imports · 18/18`，**零个已声明环**。
 
 ---
 
@@ -289,9 +289,32 @@ C6 的第一版是错的：它扫描整个文件，于是**注释里**提到的�
 
 顺带收紧了连接生命周期：`takeConnection(conn)` **删除并返回**状态，关闭回调不再需要"读一次、删一次"两步——原来如果 `st` 为空就漏删，现在不可能。
 
-## 十、还没做的
+## 十、按页切（0.7.18）：`ui` 成为独立切片，例外清零
 
-1. **`panel` 仍是 27 个文件** —— 超过 25 的预算，例外还在。它是一页一个 UI 加服务端，切法应该是"按页"，不是按行。
-2. **`WorkspaceService.ts` 1229 行** —— **超预算**，靠例外活着。它是"语言、LSP、缓冲区、注册表镜像"四件事捏在一个对象里；拆它是设计改动，不是搬文件。
-3. **阶段 11 归因引擎**（CUSUM + Welch t + Cohen's d + 二分）—— `handlers/attribution.ts` 已有骨架。
-4. **IDE Markdown 预览窗格 / outline（#40）**、**`verify-exec.ts`（#45）**。
+`panel` 一直是 27 个文件，超 25 的预算，靠一条切片例外活着。0.7.18 把它按**职责**切开：
+
+| 留下 | 搬走 | 为什么 |
+|---|---|---|
+| `server.ts`（路由）、`WorkspaceService.ts`（状态）、`PanelHub`、`FsService`、`Transport`、`flame`、`coverage`、`git`、`samples`、`traffic`、`conn-state`、`demo-commands`、`pythonTraffic`、`pycharm-ui` + `handlers/` | 五个页面 shell（`ui` / `perf-ui` / `extensions-ui` / `plugins-ui` / `profile-ui`）、`assets/`（浏览器端 JS）、`ui/`（PyCharm 的 CSS/壳/客户端分片与 CodeMirror 资产）、`raw.d.ts` | 页面是**纯字符串渲染**：只依赖 `vendor`，不依赖服务器状态 |
+
+`panel` 27 → 21，`ui` 12。**`budgetExceptions` 现在是空对象。**
+
+`pycharm-ui.ts` **故意留在 `panel`**：它要读插件根目录（`langs/pluginRoots`）才能把官方插件清单嵌进外壳，是带文件系统的外壳，不是纯页面。第一版把它一起搬进 `ui`，契约立刻报 `ui(1) -> langs(7)`——那条边说明它站错了地方。
+
+`WorkspaceService.ts` 1229 → 1049 行。切法不是搬函数，是**把投影从状态里分出来**：
+
+- 类的职责是**持有** slot、LSP 客户端、活动运行。
+- 把 slot 变成状态栏和插件页消费的 JSON，是那个状态的**投影**。
+- 投影搬到 `workspace-wire.ts`，接收一个声明的 `WorkspaceView`（`slots` / `order` / `registry` / `resourceSummary`），类只留四个一行的委托。
+
+形状必须跟着函数一起搬：把它们留在 `WorkspaceService.ts` 再 import 回来，两个文件就互相 import 了，R2 会拒。所以 `Slot`、`LanguageStatus`、`LanguageDescriptorWire` 都在 `workspace-wire.ts` 里，`WorkspaceService` 再 re-export 给老的 importer。
+
+**教训**：这次搬完立刻有两个套件崩了，都不是"测试太脆"，是真的坏了——
+- `codemirror-assets.ts` 的相对路径深度差一级（`../../vendor` → `../vendor`），于是 `server → pycharm-ui → codemirror-assets` 整条链在 import 期就死了，`verify-ide` 报的是"server did not start"。
+- `verify-pycharm` 里有一处**硬编码** `src/panel/ui/client`，它不在 import 图里，所以 tsc 看不见。
+
+## 十一、还没做的
+
+1. **`budgetExceptions` 是空的** —— 没有文件或切片超预算。**这是第一次**：以后再有文件变胖，只能真的拆，不能记账。
+2. **插件市场远程安装 + `trust.signature` 验签**。
+3. **IDE Markdown 预览窗格 / outline（#40）**、**`verify-exec.ts`（#45）**。

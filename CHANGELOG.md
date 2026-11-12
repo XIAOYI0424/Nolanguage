@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.18 — 2026-11-12
+
+### 账本里的例外清零
+
+`architecture.json` 的 `budgetExceptions` 现在是 **`{}`**。没有文件超过 1200 行，没有切片超过 25 个文件——这是第一次。
+
+**`panel` 27 → 21 文件，新切片 `ui`（12 个文件）。** 切法是按职责，不是按行：五个页面 shell、`assets/`（浏览器端 JS）、`ui/`（PyCharm 的 CSS/壳/客户端分片、CodeMirror 资产）、`raw.d.ts` 一起搬走。它们只依赖 `vendor`——页面是纯字符串渲染，不依赖服务器状态。
+
+`pycharm-ui.ts` **故意留在 `panel`**：它要读插件根目录才能把官方插件清单嵌进外壳。第一版把它一起搬进 `ui`，契约立刻报 `ui(1) -> langs(7)`——那条边说明它站错了地方。
+
+**`WorkspaceService.ts` 1229 → 1049 行。** 切法不是搬函数，是把**投影**从状态里分出来：
+
+- 类的职责是**持有** slot、LSP 客户端、活动运行；
+- 把 slot 变成状态栏和插件页消费的 JSON，是那个状态的**投影**；
+- 投影搬到 `workspace-wire.ts`，接收声明的 `WorkspaceView`（`slots` / `order` / `registry` / `resourceSummary`），类只留四个一行的委托。
+
+形状必须跟着函数走：留在原文件再 import 回来，两个文件就互相 import，R2 会拒。所以 `Slot`、`LanguageStatus`、`LanguageDescriptorWire` 都搬过去，`WorkspaceService` re-export 给老 importer。
+
+### 搬完立刻崩了两个套件，都不是测试太脆
+
+- `codemirror-assets.ts` 的相对路径差一级（`../../vendor` → `../vendor`）。于是 `server → pycharm-ui → codemirror-assets` 整条链在 import 期就死了，`verify-ide` 报的却是 "server did not start"。
+- `verify-pycharm` 里有一处**硬编码** `src/panel/ui/client`。它不在 import 图里，**tsc 看不见**，只有跑套件才知道。
+
+第二条是这轮最值得记的：**类型检查覆盖 import 图，覆盖不了字符串里的路径。**
+
+### 顺带
+
+- 文档门禁抓到了两份 live 文档里的旧路径（`语言插件化设计.md`、`docs/添加新语言指南.md`）——这正是它存在的理由。
+
+### 验证
+
+- `verify-arch`：18/18 · `157 files · 451 imports` · 零环 · **零例外**
+- `verify-all`：46 套件（含 CI 快门）
+- `tsc`：0（src + scripts）
+
 ## 0.7.17 — 2026-11-12
 
 ### 第一次真正跑 CI：它失败了

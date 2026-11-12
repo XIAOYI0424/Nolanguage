@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { renderPerfHtml } from '../src/panel/perf-ui.js';
+import { renderPerfHtml } from '../src/ui/perf-ui.js';
 
 const here = join(fileURLToPath(import.meta.url), '..');
 

@@ -9,26 +9,26 @@
  * Import order is the load order: core → modes (xml before markdown/htmlmixed,
  * which resolve it at mode-creation time) → addons → show-hint.
  */
-import cmJs from '../../vendor/codemirror/codemirror.js?raw';
-import cmCss from '../../vendor/codemirror/codemirror.css?raw';
+import cmJs from '../vendor/codemirror/codemirror.js?raw';
+import cmCss from '../vendor/codemirror/codemirror.css?raw';
 
-import modeXml from '../../vendor/codemirror/mode/xml/xml.js?raw';
-import modePython from '../../vendor/codemirror/mode/python/python.js?raw';
-import modeGo from '../../vendor/codemirror/mode/go/go.js?raw';
-import modeJs from '../../vendor/codemirror/mode/javascript/javascript.js?raw';
-import modeMarkdown from '../../vendor/codemirror/mode/markdown/markdown.js?raw';
-import modeCss from '../../vendor/codemirror/mode/css/css.js?raw';
-import modeYaml from '../../vendor/codemirror/mode/yaml/yaml.js?raw';
-import modeSql from '../../vendor/codemirror/mode/sql/sql.js?raw';
-import modeShell from '../../vendor/codemirror/mode/shell/shell.js?raw';
-import modeToml from '../../vendor/codemirror/mode/toml/toml.js?raw';
-import modeHtmlMixed from '../../vendor/codemirror/mode/htmlmixed/htmlmixed.js?raw';
+import modeXml from '../vendor/codemirror/mode/xml/xml.js?raw';
+import modePython from '../vendor/codemirror/mode/python/python.js?raw';
+import modeGo from '../vendor/codemirror/mode/go/go.js?raw';
+import modeJs from '../vendor/codemirror/mode/javascript/javascript.js?raw';
+import modeMarkdown from '../vendor/codemirror/mode/markdown/markdown.js?raw';
+import modeCss from '../vendor/codemirror/mode/css/css.js?raw';
+import modeYaml from '../vendor/codemirror/mode/yaml/yaml.js?raw';
+import modeSql from '../vendor/codemirror/mode/sql/sql.js?raw';
+import modeShell from '../vendor/codemirror/mode/shell/shell.js?raw';
+import modeToml from '../vendor/codemirror/mode/toml/toml.js?raw';
+import modeHtmlMixed from '../vendor/codemirror/mode/htmlmixed/htmlmixed.js?raw';
 
-import addonMatchBrackets from '../../vendor/codemirror/addon/edit/matchbrackets.js?raw';
-import addonCloseBrackets from '../../vendor/codemirror/addon/edit/closebrackets.js?raw';
-import addonActiveLine from '../../vendor/codemirror/addon/selection/active-line.js?raw';
-import addonShowHintJs from '../../vendor/codemirror/addon/hint/show-hint.js?raw';
-import addonShowHintCss from '../../vendor/codemirror/addon/hint/show-hint.css?raw';
+import addonMatchBrackets from '../vendor/codemirror/addon/edit/matchbrackets.js?raw';
+import addonCloseBrackets from '../vendor/codemirror/addon/edit/closebrackets.js?raw';
+import addonActiveLine from '../vendor/codemirror/addon/selection/active-line.js?raw';
+import addonShowHintJs from '../vendor/codemirror/addon/hint/show-hint.js?raw';
+import addonShowHintCss from '../vendor/codemirror/addon/hint/show-hint.css?raw';
 
 /**
  * Theme bridge: CodeMirror ships a light theme, the shell is variable-driven

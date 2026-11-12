@@ -86,7 +86,7 @@ export type {
 } from './panel/PanelHub.js';
 export { WebSocketServer, WebSocketConnection } from './net/websocket.js';
 export type { WsServerOptions } from './net/websocket.js';
-export { renderPanelHtml } from './panel/ui.js';
+export { renderPanelHtml } from './ui/ui.js';
 export { startDemo, startTraffic } from './panel/demo-commands.js';
 
 // ---------------- Stage 3 · LSP ----------------

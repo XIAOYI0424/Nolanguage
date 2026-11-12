@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { renderPanelHtml } from '../src/panel/ui.js';
+import { renderPanelHtml } from '../src/ui/ui.js';
 
 const here = join(fileURLToPath(import.meta.url), '..');
 
