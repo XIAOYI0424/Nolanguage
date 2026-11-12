@@ -75,6 +75,12 @@ const live = new Set(LIVE);
 const dated = new Set(DATED);
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
+
+// Only files that exist can be read, but a *listed* file that is missing is a
+// failure, not a skip: otherwise deleting a live doc silences every check that
+// would have run against it. That is the same silent-skip trap this gate exists
+// to close, so it is closed here first.
+const absent = [...live, ...dated].filter((f) => !existsSync(join(ROOT, f)));
 const textOf = new Map([...live, ...dated].filter((f) => existsSync(join(ROOT, f))).map((f) => [f, read(f)]));
 
 // --------------------------------------------------------------- D1 coverage
@@ -91,6 +97,14 @@ const textOf = new Map([...live, ...dated].filter((f) => existsSync(join(ROOT, f
     'docs: every markdown file is classified as live or dated',
     unclassified.length === 0,
     unclassified.length ? `${unclassified.join(', ')} — add it to LIVE or DATED in scripts/verify-docs.ts` : `${live.size} live · ${dated.size} dated`,
+  );
+}
+
+{
+  check(
+    'docs: every classified document exists',
+    absent.length === 0,
+    absent.length ? `${absent.join(', ')} — listed in scripts/verify-docs.ts but not on disk` : `${live.size + dated.size} files`,
   );
 }
 
