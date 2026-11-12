@@ -59,6 +59,10 @@ const stages = [
   { name: 'Arch · contract', script: 'scripts/verify-architecture.ts', pure: true },
   // scripts/ was never in tsconfig's include; this ratchets the remainder down.
   { name: 'Arch · types in scripts', script: 'scripts/verify-types.ts' },
+  // Documents are claims about the code. Runs after `Arch · contract` because it
+  // reads the summary that suite writes; if the order ever changes, this suite
+  // fails loudly rather than passing on a missing file.
+  { name: 'Docs · claims match the code', script: 'scripts/verify-docs.ts', pure: true },
   { name: 'Perf · kernel analysis UI self-containment', script: 'scripts/check-perf-html.ts', pure: true },
   // Phase 3: the Plugins page — self-containment, theming, emoji rules, and the
   // promise that every message it sends is one the server answers.

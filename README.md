@@ -46,7 +46,7 @@ Python 语言插件已随包内置（`builtin/python@1.0.0`），装完即可新
 
 ### 语言插件命令
 
-两个入口，同一实现（`src/cli/lang.ts`）：安装即校验、迁移先于覆盖、`data/<id>/` 不被复制覆盖。
+两个入口，同一实现（`src/commands/lang.ts`）：安装即校验、迁移先于覆盖、`data/<id>/` 不被复制覆盖。
 
 ```bash
 Nolanguage.exe lang ls              # 安装包里直接可用：exe 是 Node SEA，自带运行时
@@ -132,7 +132,7 @@ Nolanguage.exe --dump-plugins
 ## 验证
 
 ```bash
-npm run verify           # 29 套件 / 1360 条断言（真进程，含打包 exe smoke）
+npm run verify           # 45 套件（真进程，含打包 exe smoke）；断言总数以本次输出为准
 npm test                 # vitest 单测（9 用例）
 npm run typecheck        # tsc --noEmit，0 错误
 npm run verify:sidecar   # 校验 dist 与 Tauri sidecar 的 sha256 一致

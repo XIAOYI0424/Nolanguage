@@ -45,7 +45,7 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-architecture.ts
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -398,7 +398,24 @@ function nodeBuiltinsOf(text: string): string[] {
 // ------------------------------------------------------------------ verdict
 
 const passed = results.filter((r) => r.ok).length;
-console.log(`\n${passed}/${results.length} checks passed · ${files.length} files · ${[...edges.values()].reduce((a, s) => a + s.size, 0)} imports`);
+const importCount = [...edges.values()].reduce((a, s) => a + s.size, 0);
+console.log(`\n${passed}/${results.length} checks passed · ${files.length} files · ${importCount} imports`);
+
+// A machine-readable copy, for the doc gate (`verify-docs`). Documents quote
+// these three numbers; without a single source they drift the moment anything
+// moves, and a stale number in a doc is indistinguishable from a fresh one.
+// Written even on failure — the gate that reads it reports the failure itself.
+try {
+  mkdirSync(join(ROOT, '.tmp'), { recursive: true });
+  writeFileSync(
+    join(ROOT, '.tmp', 'arch-summary.json'),
+    JSON.stringify({ files: files.length, imports: importCount, checks: passed, total: results.length }, null, 2) + '\n',
+    'utf8',
+  );
+} catch {
+  /* a doc gate that cannot read this will say so; the contract itself still ran */
+}
+
 if (passed !== results.length) {
   for (const r of results) if (!r.ok) console.log(`  FAILED: ${r.name} ${r.detail}`);
   process.exitCode = 1;
