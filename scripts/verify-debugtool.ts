@@ -421,27 +421,21 @@ async function runProbe(pythonBin: string): Promise<Collected | null> {
   });
 
   await new Promise<void>((resolve) => {
-    // Collect until there are enough samples for the fold check to be
-    // meaningful, with a hard ceiling. A fixed wall-clock wait was flaky: on a
-    // slow CI runner the first seconds go to Python startup, so a 6s window
-    // produced 4 stack events instead of the 5+ the checks assume. Polling
-    // resolves as soon as the data is there and stays fast locally.
-    const TARGET_STACKS = 10;
-    const deadline = Date.now() + 12_000;
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      clearInterval(poll);
-      resolve();
-    };
-    const poll = setInterval(() => {
-      if (collected.stacks.length >= TARGET_STACKS || Date.now() >= deadline) finish();
-    }, 50);
-    poll.unref?.();
+    // Wait for the sample app to finish on its own, with a generous ceiling.
+    // Two things must both be captured, and they are produced at opposite ends
+    // of the run: the stack samples during it, and the program's own `total …`
+    // line at the end. An earlier fix polled for stack count and resolved
+    // early — that killed the child before it printed, so the runner failed
+    // 'the program still printed its own output'. Waiting for close gives both;
+    // the ceiling only exists for a hung interpreter. A slow CI runner spends
+    // several seconds on Python startup before the first sample, which is why
+    // 6s was too tight and produced 4 stacks where the checks need 5+.
+    const deadline = setTimeout(resolve, 20_000);
+    deadline.unref?.();
     child.on('close', () => {
+      clearTimeout(deadline);
       // Give the socket a tick to flush the last lines.
-      setTimeout(finish, 150);
+      setTimeout(resolve, 150);
     });
   });
   if (!child.killed && child.exitCode === null) child.kill();
