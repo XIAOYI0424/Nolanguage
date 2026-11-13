@@ -18,10 +18,19 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { clearEmbeddedSignature, hasEmbeddedSignature, readSignaturePresence, verifySignature } from '../src/cli/signature.js';
 
-const results: Array<{ name: string; ok: boolean; detail: string }> = [];
+const results: Array<{ name: string; ok: boolean; detail: string; skipped?: boolean }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+}
+/**
+ * A check that could not be answered on this host. Counted as passing (it is
+ * not a regression), but printed as SKIP so nobody mistakes "cannot tell" for
+ * "verified". Same convention as verify-exec / verify-plugins.
+ */
+function skip(name: string, detail = ''): void {
+  results.push({ name, ok: true, detail, skipped: true });
+  console.log(`SKIP  ${name}${detail ? '  — ' + detail : ''}`);
 }
 
 const here = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
@@ -136,7 +145,18 @@ const systemExe = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whe
 if (existsSync(systemExe)) {
   check('catalog: a system exe has no embedded certificate table', readSignaturePresence(systemExe) === false);
   const cat = await verifySignature(systemExe, { catalog: true });
-  check('catalog: Windows still validates it', cat.status === 'Valid', `${cat.status} embedded=${cat.embedded}`);
+  // `Get-AuthenticodeSignature` only reports Valid when it can reach the
+  // catalog store. A fresh CI runner (or a locked-down host) answers
+  // `UnknownError` — "cannot verify", not "signature broken". Treat that as a
+  // SKIP so the suite stays honest on any machine, while `NotSigned` /
+  // `HashMismatch` still fail: those are real regressions.
+  if (cat.status === 'Valid') {
+    check('catalog: Windows still validates it', true, `embedded=${cat.embedded}`);
+  } else if (cat.status === 'UnknownError' || cat.status === 'unknown') {
+    skip('catalog: Windows still validates it', `${cat.status} — catalog store not reachable on this host`);
+  } else {
+    check('catalog: Windows still validates it', false, `${cat.status} embedded=${cat.embedded}`);
+  }
 }
 
 // ---------------------------------------------------------------- round trip
@@ -170,5 +190,6 @@ if (process.env.NOLANGUAGE_SIGN_TEST === '1' && process.platform === 'win32' && 
 }
 
 const passed = results.filter((r) => r.ok).length;
-console.log(`\n${passed}/${results.length} checks passed`);
+const skipped = results.filter((r) => r.skipped).length;
+console.log(`\n${passed}/${results.length} checks passed` + (skipped ? ` (${skipped} skipped)` : ''));
 if (passed !== results.length) process.exitCode = 1;
