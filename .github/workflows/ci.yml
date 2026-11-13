@@ -106,6 +106,14 @@ jobs:
 
       # Gate — the artifact users actually run: build the NSIS installer,
       # install it silently, start the app, and probe /health.
+      #
+      # `ci:nsis` first: a fresh runner has no makensis, and the Tauri step that
+      # would download one runs later (and is allowed to fail). The script is a
+      # no-op on a machine that already has NSIS, so it costs a developer
+      # nothing and is the only reason the installer step works on CI.
+      - name: Ensure NSIS
+        run: npm run ci:nsis
+
       - name: Build installer
         run: npm run build:setup
 

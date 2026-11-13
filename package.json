@@ -26,6 +26,7 @@
     "build:exe": "node scripts/build-exe.mjs",
     "postbuild:exe": "node scripts/sync-sidecar.mjs",
     "build:setup": "node installer/build-setup.mjs",
+    "ci:nsis": "node scripts/ensure-nsis.mjs",
     "build:frontend": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/build-frontend.mjs",
     "sync:sidecar": "node scripts/sync-sidecar.mjs",
     "verify:sidecar": "node scripts/sync-sidecar.mjs --check",

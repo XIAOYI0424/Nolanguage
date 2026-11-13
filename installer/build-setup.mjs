@@ -29,6 +29,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { findMakensis } from '../scripts/lib/nsis.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // `NOLANGUAGE_APP_EXE` lets `installer\build-nsis.bat <exe>` package another build.
@@ -44,23 +45,6 @@ const fail = (m) => {
   process.exit(1);
 };
 
-/** First existing `makensis.exe` among the known locations, or undefined. */
-function findMakensis() {
-  const local = process.env.LOCALAPPDATA ?? '';
-  const candidates = [
-    process.env.NSIS_MAKENSIS,
-    local && join(local, 'tauri', 'NSIS', 'makensis.exe'),
-    'C:\\Program Files (x86)\\NSIS\\makensis.exe',
-    'C:\\Program Files\\NSIS\\makensis.exe',
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  const which = spawnSync('where', ['makensis'], { encoding: 'utf8', windowsHide: true });
-  const found = (which.stdout ?? '').split(/\r?\n/).find((line) => line.trim().length > 0);
-  return found ? found.trim() : undefined;
-}
-
 if (!existsSync(APP_EXE)) {
   log('dist/Nolanguage.exe missing — building it first');
   execFileSync(process.execPath, [join(ROOT, 'scripts', 'build-exe.mjs')], {
@@ -73,8 +57,9 @@ if (!existsSync(APP_EXE)) fail(`still missing: ${APP_EXE}`);
 const makensis = findMakensis();
 if (!makensis) {
   fail(
-    'makensis not found. Install NSIS (https://nsis.sourceforge.io) or run ' +
-      '`npx tauri build` once (the Tauri CLI downloads it), or set NSIS_MAKENSIS.',
+    'makensis not found. Run `npm run ci:nsis` to install it, or install NSIS ' +
+      '(https://nsis.sourceforge.io), or run `npx tauri build` once (the Tauri ' +
+      'CLI downloads it), or set NSIS_MAKENSIS.',
   );
 }
 
