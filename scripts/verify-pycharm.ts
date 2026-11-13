@@ -983,6 +983,10 @@ async function testLanguageSwitch(): Promise<void> {
   await settle(w);
   check('lang: the override survives a document round-trip', stLang() === 'Python · manual', stLang());
 
+  // The earlier diagnostic probe replaced the buffer with Python-like text;
+  // restore a JavaScript snippet before verifying that Auto re-tokenises by file type.
+  q(w, '#ta').value = 'const restored = 1;\n';
+  fire(w, q(w, '#ta'), 'input', {});
   // ---- reversible ----
   await pick('');
   check('lang: the Auto row goes back to the file type', stLang() === 'JavaScript', stLang());
@@ -1747,6 +1751,128 @@ console.log('');
   await settle(restored.window, 10);
   check('preview: saved split width is restored', restored.window.document.getElementById('mdprev').style.getPropertyValue('--mdprev-basis') === '52%', restored.window.document.getElementById('mdprev').style.getPropertyValue('--mdprev-basis'));
   restored.window.close();
+  w.close();
+}
+
+// ---------------------------------------------- tab lifecycle / data safety
+console.log('');
+{
+  const mounted = mountPage(renderPyCharmHtml(7310));
+  const w = mounted.window as any;
+  const socket = needSocket(mounted);
+  await settle(w, 25);
+  const doc = w.document;
+  const ta = doc.getElementById('ta') as any;
+  const tab = (name: string) => doc.querySelector('.etab[data-tab="' + name + '"]');
+  const marker = '# unsaved-switch-roundtrip';
+
+  (tab('README.md') as any).click();
+  await settle(w, 10);
+  ta.value += '\n' + marker;
+  fire(w, ta, 'input', {});
+  (tab('main.py') as any).click();
+  await settle(w, 10);
+  (tab('README.md') as any).click();
+  await settle(w, 10);
+  check('tabs: unsaved edits survive switching away and back', String(ta.value).includes(marker), String(ta.value).slice(-36));
+  check('tabs: the edited buffer keeps its dirty marker', !!tab('README.md')?.querySelector('.dirty'));
+
+  const ctrlF4 = () => doc.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'F4', ctrlKey: true }));
+  const dialogButtons = () => Array.from(doc.querySelectorAll('#dlgRoot .dlg-btn')) as any[];
+  ctrlF4();
+  check('tabs: Ctrl+F4 prompts before closing a dirty file', (doc.querySelector('#dlgRoot .dlg-title')?.textContent || '').includes('Unsaved Changes'));
+  dialogButtons().find((b) => b.textContent === 'Cancel')?.click();
+  check('tabs: cancelling close preserves the dirty tab', !!tab('README.md') && !!tab('README.md')?.querySelector('.dirty'));
+
+  ctrlF4();
+  dialogButtons().find((b) => b.textContent === 'Save')?.click();
+  const save = socket.lastSentOf('fsWrite');
+  check('tabs: Save sends the active buffer and request id', !!save && save.path === 'README.md' && String(save.content).includes(marker) && typeof save.reqId === 'number', JSON.stringify(save && { path: save.path, reqId: save.reqId }));
+  check('tabs: Save keeps the tab open until disk acknowledges', !!tab('README.md'));
+  socket.deliver({ kind: 'fsSaved', path: 'README.md', reqId: save?.reqId, mtime: 1, size: String(save?.content || '').length });
+  await settle(w, 10);
+  check('tabs: acknowledged Save closes the tab', !tab('README.md'));
+
+  // If the user edits during a write, the earlier acknowledgement must not close
+  // the tab or mark newer content clean; the next Save queues behind the first.
+  check('tabs: a closed file can be reopened from recent files', openViaFile(w, 'README.md'));
+  await settle(w, 10);
+  ta.value += '\n# first-write';
+  fire(w, ta, 'input', {});
+  ctrlF4();
+  dialogButtons().find((b) => b.textContent === 'Save')?.click();
+  const firstWrite = socket.lastSentOf('fsWrite') as any;
+  ta.value += '\n# newer-write';
+  fire(w, ta, 'input', {});
+  doc.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 's', ctrlKey: true }));
+  check('tabs: a second save queues while the first write is in flight', socket.sent.filter((m) => m.kind === 'fsWrite').length === 2, String(socket.sent.filter((m) => m.kind === 'fsWrite').length));
+  socket.deliver({ kind: 'fsSaved', path: 'README.md', reqId: firstWrite.reqId, mtime: 2, size: String(firstWrite.content).length });
+  await settle(w, 10);
+  const secondWrite = socket.lastSentOf('fsWrite') as any;
+  check('tabs: an earlier save ACK keeps newer edits open', !!tab('README.md') && !!tab('README.md')?.querySelector('.dirty'), String(secondWrite?.reqId));
+  check('tabs: the queued write contains the newest buffer', secondWrite?.reqId !== firstWrite.reqId && String(secondWrite?.content).includes('# newer-write'), String(secondWrite?.content).slice(-35));
+  socket.deliver({ kind: 'fsSaved', path: 'README.md', reqId: secondWrite.reqId, mtime: 3, size: String(secondWrite.content).length });
+  await settle(w, 10);
+  check('tabs: the newest save ACK finally closes the tab', !tab('README.md'));
+
+  (tab('utils.py') as any).click();
+  await settle(w, 10);
+  ta.value += '\n# discard-test';
+  fire(w, ta, 'input', {});
+  const closeButton = tab('utils.py')?.querySelector('[data-close]') as any;
+  closeButton.click();
+  dialogButtons().find((b) => b.textContent === "Don't Save")?.click();
+  check('tabs: explicit Don\'t Save discards and closes', !tab('utils.py'));
+
+  // A failed write must never silently close or clean the buffer.
+  (tab('main.py') as any).click();
+  await settle(w, 10);
+  ta.value += '\n# write-failure-test';
+  fire(w, ta, 'input', {});
+  ctrlF4();
+  dialogButtons().find((b) => b.textContent === 'Save')?.click();
+  const failedSave = socket.lastSentOf('fsWrite');
+  socket.deliver({ kind: 'fsError', path: 'main.py', reqId: failedSave?.reqId, code: 'denied', message: 'write denied' });
+  await settle(w, 10);
+  check('tabs: a failed Save leaves the dirty file open', !!tab('main.py') && !!tab('main.py')?.querySelector('.dirty'));
+  check('tabs: a failed Save explains the write error', (doc.querySelector('#dlgRoot .dlg-title')?.textContent || '').includes('Save failed'));
+  w.close();
+}
+
+// Closing a group of dirty tabs should produce one Save All decision, not a
+// stack of dialogs that replaces itself while iterating over the tabs.
+console.log('');
+{
+  const mounted = mountPage(renderPyCharmHtml(7310));
+  const w = mounted.window as any;
+  const socket = needSocket(mounted);
+  await settle(w, 20);
+  const doc = w.document;
+  const ta = doc.getElementById('ta') as any;
+  const tab = (name: string) => doc.querySelector('.etab[data-tab="' + name + '"]');
+
+  (tab('main.py') as any).click();
+  ta.value += '\n# save-all-main';
+  fire(w, ta, 'input', {});
+  (tab('utils.py') as any).click();
+  ta.value += '\n# save-all-utils';
+  fire(w, ta, 'input', {});
+  doc.getElementById('etabs')?.dispatchEvent(new w.MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+  Array.from(doc.querySelectorAll('#ctxMenu .citem') as ArrayLike<any>)
+    .find((n: any) => (n.textContent || '').includes('Close All'))?.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('tabs: Close All presents one Save All decision', (doc.querySelector('#dlgRoot .dlg-title')?.textContent || '').includes('Unsaved Changes'));
+  Array.from(doc.querySelectorAll('#dlgRoot .dlg-btn') as ArrayLike<any>)
+    .find((b: any) => b.textContent === 'Save All')?.click();
+  const writes = socket.sent.filter((m) => m.kind === 'fsWrite');
+  check('tabs: Save All writes each dirty buffer', writes.length === 2 && writes.some((m: any) => m.path === 'main.py') && writes.some((m: any) => m.path === 'utils.py'), JSON.stringify(writes.map((m: any) => m.path)));
+  check('tabs: Save All waits for disk acknowledgement', !!tab('main.py') && !!tab('utils.py'));
+  const first = writes[0] as any, second = writes[1] as any;
+  socket.deliver({ kind: 'fsSaved', path: first.path, reqId: first.reqId, mtime: 1, size: String(first.content).length });
+  await settle(w, 5);
+  check('tabs: one Save All acknowledgement does not close the group early', !!tab('main.py') && !!tab('utils.py'));
+  socket.deliver({ kind: 'fsSaved', path: second.path, reqId: second.reqId, mtime: 2, size: String(second.content).length });
+  await settle(w, 10);
+  check('tabs: Save All closes tabs only after every write succeeds', !tab('main.py') && !tab('utils.py') && !tab('README.md'));
   w.close();
 }
 

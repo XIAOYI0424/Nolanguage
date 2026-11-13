@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.22 — 2026-11-13
+
+### PyCharm 式的安全标签操作与无缝切换
+
+原先输入后切到另一标签，内存 buffer 只标记 dirty，却没有同步编辑器里的新文本；切回来可能看到旧内容。更危险的是点标签 × 或 `Close All` 会直接删掉 dirty buffer。现在：
+
+- 输入即时更新所属 buffer，标签切走再回来保留最后文本与 dirty 标记；
+- `Ctrl+F4` 和 File → Close Tab 都关闭当前标签，与 PyCharm / JetBrains 常见操作一致；
+- 关闭未保存标签时显示 **Save / Don't Save / Cancel**，不再无确认地丢编辑内容；
+- Save 后等对应 `fsSaved` 确认才关 tab；保存失败会说明原因并保持文件打开；请求带 reqId，避免旧回执清掉新编辑；
+- 同一路径并发保存串行，期间再次点 Save 会排队最新文本；如果保存过程中又有新编辑，不会误关标签；
+- Close All 只有一个确认框，Save All 等全部 dirty 文件写成功后才一起关闭；任一失败保留所有标签。
+
+新增完整 jsdom 交互回归：跨标签编辑保留、Cancel、Save 确认、保存失败、显式丢弃、连点 Save 排队最新文本、Close All 多文件确认和逐项 ACK。`verify-pycharm` **284 → 304 条**。
+
+### GitHub runner 验证状态
+
+本轮工作区仍没有 Git remote，且没有 GitHub CLI / runner 环境；不能实际触发远端 workflow。`ci:install-smoke` 已在本机新版安装包上通过，不代表 GitHub runner 已通过。
+
+### 验证
+
+- `verify-pycharm`：**304/304**
+- `verify-all`：**2116/2116 · 47 suites**
+- `npm test`：**38/38 · 2 files**
+- `ci:pure`：403/403 · 15 suites
+- `verify-exec`：**38/38**
+- `verify-arch`：18/18 · 157 files · 451 imports
+- `tsc`：src + scripts 均 0
+
 ## 0.7.21 — 2026-11-13
 
 ### Markdown 预览窗格可调整大小

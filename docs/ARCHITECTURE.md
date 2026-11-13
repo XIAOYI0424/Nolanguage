@@ -1,6 +1,6 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.21 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.22 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
 这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 451 imports · 18/18`，**零个已声明环**。
 
@@ -331,6 +331,14 @@ active session 的语言归属也被检查：已分配给 Python 的 session id 
 预览宽度不再写死为 42%。`.mdsplit` 是 `.codewrap` 与 `.mdprev` 之间的可访问 separator：拖动实时改百分比（24%–64%），方向键微调、Home/End 到边界、双击恢复默认；比例保存到已有 IDE `PREFS`。可视焦点、hover 和拖动状态都使用主题 token；预览关闭时分隔条隐藏，避免留下空隙。回归检查覆盖键盘、拖动、ARIA 当前值和重载恢复。
 
 GitHub runner 的 `ci:install-smoke` 仍待远端验证：当前 checkout 未配置 Git remote，且没有可用 GitHub CLI；没有触发远端工作流。
+
+### 标签页的数据安全（0.7.22）
+
+编辑器 textarea 是当前活动 buffer 的显示面；`BUFFERS[path].content` 必须在每次输入时同步，而不应只在保存后同步。切换文件前后保留 buffer 内容，`dirty` 标记与当前标签一致。
+
+关闭 dirty buffer 时通过 `confirmDialog` 提供 Save / Don't Save / Cancel。保存请求携带 `reqId`；按 path 一次只发一个写入，Save 连点时仅排队最新内容。只有内容对应的 `fsSaved` 回执到达、且 buffer 没有更新版本时才清除 dirty。失败回执不得清空 dirty 或关闭标签。`Close All` 汇总为单个确认；Save All 要等所有目标文件成功后再关组，避免逐文件弹窗互相覆盖。
+
+`verify-pycharm` 覆盖切换保留、取消、保存 ACK、写入失败、显式丢弃、重复保存排队最新内容、多文件批量保存（284 → 304 条）。`Ctrl+F4` 与 File → Close Tab 共用相同的安全关闭路径。
 
 ### 顺带修复：Vitest 的 38 个单测曾经一个也没注册
 

@@ -33,6 +33,7 @@
       { label: 'Open Folder...', act: openNativeFolder },
       { label: 'Save', sc: 'Ctrl+S', act: saveFile },
       { label: 'Save As...', sc: 'Ctrl+Shift+S', act: saveAsNative },
+      { label: 'Close Tab', sc: 'Ctrl+F4', act: function () { if (currentFile) closeTab(currentFile); } },
       { sep: true },
       { label: 'Import PyCharm Run Configurations...', act: importIdeaConfigs },
       { label: 'Open Recent', act: openRecent }

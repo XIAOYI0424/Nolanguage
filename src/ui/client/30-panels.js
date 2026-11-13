@@ -1,5 +1,22 @@
   // ---------- tab context menu ----------
-  function closeAllTabs() { TABS.slice().forEach(function (p) { closeTab(p); }); }
+  function closeAllTabs() {
+    var tabs = TABS.slice();
+    var dirty = tabs.filter(bufferDirty);
+    if (!dirty.length) { tabs.forEach(function (p) { closeTab(p, true); }); return; }
+    confirmDialog({
+      title: 'Unsaved Changes', icon: 'warn',
+      message: 'Save changes to ' + dirty.length + ' file' + (dirty.length === 1 ? '' : 's') + ' before closing all tabs?',
+      buttons: [
+        { label: 'Cancel', onClick: function () {} },
+        { label: "Don't Save All", danger: true, onClick: function () { tabs.forEach(function (p) { closeTab(p, true); }); } },
+        { label: 'Save All', primary: true, onClick: function () {
+          CLOSE_ALL_BATCH = { tabs: tabs, dirty: dirty };
+          dirty.forEach(function (p) { CLOSE_AFTER_SAVE[p] = true; saveBuffer(p); });
+          finishCloseAllBatch();
+        } }
+      ]
+    });
+  }
   function tabMenu(name) {
     if (!name) return [{ label: 'Close All', act: closeAllTabs }];
     return [
@@ -320,6 +337,12 @@
   // BUFFERS maps a file's rel-path -> { content, languageId, editable, dirty, mtime }.
   // Editing happens in memory; saveFile flushes the active buffer to disk via fsWrite.
   var BUFFERS = {};
+  var PENDING_SAVES = Object.create(null); // reqId -> { path, content }
+  var SAVE_IN_FLIGHT = Object.create(null); // path -> reqId
+  var SAVE_QUEUED = Object.create(null); // path -> newest requested content
+  var CLOSE_AFTER_SAVE = Object.create(null);
+  var SAVE_SEQ = 0;
+  var CLOSE_ALL_BATCH = null;
   var TABS = ['main.py', 'utils.py', 'README.md']; // open rel-paths (seeded with samples)
   function isOpen(p) { return TABS.indexOf(p) >= 0; }
   function bufferDirty(p) { return BUFFERS[p] ? BUFFERS[p].dirty : false; }
@@ -348,8 +371,32 @@
     more.className = 'more'; more.innerHTML = ic('chevD', 16); more.title = 'Show hidden tabs';
     el.appendChild(more);
   }
-  function closeTab(p) {
+  function finishCloseAllBatch() {
+    var batch = CLOSE_ALL_BATCH;
+    if (!batch) return;
+    for (var i = 0; i < batch.dirty.length; i++) {
+      var p = batch.dirty[i];
+      if (SAVE_IN_FLIGHT[p] != null || Object.prototype.hasOwnProperty.call(SAVE_QUEUED, p) || bufferDirty(p)) return;
+    }
+    CLOSE_ALL_BATCH = null;
+    batch.tabs.forEach(function (p) { closeTab(p, true); });
+  }
+  function closeTab(p, discard) {
     var i = TABS.indexOf(p); if (i < 0) return;
+    if (!discard && bufferDirty(p)) {
+      confirmDialog({
+        title: 'Unsaved Changes',
+        icon: 'warn',
+        message: 'Save changes to ' + p + ' before closing?',
+        buttons: [
+          { label: 'Cancel', onClick: function () {} },
+          { label: "Don't Save", danger: true, onClick: function () { closeTab(p, true); } },
+          { label: 'Save', primary: true, onClick: function () { CLOSE_AFTER_SAVE[p] = true; saveBuffer(p); } }
+        ]
+      });
+      return;
+    }
+    delete CLOSE_AFTER_SAVE[p];
     TABS.splice(i, 1); delete BUFFERS[p];
     if (currentFile === p) {
       var next = TABS[TABS.length - 1];
@@ -365,6 +412,9 @@
     if (FILES[name] != null) showBuffer(name, FILES[name]);
   }
   function showBuffer(name, fallback) {
+    // Preserve the live editor text before another buffer replaces the textarea.
+    // Dirty state belongs to the buffer, not to whichever document is visible.
+    if (currentFile && currentFile !== name && BUFFERS[currentFile]) BUFFERS[currentFile].content = ta.value;
     var buf = BUFFERS[name];
     if (!buf) {
       if (fallback == null) { toast('no content for ' + name); return; }
@@ -387,11 +437,26 @@
     pushRecent(name);
     savePrefs({ tabs: TABS, current: currentFile });
   }
+  function sendBufferSave(p, content) {
+    var reqId = ++SAVE_SEQ;
+    SAVE_IN_FLIGHT[p] = reqId;
+    PENDING_SAVES[reqId] = { path: p, content: content };
+    BRIDGE.send({ kind: 'fsWrite', path: p, content: content, reqId: reqId });
+    if (p === currentFile) setStatusHint('Saving ' + p + ' …');
+  }
+  function saveBuffer(p) {
+    var buf = BUFFERS[p];
+    if (!buf || buf.editable === false) { reportError({ level: 'warn', title: 'Read-only', message: p + ' cannot be modified.' }); return; }
+    var content = (p === currentFile) ? ta.value : buf.content;
+    buf.content = content;
+    if (SAVE_IN_FLIGHT[p] != null) SAVE_QUEUED[p] = content;
+    else sendBufferSave(p, content);
+  }
   function saveFile() {
     if (!currentFile || !BUFFERS[currentFile]) { reportError({ level: 'warn', title: 'Nothing to save', message: 'No document is open.' }); return; }
     if (ta.readOnly) { reportError({ level: 'warn', title: 'Read-only', message: currentFile + ' cannot be modified.' }); return; }
-    var p = currentFile, content = ta.value;
-    BRIDGE.send({ kind: 'fsWrite', path: p, content: content });
+    var p = currentFile;
+    saveBuffer(p);
     // No dialog: PyCharm writes straight to disk and only shows a transient
     // status-bar hint. The failure path is the one that talks.
     setStatusHint('Saving ' + p + ' …');
@@ -408,11 +473,52 @@
     else renderTabs();
   }
   function onFsSaved(m) {
-    if (BUFFERS[m.path]) { BUFFERS[m.path].dirty = false; BUFFERS[m.path].content = ta.value; }
+    var reqId = Number(m.reqId);
+    if (!isFinite(reqId) || !PENDING_SAVES[reqId]) reqId = Number(SAVE_IN_FLIGHT[m.path]);
+    var pending = PENDING_SAVES[reqId];
+    if (!pending || pending.path !== m.path) {
+      // An uncorrelated acknowledgement must not clear dirty state: doing so
+      // would claim unsaved text reached disk when this page has no matching write.
+      renderTabs();
+      setStatusHint('Save acknowledgement was not matched for ' + m.path);
+      return;
+    }
+    delete PENDING_SAVES[reqId];
+    if (SAVE_IN_FLIGHT[m.path] === reqId) delete SAVE_IN_FLIGHT[m.path];
+    var buf = BUFFERS[m.path];
+    if (buf && buf.content === pending.content) buf.dirty = false;
+
+    if (Object.prototype.hasOwnProperty.call(SAVE_QUEUED, m.path)) {
+      var queued = SAVE_QUEUED[m.path];
+      delete SAVE_QUEUED[m.path];
+      sendBufferSave(m.path, queued);
+    }
     renderTabs();
-    setStatusHint('Saved ' + m.path);
+    setStatusHint((buf && buf.dirty) ? 'Saved an earlier version of ' + m.path : 'Saved ' + m.path);
+
+    if (CLOSE_ALL_BATCH) {
+      finishCloseAllBatch();
+      if (CLOSE_ALL_BATCH) return;
+    }
+    if (CLOSE_AFTER_SAVE[m.path] && SAVE_IN_FLIGHT[m.path] == null && !Object.prototype.hasOwnProperty.call(SAVE_QUEUED, m.path)) {
+      delete CLOSE_AFTER_SAVE[m.path];
+      if (buf && !buf.dirty) closeTab(m.path, true);
+      else toast('Newer edits remain in ' + m.path + '; save again before closing.');
+    }
   }
   function onFsError(m) {
+    var reqId = Number(m.reqId);
+    var pending = PENDING_SAVES[reqId];
+    if (pending && pending.path === m.path) {
+      delete PENDING_SAVES[reqId];
+      if (SAVE_IN_FLIGHT[m.path] === reqId) delete SAVE_IN_FLIGHT[m.path];
+      delete SAVE_QUEUED[m.path];
+      delete CLOSE_AFTER_SAVE[m.path];
+      if (CLOSE_ALL_BATCH) CLOSE_ALL_BATCH.dirty.forEach(function (p) { delete CLOSE_AFTER_SAVE[p]; });
+      CLOSE_ALL_BATCH = null;
+      reportError({ level: 'error', title: 'Save failed', message: String(m.message || m.code || 'unknown'), detail: m.path + ' was not closed.' });
+      return;
+    }
     // A read of an embedded-sample path (e.g. boot's main.py) legitimately has
     // no on-disk file; we already loaded the bundled fallback, so stay quiet.
     if (m.path && BUFFERS[m.path]) return;
@@ -428,7 +534,15 @@
     hintT = setTimeout(function () { el.textContent = ''; el.classList.remove('on'); }, 2400);
   }
   ta.addEventListener('input', function () {
-    if (currentFile && BUFFERS[currentFile]) BUFFERS[currentFile].dirty = true;
+    if (currentFile && BUFFERS[currentFile]) {
+      BUFFERS[currentFile].content = ta.value;
+      BUFFERS[currentFile].dirty = true;
+    }
+    if (CLOSE_ALL_BATCH) {
+      CLOSE_ALL_BATCH.dirty.forEach(function (p) { delete CLOSE_AFTER_SAVE[p]; });
+      CLOSE_ALL_BATCH = null;
+      toast('Edits changed while saving; tabs remain open.');
+    }
     renderTabs();
   });
 

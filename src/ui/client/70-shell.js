@@ -652,6 +652,9 @@
     if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'p' || e.key === 'P')) {
       e.preventDefault(); mdToggle(); return;
     }
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F4' && currentFile && !(e.target && e.target.closest && e.target.closest('.dlg-scrim, .modal.open'))) {
+      e.preventDefault(); closeTab(currentFile); return;
+    }
     // PyCharm's editor keys. Ctrl+F must win over the browser's find bar, which
     // is why every one of these prevents the default.
     if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFindBar(false); return; }
