@@ -73,6 +73,18 @@ export function resolveGoBin(preferred?: string): GoBinResolution {
 
   if (preferred) {
     searched.push(preferred);
+    // A bare name ("go") is a *command*, not a path — resolve it on PATH. This
+    // matters because `resolveGoBin()` itself reports `bin: 'go'` when the
+    // toolchain was found on PATH, and callers (GoRunner, the verify suites)
+    // feed that value straight back in as `preferred`. Treating it as a path
+    // made `existsSync('go')` fail, so a perfectly good PATH install was
+    // reported as `missing` — invisible on a machine that had Go in a known
+    // directory, fatal on a CI runner where PATH is the only way to find it.
+    if (!preferred.includes('/') && !preferred.includes('\\')) {
+      return commandExists(preferred)
+        ? { bin: preferred, source: 'GO_BIN', searched }
+        : { bin: preferred, source: 'missing', searched };
+    }
     if (existsSync(preferred)) return { bin: preferred, source: 'GO_BIN', searched };
     // Explicit but wrong — stop here rather than falling back.
     return { bin: preferred, source: 'missing', searched };

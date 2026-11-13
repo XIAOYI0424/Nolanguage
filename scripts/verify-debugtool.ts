@@ -421,11 +421,27 @@ async function runProbe(pythonBin: string): Promise<Collected | null> {
   });
 
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, 6000);
+    // Collect until there are enough samples for the fold check to be
+    // meaningful, with a hard ceiling. A fixed wall-clock wait was flaky: on a
+    // slow CI runner the first seconds go to Python startup, so a 6s window
+    // produced 4 stack events instead of the 5+ the checks assume. Polling
+    // resolves as soon as the data is there and stays fast locally.
+    const TARGET_STACKS = 10;
+    const deadline = Date.now() + 12_000;
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      clearInterval(poll);
+      resolve();
+    };
+    const poll = setInterval(() => {
+      if (collected.stacks.length >= TARGET_STACKS || Date.now() >= deadline) finish();
+    }, 50);
+    poll.unref?.();
     child.on('close', () => {
-      clearTimeout(timer);
       // Give the socket a tick to flush the last lines.
-      setTimeout(resolve, 150);
+      setTimeout(finish, 150);
     });
   });
   if (!child.killed && child.exitCode === null) child.kill();

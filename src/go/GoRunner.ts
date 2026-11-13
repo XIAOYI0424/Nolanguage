@@ -398,11 +398,16 @@ export class GoRunner {
    * has not added Go to their PATH.
    */
   private childEnv(): NodeJS.ProcessEnv {
-    const binDir = this.goBin.replace(/[\\/][^\\/]+$/, '');
+    const dir = this.goBin.replace(/[\\/][^\\/]+$/, '');
+    // When the toolchain was found on PATH, `goBin` is the bare name `go` and
+    // the regex above matches nothing — prefixing PATH with "go" would add a
+    // junk entry. Only prefix when we actually have a directory.
+    const binDir = dir === this.goBin ? '' : dir;
     const sep = process.platform === 'win32' ? ';' : ':';
+    const path = process.env.PATH ?? '';
     return {
       ...process.env,
-      PATH: binDir + sep + (process.env.PATH ?? ''),
+      PATH: binDir ? binDir + sep + path : path,
       GOTOOLCHAIN: process.env.GOTOOLCHAIN ?? 'local',
     };
   }

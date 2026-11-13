@@ -50,6 +50,18 @@ async function main(): Promise<void> {
   const go = resolveGoBin();
   check('go toolchain discovered', go.source !== 'missing', `${go.bin} (via ${go.source})`);
 
+  // `GoRunner` feeds the resolved binary straight back into `resolveGoBin` as
+  // its explicit `preferred` path. When the toolchain was found on PATH that
+  // value is the bare name `go`, which used to be treated as a file path —
+  // `existsSync('go')` failed and a perfectly good install was reported as
+  // missing. Invisible on a machine with Go in a known directory, fatal on CI.
+  const echoed = resolveGoBin(go.bin);
+  check(
+    'discovery: the resolved binary survives being passed back in',
+    echoed.source !== 'missing',
+    `${go.bin} -> ${echoed.source}`,
+  );
+
   const version = go.source === 'missing' ? null : await goVersion(go.bin);
   check('go version reported', !!version, version ?? 'n/a');
 

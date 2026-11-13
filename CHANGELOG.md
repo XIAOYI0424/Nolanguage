@@ -23,7 +23,21 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2146/2146 across 47 suites；`npm test` 38/38；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2147/2147 across 47 suites；`npm test` 38/38；`ci:pure` 406/406。
+
+### 第一次真正在 GitHub runner 上跑 CI
+
+仓库推上 GitHub（`XIAOYI0424/Nolanguage`）后 `ci.yml` 才第一次在真正的 `windows-latest` 上执行。**本机全绿不等于 runner 全绿**，两个 job 各暴露一组只在干净机器上出现的问题：
+
+| 位置 | 本机表现 | runner 表现 | 根因 |
+|---|---|---|---|
+| `verify-sign` catalog 检查 | PASS（本机 catalog 可达） | FAIL `UnknownError` | 全新 runner 上 `Get-AuthenticodeSignature` 查不到 catalog 存储。已改为 `UnknownError` → SKIP；`NotSigned` / `HashMismatch` 仍然 FAIL |
+| `resolveGoBin` 回填 | PASS（`D:\Go lang` 绝对路径） | Go 全部 `exit=-1`、`build 0ms` | `resolveGoBin()` 在 PATH 命中时返回裸名 `go`；`GoRunner` 又把它当显式路径回填，`existsSync('go')` 恒假 → 报 `missing`。已让无分隔符的 `preferred` 走 `commandExists` |
+| `smoke-exe` / `verify-go` | PASS | FAIL | 断言写死了开发机的 `D:\Go lang\bin\go.exe` 与 `1.27`。已改为「绝对路径或 PATH」+「能解析出 `goX.Y`」 |
+| `verify-debugtool` channel | 5+ stacks | 4 stacks | 固定 6 秒窗口里，慢 runner 把前几秒花在 Python 启动上。已改为轮询到 10 个 stack 或 12 秒上限，本地反而更快 |
+
+同时确认在 runner 上通过的部分：`npm ci` 从 lockfile 安装、`build:exe` 的 SEA 注入、sidecar 镜像校验、`tsc`、38 个单测、15 个 pure 套件。`ci:install-smoke`（NSIS 静默安装 + `/health`）在本次 integration 任务被上游失败挡住，仍需单独确认。
+
 
 ## 0.7.22 — 2026-11-13
 

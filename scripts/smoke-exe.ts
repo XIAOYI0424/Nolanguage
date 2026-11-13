@@ -239,12 +239,18 @@ async function main(): Promise<void> {
     check(wsStatus.lsp.available === true, 'python LSP is ready', wsStatus.lsp.serverName);
     const go = wsStatus.languages.find((l) => l.id === 'go');
     check(!!go?.available !== false, 'go slot present');
+    // Portable on purpose: the toolchain may live in a known directory
+    // (`D:\Go lang\bin\go.exe`) or be resolved from PATH (`go`). Asserting the
+    // developer's own install path is what made this check fail on CI.
+    const goBin = go?.binary ?? '';
     check(
-      /Go lang[\\/]bin[\\/]go\.exe$/i.test(go?.binary ?? ''),
-      'go toolchain discovered in "D:\\Go lang"',
-      `${go?.binary ?? '(none)'} [${go?.binarySource ?? '?'}]`,
+      goBin === 'go' || /(?:^|[\\/])go(?:\.exe)?$/i.test(goBin),
+      'go toolchain discovered (absolute path or PATH)',
+      `${goBin || '(none)'} [${go?.binarySource ?? '?'}]`,
     );
-    check((go?.version ?? '').includes('1.27'), 'go version probed', go?.version ?? '');
+    // `go version go1.27.4 windows/amd64` — assert a version was probed, not
+    // that it is the developer's exact minor release.
+    check(/go\d+\.\d+/.test(go?.version ?? ''), 'go version probed', go?.version ?? '');
 
     // ---- from here on we talk to the running server over the socket ------
     const ws = new RawWsClient(PORT);
