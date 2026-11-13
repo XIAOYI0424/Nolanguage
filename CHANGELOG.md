@@ -37,7 +37,19 @@
 | `verify-debugtool` channel | 5+ stacks | 4 stacks | 固定 6 秒窗口里，慢 runner 把前几秒花在 Python 启动上。改为等 sample 程序自己退出（上限 20 秒）——它末尾才打印 `total …`，提前收工会把这条输出截掉 |
 | `build:setup` | PASS（本机有 NSIS） | `makensis not found` | 干净 runner 没有 NSIS；能下载它的 `tauri build` 步骤排在建安装包之后（且允许失败）。新增 `npm run ci:nsis`（幂等：已装则 no-op，否则 `choco install nsis`），workflow 在 build:setup 前调用 |
 
-同时确认在 runner 上通过的部分：`npm ci` 从 lockfile 安装、`build:exe` 的 SEA 注入、sidecar 镜像校验、`tsc`、38 个单测、15 个 pure 套件，以及 **`verify` 全套 2147/2147**。`ci:install-smoke`（NSIS 静默安装 + `/health`）在补上 `ci:nsis` 后仍需一次 runner 实跑确认。
+同时确认在 runner 上通过的部分：`npm ci` 从 lockfile 安装、`build:exe` 的 SEA 注入、sidecar 镜像校验、`tsc`、38 个单测、15 个 pure 套件，以及 **`verify` 全套 2147/2147**。
+
+补上 `ci:nsis` 后，`integration` 在 `windows-latest` 上整条走通，包括之前从未在 runner 上跑过的安装冒烟：
+
+```
+[ensure-nsis] makensis not found; trying Chocolatey (present on windows-latest)
+[ensure-nsis] makensis ready: C:\Program Files (x86)\NSIS\makensis.exe
+[build-setup] done -> ...\installer\Nolanguage-Setup.exe (21.8 MiB)
+health: status=ok version=0.7.23-workspace pid=9052 exeSize=88989184
+install smoke: ok
+```
+
+两个 job 全部 success（`Ensure NSIS` → `Build installer` → `Silent install + health smoke` → 产物上传）。这是本项目第一次在真实 runner 上完成「构建 → 全量回归 → 打包 → 安装 → 探活」的闭环。
 
 
 ## 0.7.22 — 2026-11-13
