@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.21 — 2026-11-13
+
+### Markdown 预览窗格可调整大小
+
+0.7.20 的 Markdown 预览采用固定 42% 分栏；窄窗或读长文时，编辑区/预览区比例不合适。现在 `.edwrap` 内加入分隔手柄：
+
+- 鼠标 / 触控拖动，宽度限制在 24%–64%；
+- 键盘可聚焦，左右方向键调整，Home / End 跳到两端，双击恢复 42%；
+- 暗色 / 浅色主题统一跟随 CSS 变量；
+- 使用 `aria-role=separator`、方向和数值范围，更新 `aria-valuenow`；
+- 用户宽度写入已有 IDE 偏好，并在下次打开时恢复；
+- 预览关闭时分隔手柄一起隐藏。
+
+新增 `verify-pycharm` 回归：手柄可访问性、默认比例、键盘调整与持久化、拖动、重载恢复。UI 验证 **275 → 284**。
+
+### GitHub runner 验证状态
+
+用户要求在 GitHub runner 上实测 `ci:install-smoke`。当前工作区没有配置任何 git remote，环境也没有 GitHub CLI；本轮**未触发也未声称通过**远端 workflow。`.github/workflows/ci.yml` 已支持 `workflow_dispatch`，配置 GitHub remote/授权后即可从 push 或手动 dispatch 真实验证。
+
+### 验证
+
+- `verify-pycharm`：**284/284**
+- `verify-exec`：**38/38**
+- `npm test`：**38/38 · 2 files**
+- `ci:pure`：403/403
+- `tsc`：src + scripts 均 0
+
 ## 0.7.20 — 2026-11-13
 
 ### 评估优化：按 session 串行化执行平面

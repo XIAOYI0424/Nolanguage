@@ -71,6 +71,7 @@ export const PYCHARM_SHELL = `
           <pre id="hl" aria-hidden="true"><code id="hlCode"></code></pre>
           <textarea id="ta" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"></textarea>
         </div>
+        <div class="mdsplit hidden" id="mdSplit" role="separator" aria-orientation="vertical" aria-label="Resize Markdown preview" aria-valuemin="24" aria-valuemax="64" aria-valuenow="42" tabindex="0" title="Drag to resize · Arrow keys to adjust"></div>
         <!-- Markdown preview (#40): the right half of the editor split. The
              page never parses Markdown: mdRender returns sanitised HTML plus the
              heading list, and the Structure window reuses those headings.

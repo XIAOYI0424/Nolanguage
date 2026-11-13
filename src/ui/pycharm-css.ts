@@ -201,8 +201,15 @@ export const PYCHARM_CSS = `
   /* Markdown preview (#40): a right split inside the editor row. edwrap is
      already a flex row, so this is a sibling of codewrap, not a new layout.
      No backticks in this file either: it is one template literal. */
-  .mdprev { flex:0 0 42%; min-width:260px; max-width:64%; display:flex; flex-direction:column;
+  .mdprev { flex:0 0 var(--mdprev-basis, 42%); min-width:260px; max-width:64%; display:flex; flex-direction:column;
     min-height:0; border-left:1px solid var(--border); background:var(--bg-primary); }
+  .mdsplit { display:none; flex:0 0 8px; align-items:center; justify-content:center; cursor:col-resize;
+    touch-action:none; outline:none; }
+  .mdsplit:not(.hidden) { display:flex; }
+  .mdsplit::after { content:''; width:2px; height:28px; border-radius:2px; background:var(--border); }
+  .mdsplit:hover::after, .mdsplit:focus-visible::after, .mdsplit.dragging::after { background:var(--accent); height:40px; }
+  .mdsplit:focus-visible { box-shadow:inset 0 0 0 1px var(--accent); }
+  .edwrap.md-resizing, .edwrap.md-resizing * { cursor:col-resize !important; user-select:none !important; }
   .mdprev.hidden { display:none; }
   .mdprev-head { flex:0 0 auto; height:32px; display:flex; align-items:center; gap:6px;
     padding:0 6px 0 10px; border-bottom:1px solid var(--border); font-size:12px; color:var(--text-secondary); }

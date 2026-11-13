@@ -1674,7 +1674,10 @@ console.log('');
 
   const doc = w.document;
   const pane = doc.getElementById('mdprev');
+  const split = doc.getElementById('mdSplit') as any;
   check('preview: the pane exists and starts hidden', !!pane && pane.classList.contains('hidden'), pane ? pane.className : 'missing');
+  check('preview: resize separator is hidden with the pane', !!split && split.classList.contains('hidden'), split ? split.className : 'missing');
+  check('preview: resize separator exposes accessible range', !!split && split.getAttribute('role') === 'separator' && split.getAttribute('aria-valuemin') === '24' && split.getAttribute('aria-valuemax') === '64', split ? split.getAttribute('aria-label') : 'missing');
 
   // The project tree is the only way in from a cold page: deliver a listing and
   // click the row, exactly like a user would.
@@ -1694,6 +1697,8 @@ console.log('');
   check('preview: opening it asks the engine to render', !!req && req.language === 'markdown', JSON.stringify(req || {}));
   check('preview: the request carries a requestId', typeof req?.requestId === 'number', String(req?.requestId));
   check('preview: the pane is visible after the toggle', !pane.classList.contains('hidden'), pane.className);
+  check('preview: resize handle appears with the pane', !split.classList.contains('hidden'), split.className);
+  check('preview: default split is 42 percent', pane.style.getPropertyValue('--mdprev-basis') === '42%', pane.style.getPropertyValue('--mdprev-basis'));
 
   socket.deliver({
     kind: 'mdPreview', ok: true, requestId: req?.requestId,
@@ -1723,6 +1728,26 @@ console.log('');
   const ta = doc.getElementById('ta') as any;
   const caretLine = String(ta.value).slice(0, ta.selectionStart).split('\n').length;
   check('preview: clicking an outline row jumps to its heading', caretLine === 3, 'line ' + caretLine);
+
+  split.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }));
+  check('preview: keyboard resize increases preview width', pane.style.getPropertyValue('--mdprev-basis') === '44%' && split.getAttribute('aria-valuenow') === '44', pane.style.getPropertyValue('--mdprev-basis'));
+  const prefsAfterKey = JSON.parse(w.localStorage.getItem('nolanguage.pycharm.v1') || '{}');
+  check('preview: keyboard resize is persisted', prefsAfterKey.mdPreviewWidth === 44, String(prefsAfterKey.mdPreviewWidth));
+
+  const wrap = doc.querySelector('.edwrap') as any;
+  Object.defineProperty(wrap, 'getBoundingClientRect', { value: () => ({ left: 0, right: 1000, width: 1000 }) });
+  split.dispatchEvent(new w.MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 500 }));
+  doc.dispatchEvent(new w.MouseEvent('pointermove', { bubbles: true, clientX: 480 }));
+  doc.dispatchEvent(new w.MouseEvent('pointerup', { bubbles: true, clientX: 480 }));
+  check('preview: drag resizes the split and saves it', pane.style.getPropertyValue('--mdprev-basis') === '52%' && split.getAttribute('aria-valuenow') === '52', pane.style.getPropertyValue('--mdprev-basis'));
+  const prefsAfterDrag = JSON.parse(w.localStorage.getItem('nolanguage.pycharm.v1') || '{}');
+  check('preview: dragged width survives reload', prefsAfterDrag.mdPreviewWidth === 52, String(prefsAfterDrag.mdPreviewWidth));
+
+  const restored = mountPage(html, JSON.stringify(prefsAfterDrag));
+  await settle(restored.window, 10);
+  check('preview: saved split width is restored', restored.window.document.getElementById('mdprev').style.getPropertyValue('--mdprev-basis') === '52%', restored.window.document.getElementById('mdprev').style.getPropertyValue('--mdprev-basis'));
+  restored.window.close();
+  w.close();
 }
 
 const failed = results.filter((r) => !r[1]).length;

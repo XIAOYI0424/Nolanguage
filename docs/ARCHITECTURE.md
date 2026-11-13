@@ -1,6 +1,6 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.20 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.21 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
 这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 451 imports · 18/18`，**零个已声明环**。
 
@@ -325,6 +325,12 @@ C6 的第一版是错的：它扫描整个文件，于是**注释里**提到的�
 active session 的语言归属也被检查：已分配给 Python 的 session id 若改用于 JavaScript 或 Go，会明确报错，不会把源码交给错误 worker。若未来支持跨语言同名 session，应引入复合 key 并同步改 reset/list，而不是悄悄共享字符串 id。
 
 `verify-exec.ts` 增加并发冷启动、namespace 顺序、跨语言拒绝，以及 run→reset→run 排序回归测试（29 → 38 条）。
+
+### Markdown 预览分栏（0.7.21）
+
+预览宽度不再写死为 42%。`.mdsplit` 是 `.codewrap` 与 `.mdprev` 之间的可访问 separator：拖动实时改百分比（24%–64%），方向键微调、Home/End 到边界、双击恢复默认；比例保存到已有 IDE `PREFS`。可视焦点、hover 和拖动状态都使用主题 token；预览关闭时分隔条隐藏，避免留下空隙。回归检查覆盖键盘、拖动、ARIA 当前值和重载恢复。
+
+GitHub runner 的 `ci:install-smoke` 仍待远端验证：当前 checkout 未配置 Git remote，且没有可用 GitHub CLI；没有触发远端工作流。
 
 ### 顺带修复：Vitest 的 38 个单测曾经一个也没注册
 

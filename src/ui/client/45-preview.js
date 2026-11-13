@@ -9,9 +9,29 @@
   // No backticks anywhere in this file: verify-pycharm guards every fragment
   // against them, because a stray one used to truncate the enclosing template
   // literal that this code lived in before it was split.
-  var MD = { open: false, reqId: 0, last: null, err: '', timer: 0 };
+  var MD = { open: false, reqId: 0, last: null, err: '', timer: 0, width: 42, dragging: false };
+  var savedMdWidth = Number(PREFS.mdPreviewWidth);
+  if (isFinite(savedMdWidth) && savedMdWidth >= 24 && savedMdWidth <= 64) MD.width = savedMdWidth;
 
   function mdIsDoc() { return currentLang === 'markdown'; }
+
+  function mdSetWidth(percent, persist) {
+    MD.width = Math.max(24, Math.min(64, Number(percent) || 42));
+    var pane = $('mdprev');
+    var handle = $('mdSplit');
+    if (pane) pane.style.setProperty('--mdprev-basis', MD.width + '%');
+    if (handle) handle.setAttribute('aria-valuenow', String(Math.round(MD.width)));
+    if (persist) savePrefs({ mdPreviewWidth: MD.width });
+  }
+
+  function mdWidthFromPointer(clientX, persist) {
+    var row = $('mdprev');
+    var wrap = row && row.parentNode;
+    if (!wrap || typeof wrap.getBoundingClientRect !== 'function') return;
+    var rect = wrap.getBoundingClientRect();
+    if (!rect.width) return;
+    mdSetWidth((rect.right - clientX) * 100 / rect.width, persist);
+  }
 
   function mdMetaText(m) {
     var s = m.stats || {}, parts = [];
@@ -35,10 +55,12 @@
     if (want && !mdIsDoc()) { toast('Markdown preview: open a .md file first'); return; }
     MD.open = want;
     var p = $('mdprev');
+    var split = $('mdSplit');
     if (p) { if (want) p.classList.remove('hidden'); else p.classList.add('hidden'); }
+    if (split) { if (want) split.classList.remove('hidden'); else split.classList.add('hidden'); }
     var b = $('mdPrevBtn');
     if (b) b.classList.toggle('on', want);
-    if (want) mdRequest();
+    if (want) { mdSetWidth(MD.width, false); mdRequest(); }
   }
 
   /** Debounce: a keystroke must not queue a render per character. */
@@ -116,6 +138,46 @@
   }
 
   function wireMd() {
+    var split = $('mdSplit');
+    mdSetWidth(MD.width, false);
+    if (split) {
+      split.addEventListener('pointerdown', function (e) {
+        if (!MD.open || (e.button != null && e.button !== 0)) return;
+        e.preventDefault();
+        MD.dragging = true;
+        split.classList.add('dragging');
+        var wrap = split.parentNode;
+        if (wrap) wrap.classList.add('md-resizing');
+        if (split.setPointerCapture && e.pointerId != null) {
+          try { split.setPointerCapture(e.pointerId); } catch (err) { /* document listeners remain the fallback */ }
+        }
+      });
+      document.addEventListener('pointermove', function (e) {
+        if (MD.dragging) mdWidthFromPointer(e.clientX, false);
+      });
+      function endMdResize() {
+        if (!MD.dragging) return;
+        MD.dragging = false;
+        split.classList.remove('dragging');
+        var wrap = split.parentNode;
+        if (wrap) wrap.classList.remove('md-resizing');
+        mdSetWidth(MD.width, true);
+      }
+      document.addEventListener('pointerup', endMdResize);
+      document.addEventListener('pointercancel', endMdResize);
+      split.addEventListener('keydown', function (e) {
+        var next = MD.width;
+        if (e.key === 'ArrowLeft') next += 2;
+        else if (e.key === 'ArrowRight') next -= 2;
+        else if (e.key === 'Home') next = 24;
+        else if (e.key === 'End') next = 64;
+        else return;
+        e.preventDefault();
+        mdSetWidth(next, true);
+      });
+      split.addEventListener('dblclick', function () { mdSetWidth(42, true); });
+    }
+
     var btn = $('mdPrevBtn');
     if (btn) btn.addEventListener('click', function () { mdToggle(); });
     var close = $('mdPrevClose');
