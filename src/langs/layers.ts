@@ -15,7 +15,6 @@
  * pretending to override it by rank. Forcing a change is the override layer's
  * job (`overrides/<id>.json`), not a priority war.
  */
-import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { officialRoots, splitEnvList } from './pluginRoots.js';
 import type { RegistryRoot } from './types.js';
@@ -115,9 +114,4 @@ export function layersFromRoots(roots: RegistryRoot[]): PluginLayer[] {
     order: index,
     readOnly: !root.removable,
   }));
-}
-
-/** Only the tiers that exist on disk, for callers that want to skip the rest. */
-export function existingLayers(layers: PluginLayer[]): PluginLayer[] {
-  return layers.filter((l) => existsSync(l.dir));
 }

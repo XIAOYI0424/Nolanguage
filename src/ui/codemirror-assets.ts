@@ -84,6 +84,3 @@ export const CODEMIRROR_JS = [
   addonActiveLine,
   addonShowHintJs,
 ].join('\n;\n');
-
-/** True when the vendored assets are present (they always are once built). */
-export const HAS_CODEMIRROR = cmJs.length > 1000;

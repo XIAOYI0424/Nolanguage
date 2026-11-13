@@ -44,8 +44,3 @@ export function goAttachGuide(script: string, opts: GoGuideOptions = {}): string
     'endpoint reports stacks, not values. For those, use a real debugger (dlv).',
   ].join('\n');
 }
-
-/** Shown in the page when a Go session has no locals to show. */
-export const GO_NO_LOCALS_NOTE =
-  'Go is observed through its pprof endpoint: stacks only. A dump carries no values, ' +
-  'so there are no locals to show. Use dlv if you need to inspect variables.';

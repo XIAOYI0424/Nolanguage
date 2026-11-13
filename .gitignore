@@ -1,48 +1,48 @@
+# ---------------------------------------------------------------------------
+# Build output — always regenerated, never committed.
+#   dist/           engine SEA images (Nolanguage.exe, NDebug.exe)
+#   build/          SEA preparation blobs
+#   frontend/dist/  static shell emitted by scripts/build-frontend.mjs
+# ---------------------------------------------------------------------------
 node_modules/
 dist/
 build/
+frontend/dist/
 *.log
 .DS_Store
 
-# Tauri shell: build artefacts and the engine sidecar placed next to the app
-# (`externalBin` names it `binaries/Nolanguage-<triple>`; `tauri build` copies
-# it in, and a bare `cargo build` needs the same copy to run).
+# Tauri shell: Rust build artefacts and the engine sidecar placed next to the
+# app (`externalBin` names it `binaries/Nolanguage-<triple>`; `tauri build`
+# copies it in, and a bare `cargo build` needs the same copy to run).
 src-tauri/target/
 src-tauri/gen/
 src-tauri/binaries/
-frontend/dist/
 
-# Stage 6 · baseline system: local telemetry database + cold-tier archive
+# NSIS installer output — rebuilt by `npm run build:setup`.
+# Distribute via GitHub Releases, not as a committed binary.
+installer/Nolanguage-Setup.exe
+installer/payload/Nolanguage.exe
+installer/payload/uninstaller.exe
+installer/uninstaller/target/
+installer/.build/
+installer/build-nsis.bat
+
+# Stage 6 · baseline system: local telemetry database + cold-tier archive.
 .nolanguage/
-.codebudy/app.json
-.codebudy/appearance.json
-.codebudy/core-plugins.json
-.codebudy/workspace.json
-.workbuddy-ai/memory/2026-10-14.md
-.workbuddy-ai/memory/MEMORY.md
-.test-out.txt
+
 # Scratch space for the verification suites (packaged-exe sandbox, explorer
 # workspace, ad-hoc probes). Never committed.
 .tmp/
 tmp/
 .tmpdiag/
 .test-run.*
+.test-out.txt
 .verify-run*
 .stdio-*
 .build-exe.*
-.workbuddy-ai/memory/2026-10-15.md
-.workbuddy-ai/memory/2026-10-17.md
-.gitignore
-.cargo/config.toml
-.obsidian/app.json
-.obsidian/appearance.json
-.obsidian/core-plugins.json
-.obsidian/workspace.json
-# Agent workspace data (memory/logs), never project source.
+
+# Agent workspace data (memory/logs) and local editor state — never project source.
 .workbuddy-ai/
-installer/build-nsis.bat
-.gitignore
-installer/payload/Nolanguage.exe
-installer/payload/uninstaller.exe
-installer/uninstaller/target/
-installer/.build/
+.codebudy/
+.obsidian/
+.cargo/config.toml

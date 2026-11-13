@@ -145,9 +145,3 @@ export async function gitCommit(cwd: string, message: string): Promise<GitCommit
   }
   return { ok: true, branch: status.branch, committed: tracked.length, output };
 }
-
-/** True when `cwd` is inside a git work tree. */
-export async function gitAvailable(cwd: string): Promise<boolean> {
-  const r = await runGit(cwd, ['rev-parse', '--is-inside-work-tree'], 8_000);
-  return r.code === 0 && r.stdout.trim() === 'true';
-}
