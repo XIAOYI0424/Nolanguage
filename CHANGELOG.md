@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.20 — 2026-11-13
+
+### 评估优化：按 session 串行化执行平面
+
+在 0.7.19 的架构、文档、TypeScript 门禁全绿后，检查 `SandboxPool` 的并发行为。发现同一 `sessionId` 的并发请求有两种会破坏状态的竞态：
+
+1. **首次并发**：两个请求都在 `assigned` 里看不到这个 id，各自 spawn 一个 worker；`ready` 后后写入覆盖前写入，先启动的 worker 变成无人管理的孤儿。Python 的 namespace 也被拆成两个互不相见的状态。
+2. **已有 session 并发**：第二个请求命中 `WarmWorker.busy`，但 `SandboxPool` 把任何 reject 都当成 worker death，回收进程并从 `assigned` 删除；原请求与会话状态都遭破坏。
+
+同一个队列也覆盖 `reset`：reset 必须等已有 run 完成，排在 reset 之后的 run 才从冷状态开始。不同 session 使用不同队列，仍可并行。超时从 worker 真正开始执行时才计，返回的 `durationMs` 和日志包含排队等待，并记录 `queueWaitMs`。
+
+另补 active-session 的语言归属校验：同一 id 已属于 Python，却被拿去跑 JavaScript/Go 时，**明确拒绝**而不是把源码送到错误语言的 worker。此举防止静默误路由；未来若需要同名跨语言 session，应明确设计复合 key，而不是复用含糊的字符串 id。
+
+### 回归测试
+
+`verify-exec.ts` 新增并发首启（只 spawn 一个 worker）、namespace 顺序可见、同 ID 跨语言拒绝、活动 run 与 reset 排序、reset 后冷启动等检查。执行平面套件 **29 → 38 条**。
+
+### 顺带：Vitest 的 38 个单测曾经一个也没注册
+
+本轮真实运行 `npm test`，Vitest 报两个文件失败、**no tests**。模块顶层确实执行，但从 `vitest` 包导入的 `describe` 创建的 suite 没挂到活动 worker collector。启用 `globals: true`、删掉两个测试文件对 `vitest` API 的直接导入后，38 个用例恢复并通过。这也是一次评估优化：项目不能只看 `verify-all` 的自有套件，必须真的执行独立的单测命令。
+
+### 验证
+
+- `verify-exec`：**38/38**（真 Python / Node / Go 进程）
+- `npm test`：**38/38** · 2 files
+- `tsc`：src + scripts 均 0
+- `verify-arch`：18/18 · 157 files · 451 imports · 零例外
+- 完整 `verify-all`：**2087/2087 · 47 套件**
+
 ## 0.7.19 — 2026-11-12
 
 ### #45 · 执行平面的验证套件 —— 装上就抓到 Python 沙箱从未工作

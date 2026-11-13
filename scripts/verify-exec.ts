@@ -69,6 +69,39 @@ async function main(): Promise<void> {
       check('python: another session starts its own worker', other.warm === false, `warm=${other.warm}`);
     }
 
+    // ------------------------------------------ concurrent same-session calls
+    {
+      const spawnsBefore = exec.pool.workerSpawns;
+      const [first, second] = await Promise.all([
+        exec.run({
+          languageId: 'python',
+          sessionId: 'parallel',
+          code: 'import time\nshared = 40\ntime.sleep(0.15)\nprint("first")',
+        }),
+        exec.run({ languageId: 'python', sessionId: 'parallel', code: 'print(shared + 2)' }),
+      ]);
+      check('concurrency: simultaneous first runs both complete', first.ok && second.ok, `${first.ok}/${second.ok}`);
+      check('concurrency: calls share one worker, not two overwritten workers', exec.pool.workerSpawns - spawnsBefore === 1, `spawned=${exec.pool.workerSpawns - spawnsBefore}`);
+      check('concurrency: second run sees the first run\'s namespace', second.stdout.trim() === '42', JSON.stringify(second.stdout.trim()));
+      check('concurrency: first call is cold and the queued second is warm', !first.warm && second.warm, `${first.warm}/${second.warm}`);
+      const parallelSession = exec.list().find((s) => s.sessionId === 'parallel');
+      check('concurrency: the session stays tracked with both runs', !!parallelSession && parallelSession.runs === 2, JSON.stringify(parallelSession ?? null));
+      let collision = '';
+      try {
+        await exec.run({ languageId: 'javascript', sessionId: 'parallel', code: 'console.log("wrong worker")' });
+      } catch (err) {
+        collision = (err as Error).message;
+      }
+      check('session: reusing an id for another language is rejected, not misrouted', collision.includes('already belongs to python'), collision || 'no error');
+
+      const active = exec.run({ languageId: 'python', sessionId: 'reset-race', code: 'import time\ntime.sleep(0.12)\nprint("before reset")' });
+      const reset = exec.reset('reset-race');
+      const afterReset = exec.run({ languageId: 'python', sessionId: 'reset-race', code: 'print("after reset")' });
+      const [activeResult, resetResult, resetRun] = await Promise.all([active, reset, afterReset]);
+      check('concurrency: reset waits for the active run instead of killing its worker', activeResult.stdout.includes('before reset'), JSON.stringify(activeResult.stdout.trim()));
+      check('concurrency: a run queued after reset starts cold', resetResult && !resetRun.warm && resetRun.stdout.includes('after reset'), `reset=${resetResult} warm=${resetRun.warm} out=${resetRun.stdout.trim()}`);
+    }
+
     // ------------------------------------------------------------ failures
     {
       const bad = await exec.run({ languageId: 'python', sessionId: 'err', code: 'raise ValueError("boom")' });
@@ -145,6 +178,13 @@ async function main(): Promise<void> {
       try {
         const g = await exec.run({ languageId: 'go', sessionId: 'go1', code: 'package main\nimport "fmt"\nfunc main(){ fmt.Println("go ok") }', timeoutMs: 60_000 });
         check('go: a program builds and runs', g.ok === true && g.stdout.includes('go ok'), `exit=${g.exitCode} ${JSON.stringify(g.stdout.trim().slice(0, 40))}`);
+        let goCollision = '';
+        try {
+          await exec.run({ languageId: 'python', sessionId: 'go1', code: 'print("must not route to Go")' });
+        } catch (err) {
+          goCollision = (err as Error).message;
+        }
+        check('session: a Go id cannot be reused by Python', goCollision.includes('already belongs to go'), goCollision || 'no error');
         const gbad = await exec.run({ languageId: 'go', sessionId: 'go2', code: 'package main\nfunc main(){ nope() }', timeoutMs: 60_000 });
         check('go: a compile error is a compile error', gbad.compileError === true && gbad.phase === 'build', `phase=${gbad.phase}`);
       } catch (err) {

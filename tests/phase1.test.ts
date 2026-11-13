@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+// Test functions are supplied by the active Vitest collector (see globals in vitest.config.ts).
 import { Kernel } from '../src/kernel/Kernel';
 import { LogLevel } from '../src/log/LogLevel';
 

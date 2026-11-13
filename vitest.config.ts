@@ -41,6 +41,11 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // Importing describe/it from the package entrypoint in these worker-isolated
+    // suites produced a second collector context on this runtime: the callbacks
+    // were never collected and Vitest reported "No test suite found". Globals
+    // come from the active worker collector and keep registration attached.
+    globals: true,
     include: ['tests/**/*.test.ts'],
     // Files run one at a time. The suite is 38 tests in about two seconds, so
     // parallelism buys nothing — and it costs something: two workers collecting

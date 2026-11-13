@@ -36,6 +36,8 @@ export class SandboxPool {
   private freeWarm = new Map<SandboxLanguage, WarmWorker[]>();
   private assigned = new Map<string, Assigned>();
   private goSessions = new Map<string, number>(); // sessionId -> run count
+  /** FIFO tails for each stateful session; unrelated sessions still run in parallel. */
+  private sessionTails = new Map<string, Promise<void>>();
   private idleTimer?: NodeJS.Timeout;
 
   // Counters — plain fields so tests can assert warm reuse directly.
@@ -98,6 +100,26 @@ export class SandboxPool {
     if (list) this.freeWarm.set(lang, list.filter((x) => x !== w));
   }
 
+  /**
+   * Serialize mutations of one session from acquisition through release.
+   *
+   * A worker speaks one request at a time, and Python sessions share a namespace.
+   * Without this queue, simultaneous first calls both observe an unassigned id,
+   * spawn separate workers and overwrite the map entry; simultaneous later calls
+   * hit WarmWorker's `busy` rejection, which the caller mistakes for worker death.
+   * Different session ids have different tails, so they remain concurrent.
+   */
+  private serializeSession<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.sessionTails.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    this.sessionTails.set(sessionId, tail);
+    return previous.then(operation).finally(() => {
+      release();
+      if (this.sessionTails.get(sessionId) === tail) this.sessionTails.delete(sessionId);
+    });
+  }
+
   private takeFree(lang: 'python' | 'javascript'): WarmWorker | undefined {
     const list = this.freeWarm.get(lang);
     if (!list || list.length === 0) return undefined;
@@ -110,12 +132,21 @@ export class SandboxPool {
   }
 
   private async acquire(lang: SandboxLanguage, sessionId: string): Promise<{ worker?: WarmWorker; warm: boolean }> {
+    const existing = this.assigned.get(sessionId);
     if (lang === 'go') {
+      if (existing) {
+        throw new Error(`sandbox session "${sessionId}" already belongs to ${existing.languageId}`);
+      }
       const existed = this.goSessions.has(sessionId);
       if (!existed) this.goSessions.set(sessionId, 0);
       return { warm: existed };
     }
-    const existing = this.assigned.get(sessionId);
+    if (this.goSessions.has(sessionId)) {
+      throw new Error(`sandbox session "${sessionId}" already belongs to go`);
+    }
+    if (existing && existing.languageId !== lang) {
+      throw new Error(`sandbox session "${sessionId}" already belongs to ${existing.languageId}`);
+    }
     if (existing && existing.worker.isAlive) {
       this.warmHits++;
       return { worker: existing.worker, warm: true };
@@ -135,19 +166,34 @@ export class SandboxPool {
     return { worker, warm };
   }
 
-  async run(opts: SandboxRunOptions): Promise<SandboxRunResult> {
+  run(opts: SandboxRunOptions): Promise<SandboxRunResult> {
     const sessionId = opts.sessionId ?? `sb-${ulid().slice(-10)}`;
     const runId = `run-${ulid().slice(-10)}`;
-    const timeoutMs = opts.timeoutMs ?? this.opts.runTimeoutMs ?? 15_000;
-    const t0 = performance.now();
+    const queuedAt = performance.now();
     const span = this.kernel.tracer.startSpan('sandbox.run', {
       attributes: { languageId: opts.languageId, sessionId, runId },
     });
     const runLog = this.kernel.logger.forExecution('sandbox.run', sessionId).span(span);
+    return this.serializeSession(sessionId, () => this.runInSession(opts, sessionId, runId, queuedAt, span, runLog)).catch((err) => {
+      span.setAttribute('error', true).end();
+      throw err;
+    });
+  }
+
+  private async runInSession(
+    opts: SandboxRunOptions,
+    sessionId: string,
+    runId: string,
+    queuedAt: number,
+    span: ReturnType<Kernel['tracer']['startSpan']>,
+    runLog: ReturnType<Kernel['logger']['forExecution']>,
+  ): Promise<SandboxRunResult> {
+    const t0 = queuedAt;
+    const queueWaitMs = performance.now() - queuedAt;
+    const timeoutMs = opts.timeoutMs ?? this.opts.runTimeoutMs ?? 15_000;
 
     if (opts.languageId === 'go') {
       if (!this.goRunner) {
-        span.end();
         throw new Error('Go toolchain unavailable in this sandbox pool');
       }
       const r = await this.goRunner.run({
@@ -161,7 +207,7 @@ export class SandboxPool {
       const durationMs = performance.now() - t0;
       this.kernel.perfMetrics().record('sandbox.run', durationMs);
       const lines = collectSandboxOutput(this.kernel, 'go', sessionId, runId, r.stdout, r.stderr);
-      runLog.info('Go sandbox run', { warm: false, durationMs: Math.round(durationMs), lines, exitCode: r.exitCode });
+      runLog.info('Go sandbox run', { warm: false, durationMs: Math.round(durationMs), queueWaitMs: Math.round(queueWaitMs), lines, exitCode: r.exitCode });
       span.setAttribute('exitCode', r.exitCode).end();
       return {
         languageId: 'go',
@@ -186,7 +232,6 @@ export class SandboxPool {
 
     const { worker, warm } = await this.acquire(opts.languageId, sessionId);
     if (!worker) {
-      span.end();
       throw new Error(`sandbox worker for ${opts.languageId} unavailable`);
     }
     let res;
@@ -236,6 +281,7 @@ export class SandboxPool {
     runLog.info('Sandbox run', {
       warm,
       durationMs: Math.round(durationMs),
+      queueWaitMs: Math.round(queueWaitMs),
       lines,
       ok: res.ok,
       pid: worker.pid,
@@ -257,6 +303,7 @@ export class SandboxPool {
       timedOut: false,
       mode: opts.mode ?? 'run',
     };
+
   }
 
   private recordWorkerGauge(): void {
@@ -284,19 +331,21 @@ export class SandboxPool {
   }
 
   /** Dispose a session's worker (or Go scratch dir) and forget it. */
-  async reset(sessionId: string): Promise<boolean> {
-    const a = this.assigned.get(sessionId);
-    if (a) {
-      this.assigned.delete(sessionId);
-      await a.worker.recycle().catch(() => undefined);
-      return true;
-    }
-    if (this.goSessions.has(sessionId)) {
-      this.goSessions.delete(sessionId);
-      await this.goRunner?.resetSession(sessionId);
-      return true;
-    }
-    return false;
+  reset(sessionId: string): Promise<boolean> {
+    return this.serializeSession(sessionId, async () => {
+      const a = this.assigned.get(sessionId);
+      if (a) {
+        this.assigned.delete(sessionId);
+        await a.worker.recycle().catch(() => undefined);
+        return true;
+      }
+      if (this.goSessions.has(sessionId)) {
+        this.goSessions.delete(sessionId);
+        await this.goRunner?.resetSession(sessionId);
+        return true;
+      }
+      return false;
+    });
   }
 
   list(): SandboxSessionInfo[] {

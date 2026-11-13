@@ -10,7 +10,7 @@
  * The script suites still cover these (more thoroughly); this is the fast loop,
  * not a replacement.
  */
-import { describe, expect, it } from 'vitest';
+// Test functions are supplied by the active Vitest collector (see globals in vitest.config.ts).
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

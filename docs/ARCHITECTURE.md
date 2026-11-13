@@ -1,6 +1,6 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.19 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.20 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
 这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 451 imports · 18/18`，**零个已声明环**。
 
@@ -313,10 +313,28 @@ C6 的第一版是错的：它扫描整个文件，于是**注释里**提到的�
 - `codemirror-assets.ts` 的相对路径深度差一级（`../../vendor` → `../vendor`），于是 `server → pycharm-ui → codemirror-assets` 整条链在 import 期就死了，`verify-ide` 报的是"server did not start"。
 - `verify-pycharm` 里有一处**硬编码** `src/panel/ui/client`，它不在 import 图里，所以 tsc 看不见。
 
-## 十一、还没做的
+## 十一、按 session 串行化执行平面（0.7.20）
 
-1. **`budgetExceptions` 是空的** —— 没有文件或切片超预算。**这是第一次**：以后再有文件变胖，只能真的拆，不能记账。
-2. **插件市场远程安装 + `trust.signature` 验签**。
-3. **`ci:install-smoke` 只在开发机上验证过** —— GitHub runner 上的临时目录与权限策略未实测。
+执行平面的 worker 是一请求一响应的协议；Python 还共享 session namespace。`SandboxPool.run()` 过去没有调度层，因此相同 id 的并发请求会：
+
+- 首次同时到达时各自观察到未分配、各 spawn 一个 worker，随后对 `assigned` 的写入互相覆盖；
+- 已绑定 worker 上同时运行时，第二个请求的 `busy` 错误被当成 worker 死亡处理，worker 被 recycle 且 session mapping 被删除。
+
+现在 `sessionTails` 给每个 session 单独串行化 `run` 与 `reset`：同一 session 有序，不同 session 仍并行。调用时间从排队时开始计，worker 超时计时仍在 worker 开始执行时启动；日志增加 `queueWaitMs`，返回的总 `durationMs` 包含等待。
+
+active session 的语言归属也被检查：已分配给 Python 的 session id 若改用于 JavaScript 或 Go，会明确报错，不会把源码交给错误 worker。若未来支持跨语言同名 session，应引入复合 key 并同步改 reset/list，而不是悄悄共享字符串 id。
+
+`verify-exec.ts` 增加并发冷启动、namespace 顺序、跨语言拒绝，以及 run→reset→run 排序回归测试（29 → 38 条）。
+
+### 顺带修复：Vitest 的 38 个单测曾经一个也没注册
+
+本轮实跑 `npm test`，Vitest 报两个文件失败、**no tests**，不是断言失败。临时在 `describe` 回调里打印日志，看到模块顶层执行了，但 callback 从未进入 collector；去掉 `vitest` 包导入、改用 Vitest 当前 worker 提供的 globals（`globals: true`）后，38 个用例全部回来。测试 API 的包导入与运行中的 collector 不在同一个上下文，是“报告没有 suite”而非模块导入错误的根因。
+
+**结论**：`npm test` 还必须保留文件数守卫；它能抓“少跑了文件”，但不能抓“文件被收集却没有任何用例”。因此单元测试的汇总也应明确给出并核对测试总数，不能只依赖 Vitest 退出码。
+
+## 十二、还没做的
+
+1. **插件市场远程安装 + `trust.signature` 验签**。
+2. **`ci:install-smoke` 只在开发机上验证过** —— GitHub runner 上的临时目录与权限策略未实测。
 
 0.7.19 关掉了两项：#40（Markdown 预览窗格 + outline）与 #45（执行平面的验证套件）。#45 装上后立刻抓到两个真 bug —— Python 沙箱**从未真正工作过**：worker 缺 `contextlib` 导入（stdout 重定向不生效，`print` 直接污染帧协议），且 `write_frame` 只写长度头、**从不写 JSON 正文**。两者叠加的效果是每一次 `code.run`（Python）都等到超时，之后整个池子降级。
