@@ -28,6 +28,13 @@ export interface CaptureOptions {
   onStdinReady?: (sink: (data: string) => void) => void;
   /** Count non-empty lines into the log (used for `execution.lines`). */
   captureLines?: boolean;
+  /** Maximum retained stdout/stderr bytes per stream (default 4 MiB). */
+  maxCaptureBytes?: number;
+  /** Optional independent limits, used to cap a multi-step run across steps. */
+  maxStdoutCaptureBytes?: number;
+  maxStderrCaptureBytes?: number;
+  /** Maximum output lines copied into telemetry (default 10,000 total). */
+  maxLogLines?: number;
   /**
    * Cancellation from the host (the IDE's Stop button). Aborting kills the
    * child with SIGKILL — a runaway program must not outlive the button that
@@ -41,6 +48,11 @@ export interface CaptureResult {
   signal: string | null;
   stdout: string;
   stderr: string;
+  stdoutBytes: number;
+  stderrBytes: number;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  logLinesTruncated: boolean;
   timedOut: boolean;
   /** True when the host aborted the run rather than the program exiting. */
   cancelled: boolean;
@@ -109,7 +121,16 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
     const started = Date.now();
     const stdout: string[] = [];
     const stderr: string[] = [];
+    const defaultCaptureLimit = opts.maxCaptureBytes ?? 4 * 1024 * 1024;
+    const stdoutCaptureLimit = Math.max(0, Math.floor(opts.maxStdoutCaptureBytes ?? defaultCaptureLimit));
+    const stderrCaptureLimit = Math.max(0, Math.floor(opts.maxStderrCaptureBytes ?? defaultCaptureLimit));
+    const logLineLimit = Math.max(0, Math.floor(opts.maxLogLines ?? 10_000));
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let logLines = 0;
+    let logLinesTruncated = false;
     let timedOut = false;
     let cancelled = false;
     let settled = false;
@@ -121,8 +142,13 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
       resolve({
         exitCode,
         signal,
-        stdout: stdout.join(''),
-        stderr: stderr.join(''),
+        stdout: stdout.join('') + (stdoutTruncated ? `\n[stdout truncated at ${stdoutCaptureLimit} bytes]\n` : ''),
+        stderr: stderr.join('') + (stderrTruncated ? `\n[stderr truncated at ${stderrCaptureLimit} bytes]\n` : ''),
+        stdoutBytes,
+        stderrBytes,
+        stdoutTruncated,
+        stderrTruncated,
+        logLinesTruncated,
         timedOut,
         cancelled,
         logLines,
@@ -163,18 +189,41 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
 
     const onChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
       const text = chunk.toString('utf8');
-      (stream === 'stdout' ? stdout : stderr).push(text);
-      opts.onData?.(stream, text);
+      const list = stream === 'stdout' ? stdout : stderr;
+      const used = stream === 'stdout' ? stdoutBytes : stderrBytes;
+      const streamLimit = stream === 'stdout' ? stdoutCaptureLimit : stderrCaptureLimit;
+      const remaining = Math.max(0, streamLimit - used);
+      const bytes = Buffer.byteLength(text);
+      let accepted = text;
+      if (bytes > remaining) {
+        let lo = 0, hi = text.length;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (Buffer.byteLength(text.slice(0, mid)) <= remaining) lo = mid;
+          else hi = mid - 1;
+        }
+        accepted = text.slice(0, lo);
+        if (stream === 'stdout') stdoutTruncated = true; else stderrTruncated = true;
+      }
+      if (accepted) list.push(accepted);
+      const acceptedBytes = Buffer.byteLength(accepted);
+      if (stream === 'stdout') stdoutBytes += acceptedBytes; else stderrBytes += acceptedBytes;
+      // Cap the live WebSocket stream as well as the retained result. The UI
+      // adds a visible truncation notice when the final runResult arrives.
+      if (accepted) opts.onData?.(stream, accepted);
       if (!opts.captureLines) return;
       const sink = opts.userLog ?? opts.log;
       if (!sink) return;
-      for (const raw of text.split('\n')) {
+      for (const raw of accepted.split('\n')) {
         const line = raw.replace(/\r$/, '');
         if (!line.trim()) continue;
+        if (logLines >= logLineLimit) { logLinesTruncated = true; continue; }
+        let logged = line;
+        if (logged.length > 16 * 1024) { logged = logged.slice(0, 16 * 1024) + '… [line truncated]'; logLinesTruncated = true; }
         logLines++;
         const fields = { stream, runId: opts.runId, line: logLines };
-        if (stream === 'stderr') sink.warn(line, fields);
-        else sink.info(line, fields);
+        if (stream === 'stderr') sink.warn(logged, fields);
+        else sink.info(logged, fields);
       }
     };
 

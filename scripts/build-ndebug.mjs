@@ -100,6 +100,7 @@ async function bundle() {
     format: 'cjs', // SEA's require() path is CJS; useCodeCache needs it too
     outfile,
     logLevel: 'warning',
+    minify: true,
     external: ['node:*'],
     plugins: [rawPlugin],
   });

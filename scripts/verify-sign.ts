@@ -110,6 +110,10 @@ check('doctor: reports the signature', /signature\?: SignatureInfo/.test(doctor)
 check('doctor: hints when the build is unsigned', /not code-signed/.test(doctor));
 
 const buildExe = read('scripts/build-exe.mjs');
+const buildNdebug = read('scripts/build-ndebug.mjs');
+check('build: release SEA is minified', /minify:\s*true/.test(buildExe));
+check('build: inline source maps are opt-in for debugging only', /sourcemap:\s*process\.env\.NOLANGUAGE_DEBUG_SOURCEMAP/.test(buildExe));
+check('build: NDebug SEA is minified too', /minify:\s*true/.test(buildNdebug));
 check(
   'build: the inherited node.exe signature is cleared (otherwise signing is impossible)',
   /clearInheritedSignature/.test(buildExe) && /data directory 4/.test(buildExe),

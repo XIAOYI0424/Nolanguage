@@ -139,6 +139,7 @@ export class Kernel implements IKernel {
   baselines?: BaselineStore;
   baseline?: AutoBaseline;
   private storeRequested: boolean;
+  private rotationTimer?: ReturnType<typeof setTimeout>;
   /** True when *this* kernel opened the store, so `stop()` may close it. */
   private ownsStore = false;
 
@@ -196,6 +197,7 @@ export class Kernel implements IKernel {
     this.log.install(this);
     this.attachStore();
     this.started = true;
+    this.scheduleStoreRotation();
     this.logger.root().info('Kernel started', {
       appVersion: this.appVersion,
       os: this.env.os,
@@ -208,6 +210,30 @@ export class Kernel implements IKernel {
     });
     await this.events.emit('kernel:started', { appVersion: this.appVersion });
     this.baseline?.start();
+  }
+
+  /**
+   * Rotate expired telemetry in bounded batches off the startup path. The
+   * timer is unref'ed, and only the default owned store is maintained here;
+   * a host-supplied store remains the host's responsibility.
+   */
+  private scheduleStoreRotation(delayMs = 60_000): void {
+    if (!this.ownsStore || !this.store || this.store.path === ':memory:') return;
+    this.rotationTimer = setTimeout(() => {
+      this.rotationTimer = undefined;
+      const store = this.store;
+      if (!store || !this.ownsStore) return;
+      let more = false;
+      try {
+        const result = store.rotate(Date.now(), 500);
+        more = result.more;
+        if (result.scanned > 0) this.logger.forComponent('store.retention').info('Rotated expired telemetry batch', { ...result });
+      } catch (err) {
+        this.logger.forComponent('store.retention').warn('Telemetry retention pass failed', { error: (err as Error).message });
+      }
+      this.scheduleStoreRotation(more ? 1_000 : 6 * 60 * 60_000);
+    }, delayMs);
+    this.rotationTimer.unref?.();
   }
 
   /**
@@ -260,6 +286,8 @@ export class Kernel implements IKernel {
   }
 
   async stop(): Promise<void> {
+    if (this.rotationTimer) clearTimeout(this.rotationTimer);
+    this.rotationTimer = undefined;
     await this.events.emit('kernel:stopping');
     // Final baseline for whatever work happened since the last checkpoint.
     if (this.baseline && this.perf.metrics.names().length > 0) {

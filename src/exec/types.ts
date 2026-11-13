@@ -47,12 +47,16 @@ export interface SandboxRunResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
   /** True when the in-worker execution raised (Python) or errored (Node). */
   ok: boolean;
   /** Worker-side traceback / error text, if any. */
   error?: string | null;
   /** Output lines replayed onto the log spine as `user-code` records. */
   logLines: number;
+  /** True when telemetry line cap dropped some output lines. */
+  logLinesTruncated?: boolean;
   timedOut: boolean;
   mode: 'run' | 'test';
   /** Go only: which phase produced the outcome. */
@@ -82,6 +86,10 @@ export interface SandboxPoolOptions {
   minSize?: number;
   /** Never hold more than this many idle workers per language. */
   maxSize?: number;
+  /** Maximum retained runtime sessions/workers across languages; excess named sessions fail clearly. */
+  maxWorkers?: number;
+  /** Expire unnamed/ephemeral sessions after this much idleness (default 5 minutes). */
+  maxSessionIdleMs?: number;
   /** Recycle an idle warm worker after this many ms. */
   maxIdleMs?: number;
   /** Default per-run timeout. */

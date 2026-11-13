@@ -26,6 +26,8 @@ export interface WorkerResult {
   ok: boolean;
   stdout: string;
   stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
   error: string | null;
   durationMs: number;
 }
@@ -79,7 +81,10 @@ export class WarmWorker {
       languageId === 'python'
         ? opts.pythonBin ?? process.env.PYTHON_BIN ?? 'python'
         : opts.nodeBin ?? process.env.NODE_BIN ?? 'node';
-    this.ready = this.spawn();
+    this.ready = this.spawn().catch((err) => {
+      this.dead = true;
+      throw err;
+    });
   }
 
   get pid(): number | undefined {
@@ -88,6 +93,11 @@ export class WarmWorker {
 
   get isAlive(): boolean {
     return this.child !== null && !this.dead;
+  }
+
+  /** True while the startup promise is outstanding and has not failed. */
+  get isStarting(): boolean {
+    return this.child === null && !this.dead;
   }
 
   get isBusy(): boolean {
@@ -205,6 +215,10 @@ export class WarmWorker {
 
   /** Kill the worker (idle recycle or shutdown). */
   async recycle(): Promise<void> {
+    if (!this.child && this.dead) return;
+    if (!this.child) {
+      try { await this.ready; } catch { return; }
+    }
     if (!this.child) return;
     const child = this.child;
     this.child = null;

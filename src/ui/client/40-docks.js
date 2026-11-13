@@ -124,11 +124,16 @@
       '<label class="dlg-check" style="margin-left:8px"><input type="checkbox" id="findCS" />Case sensitive</label>' +
       '</div><div id="findOut" class="find-out"><div class="empty">Type to search open files.</div></div>';
   }
+  var FIND_MAX_TOTAL = 1000, FIND_MAX_PER_FILE = 250, FIND_SCAN_LIMIT = 16 * 1024 * 1024, findTimer = 0;
+  function queueFind(q, cs) {
+    clearTimeout(findTimer);
+    findTimer = setTimeout(function () { renderFind(q, cs); }, 120);
+  }
   function wireFind() {
     var inp = $('findIn'); if (!inp) return;
-    inp.addEventListener('input', function () { renderFind(inp.value, $('findCS') && $('findCS').checked); });
-    inp.addEventListener('keydown', function (e) { if (e.key === 'Escape') { inp.value = ''; renderFind('', false); } });
-    var cs = $('findCS'); if (cs) cs.addEventListener('change', function () { renderFind(inp.value, cs.checked); });
+    inp.addEventListener('input', function () { queueFind(inp.value, $('findCS') && $('findCS').checked); });
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Escape') { inp.value = ''; clearTimeout(findTimer); renderFind('', false); } });
+    var cs = $('findCS'); if (cs) cs.addEventListener('change', function () { queueFind(inp.value, cs.checked); });
   }
   function openFindInFiles() {
     if (activeBottom !== 'find') { activeBottom = 'find'; renderDock(); }
@@ -140,26 +145,34 @@
     if (!q.trim()) { out.innerHTML = '<div class="empty">Type to search open files.</div>'; return; }
     var needle = cs ? q : q.toLowerCase();
     var html = '';
-    var total = 0;
-    Object.keys(BUFFERS).forEach(function (path) {
-      var content = BUFFERS[path].content || '';
-      var lines = content.split('\n');
-      var hits = [];
-      lines.forEach(function (ln, i) {
-        var hay = cs ? ln : ln.toLowerCase();
-        var idx = hay.indexOf(needle);
-        if (idx >= 0) hits.push({ line: i + 1, text: ln });
-      });
-      if (!hits.length) return;
-      total += hits.length;
-      html += '<div class="fgroup" data-path="' + esc(path) + '"><div class="fhead">' + esc(path) + ' <span class="dim">(' + hits.length + ')</span></div>';
-      hits.forEach(function (h) {
-        html += '<div class="fhit" data-path="' + esc(path) + '" data-line="' + h.line + '">' +
-          '<span class="fl">Ln ' + h.line + '</span>' + esc(h.text.slice(0, 200)) + '</div>';
-      });
-      html += '</div>';
-    });
-    out.innerHTML = total ? html : '<div class="empty">No matches in open files.</div>';
+    var total = 0, scanned = 0, capped = false;
+    var paths = Object.keys(BUFFERS);
+    for (var pi = 0; pi < paths.length && total < FIND_MAX_TOTAL && scanned < FIND_SCAN_LIMIT; pi++) {
+      var path = paths[pi], content = BUFFERS[path].content || '';
+      var hits = [], start = 0, lineNo = 1;
+      while (start <= content.length && total < FIND_MAX_TOTAL && scanned < FIND_SCAN_LIMIT) {
+        var end = content.indexOf('\n', start); if (end < 0) end = content.length;
+        var ln = content.slice(start, end);
+        scanned += ln.length + 1;
+        if ((cs ? ln : ln.toLowerCase()).indexOf(needle) >= 0) {
+          hits.push({ line: lineNo, text: ln }); total++;
+          if (hits.length >= FIND_MAX_PER_FILE || total >= FIND_MAX_TOTAL) { capped = true; break; }
+        }
+        if (end === content.length) break;
+        start = end + 1; lineNo++;
+      }
+      if (hits.length) {
+        html += '<div class="fgroup" data-path="' + esc(path) + '"><div class="fhead">' + esc(path) + ' <span class="dim">(' + hits.length + ')</span></div>';
+        hits.forEach(function (h) {
+          html += '<div class="fhit" data-path="' + esc(path) + '" data-line="' + h.line + '">' +
+            '<span class="fl">Ln ' + h.line + '</span>' + esc(h.text.slice(0, 200)) + '</div>';
+        });
+        html += '</div>';
+      }
+    }
+    if (total >= FIND_MAX_TOTAL || scanned >= FIND_SCAN_LIMIT) capped = true;
+    if (capped) html += '<div class="empty">Search limited to ' + FIND_MAX_PER_FILE + ' matches per file, ' + FIND_MAX_TOTAL + ' total / ' + Math.round(FIND_SCAN_LIMIT / 1048576) + ' Mi characters for responsiveness.</div>';
+    out.innerHTML = total ? html : '<div class="empty">' + (capped ? 'Search scan limit reached.' : 'No matches in open files.') + '</div>';
     out.querySelectorAll('.fhit').forEach(function (el) {
       el.addEventListener('dblclick', function () { gotoLineInFile(el.getAttribute('data-path'), +el.getAttribute('data-line')); });
     });

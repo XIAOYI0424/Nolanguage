@@ -32,20 +32,26 @@ export function collectSandboxOutput(
   stderr: string,
 ): number {
   const userLog = kernel.logger.forUserCode(languageId, sessionId);
+  const maxLines = 10_000;
+  const maxLineChars = 16 * 1024;
   let lines = 0;
+  let omitted = false;
   const replay = (stream: 'stdout' | 'stderr', text: string): void => {
     for (const raw of text.split('\n')) {
       const line = raw.replace(/\r$/, '');
       if (!line.trim()) continue;
+      if (lines >= maxLines) { omitted = true; continue; }
+      const safeLine = line.length > maxLineChars ? line.slice(0, maxLineChars) + '… [line truncated]' : line;
       lines++;
-      const fields = { stream, runId, sessionId };
-      const level = classify(stream, line);
-      if (level === 'error') userLog.error(line, fields);
-      else if (level === 'warn') userLog.warn(line, fields);
-      else userLog.info(line, fields);
+      const fields = { stream, runId, sessionId, ...(safeLine === line ? {} : { truncated: true }) };
+      const level = classify(stream, safeLine);
+      if (level === 'error') userLog.error(safeLine, fields);
+      else if (level === 'warn') userLog.warn(safeLine, fields);
+      else userLog.info(safeLine, fields);
     }
   };
   replay('stdout', stdout);
   replay('stderr', stderr);
+  if (omitted) userLog.warn('sandbox output telemetry truncated at the per-run line limit', { runId, sessionId, maxLines });
   return lines;
 }

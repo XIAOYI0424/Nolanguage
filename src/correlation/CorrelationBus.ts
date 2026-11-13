@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ulid } from '../util/ulid.js';
 import type { LogCorrelation } from './types.js';
-import { probeGit, GitProbe, UNKNOWN_GIT } from '../git/GitProbe.js';
+import { GitProbe, UNKNOWN_GIT } from '../git/GitProbe.js';
 import type { GitInfo, GitProbeOptions } from '../git/GitProbe.js';
 
 export interface CorrelationBusOptions extends GitProbeOptions {
@@ -47,11 +47,16 @@ export class CorrelationBus {
    * `setGit`) always wins, so a host that knows the commit is never overwritten
    * by a probe.
    */
-  async prime(force = false): Promise<GitInfo> {
+  async prime(force = false, observed?: GitInfo): Promise<GitInfo> {
     if (this.injected) return this.git;
+    if (observed) {
+      this.git = observed;
+      this.primed = true;
+      return this.git;
+    }
     if (this.primed && !force) return this.git;
     try {
-      this.git = await probeGit(this.probe.cwd, this.probe.bin);
+      this.git = await this.probe.probe(force);
     } catch {
       this.git = { ...UNKNOWN_GIT };
     }

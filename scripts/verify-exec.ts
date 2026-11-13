@@ -22,6 +22,7 @@
 import { Kernel } from '../src/kernel/Kernel.js';
 import { ExecService } from '../src/exec/ExecService.js';
 import { NODE_WORKER_SRC } from '../src/exec/workerSource.js';
+import { capture } from '../src/runtimes/proc.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 let skipped = 0;
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
 
   // `minSize: 0`: the cold/warm assertions below are about *this* session's
   // first run, so the pool must not have a pre-warmed worker waiting.
-  const exec = new ExecService(k, { minSize: 0, maxSize: 8, runTimeoutMs: 8000 });
+  const exec = new ExecService(k, { minSize: 0, maxSize: 2, maxWorkers: 32, runTimeoutMs: 8000 });
 
   try {
     // ---------------------------------------------------------- warm pool
@@ -100,6 +101,52 @@ async function main(): Promise<void> {
       const [activeResult, resetResult, resetRun] = await Promise.all([active, reset, afterReset]);
       check('concurrency: reset waits for the active run instead of killing its worker', activeResult.stdout.includes('before reset'), JSON.stringify(activeResult.stdout.trim()));
       check('concurrency: a run queued after reset starts cold', resetResult && !resetRun.warm && resetRun.stdout.includes('after reset'), `reset=${resetResult} warm=${resetRun.warm} out=${resetRun.stdout.trim()}`);
+
+      const prewarmed = new ExecService(k, { minSize: 2, maxSize: 2, maxWorkers: 1, runTimeoutMs: 8000 });
+      check('capacity: prewarm reservations respect the total worker cap', prewarmed.pool.workerSpawns === 1, `spawned=${prewarmed.pool.workerSpawns}`);
+      await prewarmed.close();
+
+      const capRace = new ExecService(k, { minSize: 0, maxWorkers: 1, runTimeoutMs: 8000 });
+      try {
+        const raced = await Promise.allSettled([
+          capRace.run({ languageId: 'javascript', sessionId: 'race-a', code: 'console.log("a")' }),
+          capRace.run({ languageId: 'python', sessionId: 'race-b', code: 'print("b")' }),
+        ]);
+        check('capacity: distinct concurrent sessions cannot over-admit the last slot', raced.filter((r) => r.status === 'fulfilled').length === 1 && capRace.pool.workerSpawns === 1, `fulfilled=${raced.filter((r) => r.status === 'fulfilled').length} spawned=${capRace.pool.workerSpawns}`);
+      } finally {
+        await capRace.close();
+      }
+
+      const capped = new ExecService(k, { minSize: 0, maxWorkers: 1, runTimeoutMs: 8000 });
+      try {
+        await capped.create('javascript', 'reserved');
+        let createLimitError = '';
+        try { await capped.create('python', 'reserved-two'); }
+        catch (err) { createLimitError = (err as Error).message; }
+        check('capacity: create reserves a slot and refuses excess named sessions', createLimitError.includes('session limit reached (1)') && capped.list().some((s) => s.sessionId === 'reserved'), createLimitError || JSON.stringify(capped.list()));
+        await capped.reset('reserved');
+        await capped.run({ languageId: 'javascript', sessionId: 'cap-one', code: 'console.log("one")' });
+        let limitError = '';
+        try { await capped.run({ languageId: 'javascript', sessionId: 'cap-two', code: 'console.log("two")' }); }
+        catch (err) { limitError = (err as Error).message; }
+        check('capacity: the worker ceiling rejects excess named sessions clearly', limitError.includes('session limit reached (1)'), limitError || 'no error');
+        await capped.reset('cap-one');
+        const replacement = await capped.run({ languageId: 'javascript', sessionId: 'cap-two', code: 'console.log("two")' });
+        check('capacity: reset releases a slot for the next named session', replacement.ok && replacement.stdout.includes('two'), replacement.stdout.trim());
+      } finally {
+        await capped.close();
+      }
+
+      const expiry = new ExecService(k, { minSize: 0, maxWorkers: 2, maxSessionIdleMs: 30, maxIdleMs: 5, runTimeoutMs: 8000 });
+      try {
+        const anonymous = await expiry.run({ languageId: 'javascript', code: 'console.log("temporary")' });
+        const named = await expiry.run({ languageId: 'javascript', sessionId: 'keep-state', code: 'console.log("persistent")' });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        check('lifecycle: generated anonymous sessions expire after idle', !expiry.list().some((s) => s.sessionId === anonymous.sessionId), anonymous.sessionId);
+        check('lifecycle: named sessions preserve user state across idle', expiry.list().some((s) => s.sessionId === named.sessionId), named.sessionId);
+      } finally {
+        await expiry.close();
+      }
     }
 
     // ------------------------------------------------------------ failures
@@ -178,6 +225,11 @@ async function main(): Promise<void> {
       try {
         const g = await exec.run({ languageId: 'go', sessionId: 'go1', code: 'package main\nimport "fmt"\nfunc main(){ fmt.Println("go ok") }', timeoutMs: 60_000 });
         check('go: a program builds and runs', g.ok === true && g.stdout.includes('go ok'), `exit=${g.exitCode} ${JSON.stringify(g.stdout.trim().slice(0, 40))}`);
+        const goOutput = await exec.run({
+          languageId: 'go', sessionId: 'go-output',
+          code: 'package main\nimport ("fmt"; "strings")\nfunc main(){fmt.Println(strings.Repeat("x", 5*1024*1024))}', timeoutMs: 60_000,
+        });
+        check('worker output: Go caps retained stdout at 4 MiB', goOutput.stdoutTruncated === true && Buffer.byteLength(goOutput.stdout) < 4 * 1024 * 1024 + 200, `${Buffer.byteLength(goOutput.stdout)} bytes truncated=${goOutput.stdoutTruncated}`);
         let goCollision = '';
         try {
           await exec.run({ languageId: 'python', sessionId: 'go1', code: 'print("must not route to Go")' });
@@ -204,6 +256,32 @@ async function main(): Promise<void> {
     const relative = [...src.matchAll(/(?:from\s+|require\(\s*)['"](\.[^'"]*)['"]/g)].map((m) => m[1]);
     check('worker: the generated script has no relative imports', relative.length === 0, relative.join(', ') || 'none');
     check('worker: it is plain source, not a template placeholder', src.length > 200 && !src.includes('${'), `${src.length} bytes`);
+  }
+
+  // ------------------------------------------------ bounded process capture
+  {
+    const pyOutput = await exec.run({
+      languageId: 'python', sessionId: 'large-output-py',
+      code: 'print("x" * (5 * 1024 * 1024))',
+    });
+    check('worker output: Python caps retained stdout at 4 MiB', pyOutput.stdoutTruncated === true && Buffer.byteLength(pyOutput.stdout) < 4 * 1024 * 1024 + 200, `${Buffer.byteLength(pyOutput.stdout)} bytes truncated=${pyOutput.stdoutTruncated}`);
+    const jsOutput = await exec.run({
+      languageId: 'javascript', sessionId: 'large-output-js',
+      code: 'console.log("x".repeat(5 * 1024 * 1024))',
+    });
+    check('worker output: JavaScript caps retained stdout at 4 MiB', jsOutput.stdoutTruncated === true && Buffer.byteLength(jsOutput.stdout) < 4 * 1024 * 1024 + 200, `${Buffer.byteLength(jsOutput.stdout)} bytes truncated=${jsOutput.stdoutTruncated}`);
+
+    const raw = await capture(process.execPath, [
+      '-e', 'process.stdout.write("A".repeat(5000));process.stderr.write("B".repeat(5000))',
+    ], { cwd: process.cwd(), env: process.env, timeoutMs: 10_000, maxCaptureBytes: 1024 });
+    check('capture: returned stdout is byte bounded and marked', Buffer.byteLength(raw.stdout) < 1200 && raw.stdoutTruncated && raw.stdout.includes('truncated at 1024 bytes'), `${Buffer.byteLength(raw.stdout)} bytes truncated=${raw.stdoutTruncated}`);
+    check('capture: returned stderr is byte bounded and marked', Buffer.byteLength(raw.stderr) < 1200 && raw.stderrTruncated && raw.stderr.includes('truncated at 1024 bytes'), `${Buffer.byteLength(raw.stderr)} bytes truncated=${raw.stderrTruncated}`);
+
+    const log = k.logger.forExecution('verify.capture', 'bounded');
+    const lines = await capture(process.execPath, [
+      '-e', 'process.stdout.write(Array.from({length:20},(_,i)=>"line"+i+"\\n").join(""))',
+    ], { cwd: process.cwd(), env: process.env, timeoutMs: 10_000, captureLines: true, maxLogLines: 3, userLog: log });
+    check('capture: telemetry line count is capped', lines.logLines === 3 && lines.logLinesTruncated, `lines=${lines.logLines} truncated=${lines.logLinesTruncated}`);
   }
 
   const failed = results.filter((r) => !r.ok).length;

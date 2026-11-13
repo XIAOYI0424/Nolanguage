@@ -266,8 +266,7 @@
     renderEditor(); updateCaret();
     // Re-check under the new language; a language with no server has no
     // problems to show, so clear the previous language's list.
-    if (lspLang()) BRIDGE.send({ kind: 'check', code: ta.value, language: lspLang() });
-    else clearDiags();
+    requestCheck();
     toast('Language mode: ' + langLabel(chosen) + (lang ? ' (manual)' : ' (from file type)'));
   }
 

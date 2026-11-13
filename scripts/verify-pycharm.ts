@@ -1214,8 +1214,27 @@ async function testInteractions(): Promise<void> {
   check('interactions: Ctrl+Shift+F opens Find in Files', !!fin);
   fin.value = 'fib';
   fire(w, fin, 'input', {});
-  await settle(w);
+  await settle(w, 160);
   check('interactions: Find shows matches from open buffers', qa(w, '#findOut .fhit').length > 0, `${qa(w, '#findOut .fhit').length} hits`);
+
+  socket.deliver({ kind: 'fsFile', file: {
+    path: 'large.txt', name: 'large.txt', content: Array(1200).fill('needle').join('\n'), size: 8_399, mtime: 1,
+    languageId: 'markdown', editable: true,
+  } });
+  fin.value = 'needle';
+  fire(w, fin, 'input', {});
+  await settle(w, 160);
+  check('interactions: Find result DOM is capped', qa(w, '#findOut .fhit').length <= 1000, String(qa(w, '#findOut .fhit').length));
+  check('interactions: capped Find reports that more results were omitted', (q(w, '#findOut')?.textContent || '').includes('Search limited'), (q(w, '#findOut')?.textContent || '').slice(-90));
+
+  const beforeLargeCheck = socket.sent.filter((m: any) => m.kind === 'check').length;
+  const editor = q(w, '#ta') as any;
+  editor.value = 'x'.repeat(1024 * 1024 + 1);
+  fire(w, editor, 'input', {});
+  await settle(w, 380);
+  const newChecks = socket.sent.filter((m: any) => m.kind === 'check').slice(beforeLargeCheck);
+  check('interactions: live diagnostics skip files over 1 Mi characters', !newChecks.some((m: any) => String(m.code || '').length > 1024 * 1024), `sent ${newChecks.length} check(s)`);
+  check('interactions: large-file diagnostics degradation is visible', (q(w, '#toast')?.textContent || '').includes('Live checks paused'));
 
   w.close();
 }
@@ -1873,6 +1892,23 @@ console.log('');
   socket.deliver({ kind: 'fsSaved', path: second.path, reqId: second.reqId, mtime: 2, size: String(second.content).length });
   await settle(w, 10);
   check('tabs: Save All closes tabs only after every write succeeds', !tab('main.py') && !tab('utils.py') && !tab('README.md'));
+  w.close();
+}
+
+// ------------------------------------------------ bounded run-console output
+console.log('');
+{
+  const mounted = mountPage(renderPyCharmHtml(7310));
+  const w = mounted.window as any;
+  const socket = needSocket(mounted);
+  await settle(w, 20);
+  q(w, '#runBtn').click();
+  socket.deliver({ kind: 'runOut', stream: 'stdout', text: 'x'.repeat(600 * 1024) });
+  const text = String(q(w, '#runOut')?.textContent || '');
+  check('console: noisy output is capped to a bounded DOM buffer', text.length < 525 * 1024, String(text.length));
+  check('console: cap is visible to the user', text.includes('console output truncated'), text.slice(-70));
+  socket.deliver({ kind: 'runOut', stream: 'stdout', text: 'later output must not regrow the buffer' });
+  check('console: later chunks do not bypass the cap', String(q(w, '#runOut')?.textContent || '').length === text.length);
   w.close();
 }
 

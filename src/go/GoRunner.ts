@@ -56,6 +56,9 @@ export interface GoRunResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  logLinesTruncated?: boolean;
   timedOut: boolean;
   logLines: number;
   goBin: string;
@@ -205,26 +208,51 @@ export class GoRunner {
 
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
+    const OUTPUT_LIMIT = 4 * 1024 * 1024;
+    const LOG_LINE_LIMIT = 10_000;
+    let stdoutBytes = 0, stderrBytes = 0;
+    let stdoutTruncated = false, stderrTruncated = false, logLinesTruncated = false;
     let logLines = 0;
+    const stdoutResult = () => stdoutChunks.join('') + (stdoutTruncated ? `\n[stdout truncated at ${OUTPUT_LIMIT} bytes]\n` : '');
+    const stderrResult = () => stderrChunks.join('') + (stderrTruncated ? `\n[stderr truncated at ${OUTPUT_LIMIT} bytes]\n` : '');
 
     const onLine = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
       const text = chunk.toString('utf8');
-      (stream === 'stdout' ? stdoutChunks : stderrChunks).push(text);
+      const list = stream === 'stdout' ? stdoutChunks : stderrChunks;
+      const used = stream === 'stdout' ? stdoutBytes : stderrBytes;
+      const remaining = Math.max(0, OUTPUT_LIMIT - used);
+      let accepted = text;
+      if (Buffer.byteLength(text) > remaining) {
+        let lo = 0, hi = text.length;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (Buffer.byteLength(text.slice(0, mid)) <= remaining) lo = mid;
+          else hi = mid - 1;
+        }
+        accepted = text.slice(0, lo);
+        if (stream === 'stdout') stdoutTruncated = true; else stderrTruncated = true;
+      }
+      if (accepted) list.push(accepted);
+      const acceptedBytes = Buffer.byteLength(accepted);
+      if (stream === 'stdout') stdoutBytes += acceptedBytes; else stderrBytes += acceptedBytes;
       if (!capture) return;
-      for (const raw of text.split('\n')) {
+      for (const raw of accepted.split('\n')) {
         const line = raw.replace(/\r$/, '');
         if (!line.trim()) continue;
+        if (logLines >= LOG_LINE_LIMIT) { logLinesTruncated = true; continue; }
+        const logged = line.length > 16 * 1024 ? `${line.slice(0, 16 * 1024)}… [line truncated]` : line;
+        if (logged !== line) logLinesTruncated = true;
         logLines++;
         const fields = { stream, runId, line: logLines };
         if (stream === 'stderr') {
           // Compiler diagnostics look like `./main.go:12:5: undefined: foo`.
-          if (/^\s*[.\w/\\-]+\.go:\d+:\d+:/.test(line) || /^(#|\s*panic:|\s*FAIL)/.test(line)) {
-            userLog.error(line, fields);
+          if (/^\s*[.\w/\\-]+\.go:\d+:\d+:/.test(logged) || /^(#|\s*panic:|\s*FAIL)/.test(logged)) {
+            userLog.error(logged, fields);
           } else {
-            userLog.warn(line, fields);
+            userLog.warn(logged, fields);
           }
         } else {
-          userLog.info(line, fields);
+          userLog.info(logged, fields);
         }
       }
     };
@@ -278,8 +306,11 @@ export class GoRunner {
           exitCode: buildExit.code,
           signal: buildExit.signal,
           durationMs,
-          stdout: stdoutChunks.join(''),
-          stderr: stderrChunks.join(''),
+          stdout: stdoutResult(),
+          stderr: stderrResult(),
+          stdoutTruncated,
+          stderrTruncated,
+          logLinesTruncated,
           timedOut,
           logLines,
           goBin: this.goBin,
@@ -336,8 +367,11 @@ export class GoRunner {
       exitCode: exit.code,
       signal: exit.signal,
       durationMs,
-      stdout: stdoutChunks.join(''),
-      stderr: stderrChunks.join(''),
+      stdout: stdoutResult(),
+      stderr: stderrResult(),
+      stdoutTruncated,
+      stderrTruncated,
+      logLinesTruncated,
       timedOut,
       logLines,
       goBin: this.goBin,

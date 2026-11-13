@@ -116,6 +116,14 @@ async function testBudget(): Promise<void> {
   mgr3.bind({ profiles: () => stuck.profiles, stopLsp: () => Promise.reject(new Error('nope')) });
   const reaped3 = await mgr3.enforce();
   check('budget: a failing stop is recorded, not retried forever', reaped3.length === 0 && mgr3.summary().failedStops.length > 0, mgr3.summary().failedStops.join(','));
+
+  // If non-reclaimable runner/profiler estimates alone exceed the total budget,
+  // stopping LSPs cannot fix it. Keep them running and report the overage.
+  const fixedOver = new FakeProvider([profile('fixed', 300 * MB, { lspMemoryBytes: 50 * MB })]);
+  const mgr4 = new ProfileManager({ budgetBytes: 200 * MB, lspBudgetBytes: 100 * MB, idleMs: 0 });
+  mgr4.bind({ profiles: () => fixedOver.profiles, stopLsp: (id) => fixedOver.stopLsp(id) });
+  await mgr4.enforce();
+  check('budget: non-reclaimable estimate does not evict an in-budget LSP', fixedOver.stopped.length === 0 && mgr4.summary().overBudget, `${fixedOver.stopped.join(',') || 'no LSP stops'} · over=${mgr4.summary().overBudget}`);
 }
 
 async function testIdle(): Promise<void> {
@@ -357,7 +365,7 @@ async function testWorkspaceApply(): Promise<void> {
   // The budget sees every language, and an over-budget install sheds a quiet one.
   const budget = ws.resourceSummary();
   check('apply: the resource summary covers every language', budget.profiles.length === ids().split(',').length, String(budget.profiles.length));
-  check('apply: python is marked as the eager language', budget.profiles.some((p) => p.languageId === 'python' && p.eager));
+  check('apply: Python LSP starts eagerly (primary language)', budget.profiles.some((p) => p.languageId === 'python' && p.eager));
 
   await ws.close();
   await kernel.stop();

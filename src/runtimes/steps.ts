@@ -56,6 +56,13 @@ export async function runSteps(input: StepRunInput): Promise<RunOutcome> {
   const started = Date.now();
   const stdout: string[] = [];
   const stderr: string[] = [];
+  const runCaptureLimit = 4 * 1024 * 1024;
+  const runLogLineLimit = 10_000;
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let stdoutTruncated = false;
+  let stderrTruncated = false;
+  let logLinesTruncated = false;
   let logLines = 0;
   let buildMs = 0;
 
@@ -67,8 +74,11 @@ export async function runSteps(input: StepRunInput): Promise<RunOutcome> {
       exitCode: 0,
       signal: null,
       durationMs: Date.now() - started,
-      stdout: stdout.join(''),
-      stderr: stderr.join(''),
+      stdout: stdout.join('') + (stdoutTruncated ? `\n[stdout truncated at ${runCaptureLimit} bytes]\n` : ''),
+      stderr: stderr.join('') + (stderrTruncated ? `\n[stderr truncated at ${runCaptureLimit} bytes]\n` : ''),
+      stdoutTruncated,
+      stderrTruncated,
+      logLinesTruncated,
       timedOut: false,
       logLines,
       binary: input.binary,
@@ -94,11 +104,19 @@ export async function runSteps(input: StepRunInput): Promise<RunOutcome> {
       onData: input.onData,
       onStdinReady: input.onStdinReady,
       captureLines: true,
+      maxStdoutCaptureBytes: Math.max(0, runCaptureLimit - stdoutBytes),
+      maxStderrCaptureBytes: Math.max(0, runCaptureLimit - stderrBytes),
+      maxLogLines: Math.max(0, runLogLineLimit - logLines),
       signal: input.signal,
     });
 
-    stdout.push(res.stdout);
-    stderr.push(res.stderr);
+    stdout.push(res.stdout.replace(/\n\[stdout truncated at \d+ bytes\]\n$/, ''));
+    stderr.push(res.stderr.replace(/\n\[stderr truncated at \d+ bytes\]\n$/, ''));
+    stdoutBytes += res.stdoutBytes;
+    stderrBytes += res.stderrBytes;
+    stdoutTruncated ||= res.stdoutTruncated;
+    stderrTruncated ||= res.stderrTruncated;
+    logLinesTruncated ||= res.logLinesTruncated;
     logLines += res.logLines;
     if (step.role === 'build') buildMs += res.durationMs;
 

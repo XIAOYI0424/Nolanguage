@@ -218,6 +218,7 @@ export class ProfileManager {
    * stopping did not help and give up instead of spinning.
    */
   private async stopServer(id: string, reason: ReapReason): Promise<void> {
+    const estimatedBytes = (this.provider?.profiles() ?? []).find((p) => p.languageId === id)?.lspMemoryBytes ?? 0;
     try {
       await this.provider?.stopLsp(id);
     } catch {
@@ -225,8 +226,9 @@ export class ProfileManager {
       return;
     }
     this.used.delete(id);
-    const freed = (this.provider?.profiles() ?? []).find((p) => p.languageId === id)?.lspMemoryBytes ?? 0;
-    this.lastReaps.push({ id, reason, freedBytes: freed });
+    // The post-stop profile correctly reports zero active LSP bytes; record the
+    // manifest estimate observed before stop as the reclaimed amount.
+    this.lastReaps.push({ id, reason, freedBytes: estimatedBytes });
   }
 
   /**
@@ -241,8 +243,11 @@ export class ProfileManager {
       const running = profiles.filter((p) => p.lspRunning);
       const lspBytes = running.reduce((a, p) => a + p.lspMemoryBytes, 0);
       const totalBytes = profiles.reduce((a, p) => a + p.memoryBytes, 0);
+      const nonReclaimableBytes = totalBytes - lspBytes;
       const overLsp = lspBytes > this.lspBudgetBytes;
-      const overTotal = totalBytes > this.budgetBytes;
+      // LSP stop is the only reclamation action. Do not evict every LSP when
+      // runner/profiler estimates alone already exceed the total budget.
+      const overTotal = totalBytes > this.budgetBytes && nonReclaimableBytes < this.budgetBytes;
       if (!overLsp && !overTotal) return;
       if (!running.length) return; // Nothing reclaimable; `overBudget` reports it.
       const victim = pickVictim(running);

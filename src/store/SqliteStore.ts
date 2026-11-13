@@ -377,13 +377,16 @@ export class SqliteStore {
    * archived to the cold tier and removed from the warm tier — except
    * ERROR/FATAL/AUDIT, which are copied into `log_pinned` and kept forever.
    */
-  rotate(now = Date.now()): RotationResult {
+  rotate(now = Date.now(), batchSize = 500): RotationResult {
     const cutoffNs = (now - this.retentionDays * 86_400_000) * 1_000_000;
-    const expired = this.rows<LogRow>(
-      'SELECT * FROM log_record WHERE timestamp < ? ORDER BY timestamp ASC',
-      [cutoffNs],
+    const limit = Math.max(1, Math.floor(batchSize));
+    const rows = this.rows<LogRow>(
+      'SELECT * FROM log_record WHERE timestamp < ? ORDER BY timestamp ASC LIMIT ?',
+      [cutoffNs, limit + 1],
     );
-    if (!expired.length) return { scanned: 0, archived: 0, pinned: 0, deleted: 0, archivePath: '' };
+    const more = rows.length > limit;
+    const expired = rows.slice(0, limit);
+    if (!expired.length) return { scanned: 0, archived: 0, pinned: 0, deleted: 0, archivePath: '', more: false }; 
 
     let pinned = 0;
     const archiveRows: LogRow[] = [];
@@ -418,6 +421,7 @@ export class SqliteStore {
       pinned,
       deleted: expired.length,
       archivePath,
+      more,
     };
   }
 
@@ -451,6 +455,8 @@ export interface RotationResult {
   pinned: number;
   deleted: number;
   archivePath: string;
+  /** More expired rows remain; schedule another small batch. */
+  more: boolean;
 }
 
 export type SqlValue = string | number | null | Uint8Array;

@@ -136,6 +136,9 @@ export interface WorkspaceRunResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  logLinesTruncated?: boolean;
   timedOut: boolean;
   logLines: number;
   mode: RunMode;
@@ -769,6 +772,9 @@ export class WorkspaceService {
         durationMs: outcome.durationMs,
         stdout: outcome.stdout,
         stderr: outcome.stderr,
+        stdoutTruncated: outcome.stdoutTruncated,
+        stderrTruncated: outcome.stderrTruncated,
+        logLinesTruncated: outcome.logLinesTruncated,
         timedOut: outcome.timedOut,
         logLines: outcome.logLines,
         mode,
@@ -867,6 +873,7 @@ export class WorkspaceService {
 
   async hover(id: LanguageId, code: string, line: number, character: number): Promise<Hover | null> {
     const slot = this.requireSlot(id);
+    this.touch(id);
     await this.ensureLsp(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return null;
@@ -957,7 +964,10 @@ export class WorkspaceService {
     const now = Date.now();
     return [...this.slots.values()].map((slot) => {
       const m = slot.manifest;
-      const lspBytes = parseMemoryHint(m.lsp?.memoryHint);
+      // memoryHint is an estimate, not RSS. Only count the reclaimable LSP
+      // estimate while that process is alive; otherwise an idle, never-started
+      // server can make the total budget look exceeded and evict other servers.
+      const lspBytes = slot.lsp ? parseMemoryHint(m.lsp?.memoryHint) : 0;
       return {
         languageId: slot.id,
         memoryBytes: lspBytes + parseMemoryHint(m.profiler?.memoryHint) + (slot.runner ? runtimeMemoryBytes(m.run?.mode) : 0),

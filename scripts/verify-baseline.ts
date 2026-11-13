@@ -380,6 +380,19 @@ async function main(): Promise<void> {
     check('rotation keeps the non-expired row',
       store.raw<{ id: string }>('SELECT id FROM log_record')[0].id === 'r5');
 
+    const batched = new SqliteStore({ path: ':memory:', archiveDir: null, retentionDays: 1, pinSevere: false });
+    const oldBatchTs = (Date.now() - 5 * 86_400_000) * 1_000_000;
+    batched.insertLogs([
+      rec('b1', LogLevel.INFO, 'batch 1', { timestamp: oldBatchTs }),
+      rec('b2', LogLevel.INFO, 'batch 2', { timestamp: oldBatchTs + 1 }),
+      rec('b3', LogLevel.INFO, 'batch 3', { timestamp: oldBatchTs + 2 }),
+    ]);
+    const firstBatch = batched.rotate(Date.now(), 2);
+    const secondBatch = batched.rotate(Date.now(), 2);
+    check('rotation: bounded pass reports more expired rows', firstBatch.scanned === 2 && firstBatch.more, JSON.stringify(firstBatch));
+    check('rotation: next pass drains remaining rows', secondBatch.scanned === 1 && !secondBatch.more && batched.stats().logCount === 0, JSON.stringify(secondBatch));
+    batched.close();
+
     // Retention window is configurable.
     const store2 = new SqliteStore({ path: ':memory:', archiveDir: null, retentionDays: 1, pinSevere: false });
     store2.insertLogs([rec('x1', LogLevel.INFO, 'expired', { timestamp: (Date.now() - 5 * 86_400_000) * 1_000_000 })]);

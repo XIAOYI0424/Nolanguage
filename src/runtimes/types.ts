@@ -153,6 +153,10 @@ export interface RunOutcome {
   durationMs: number;
   stdout: string;
   stderr: string;
+  /** True when process output exceeded the bounded capture budget. */
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  logLinesTruncated?: boolean;
   timedOut: boolean;
   /** True when the host stopped the run (Stop button) instead of it exiting. */
   cancelled?: boolean;

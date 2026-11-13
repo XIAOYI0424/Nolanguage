@@ -65,14 +65,10 @@ export class ExecService {
   }
 
   async create(languageId: SandboxLanguage, sessionId?: string): Promise<SandboxCreateResult> {
+    const ephemeral = sessionId == null;
     const sid = sessionId ?? `sb-${Math.random().toString(36).slice(2, 12)}`;
-    if (languageId === 'go') {
-      await this.goRunner?.session(sid);
-    }
-    // A persistent worker (python/node) is allocated lazily on first run; the
-    // pool pre-warms `minSize` idle workers at construction, so a session is
-    // "warm" the moment it is used.
-    return { sessionId: sid, languageId, warm: languageId !== 'go' ? this.pool.workerCount() > 0 : true };
+    const created = await this.pool.createSession(languageId, sid, ephemeral);
+    return { sessionId: sid, languageId, warm: created.warm };
   }
 
   run(opts: SandboxRunOptions): Promise<SandboxRunResult> {
@@ -92,5 +88,6 @@ export class ExecService {
 
   async close(): Promise<void> {
     await this.pool.close();
+    await this.goRunner?.close();
   }
 }

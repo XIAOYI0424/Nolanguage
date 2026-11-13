@@ -159,7 +159,10 @@ async function bundle() {
     format: 'cjs',
     outfile: target,
     logLevel: 'warning',
-    sourcemap: 'inline',
+    // Keep generated code compact for shipped SEA images. Inline maps alone
+    // added ~3.65 MiB to the current bundle; opt in only for local debugging.
+    minify: true,
+    sourcemap: process.env.NOLANGUAGE_DEBUG_SOURCEMAP === '1' ? 'inline' : false,
     external: ['node:*'],
     plugins: [resolveExtPlugin],
     banner: {

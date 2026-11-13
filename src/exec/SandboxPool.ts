@@ -30,14 +30,27 @@ interface Assigned {
   languageId: SandboxLanguage;
   worker: WarmWorker;
   runs: number;
+  /** Only generated-ID sessions may be evicted automatically. */
+  ephemeral: boolean;
+}
+
+interface RequestedSession {
+  languageId: SandboxLanguage;
+  ephemeral: boolean;
 }
 
 export class SandboxPool {
   private freeWarm = new Map<SandboxLanguage, WarmWorker[]>();
   private assigned = new Map<string, Assigned>();
+  private requestedSessions = new Map<string, RequestedSession>(); // created but not yet running Python/JS sessions
   private goSessions = new Map<string, number>(); // sessionId -> run count
+  private ephemeralGo = new Set<string>();
+  private goLastUsed = new Map<string, number>();
   /** FIFO tails for each stateful session; unrelated sessions still run in parallel. */
   private sessionTails = new Map<string, Promise<void>>();
+  /** Serializes global capacity decisions while session execution remains parallel. */
+  private capacityTail: Promise<void> = Promise.resolve();
+  private pendingCapacity = 0;
   private idleTimer?: NodeJS.Timeout;
 
   // Counters — plain fields so tests can assert warm reuse directly.
@@ -52,10 +65,12 @@ export class SandboxPool {
     private opts: SandboxPoolOptions = {},
     private goRunner?: GoRunner,
   ) {
-    const minSize = opts.minSize ?? 1;
+    const minSize = Math.max(0, Math.floor(opts.minSize ?? 1));
+    const idleMax = Math.max(0, Math.floor(opts.maxSize ?? 2));
+    const workerMax = Math.max(1, Math.floor(opts.maxWorkers ?? 8));
     if (minSize > 0) {
       for (const lang of ['python', 'javascript'] as const) {
-        for (let i = 0; i < minSize; i++) this.spawnFree(lang);
+        for (let i = 0; i < Math.min(minSize, idleMax) && this.workerCount() < workerMax; i++) this.spawnFree(lang);
       }
     }
     const maxIdle = opts.maxIdleMs ?? 60_000;
@@ -126,20 +141,135 @@ export class SandboxPool {
     // Prefer an alive worker; drop dead ones discovered here.
     while (list.length) {
       const w = list.shift()!;
-      if (w.isAlive) return w;
+      if (w.isAlive || w.isStarting) return w;
     }
     return undefined;
   }
 
-  private async acquire(lang: SandboxLanguage, sessionId: string): Promise<{ worker?: WarmWorker; warm: boolean }> {
-    const existing = this.assigned.get(sessionId);
-    if (lang === 'go') {
-      if (existing) {
-        throw new Error(`sandbox session "${sessionId}" already belongs to ${existing.languageId}`);
+  private maxWorkers(): number { return Math.max(1, Math.floor(this.opts.maxWorkers ?? 8)); }
+
+  private sessionCount(): number { return this.workerCount() + this.goSessions.size + this.requestedSessions.size; }
+
+  /**
+   * Make room only by reclaiming an idle session that the caller did not name.
+   * Named Python/JS sessions can contain user state and are never silently
+   * evicted. Callers that fill the cap with named sessions get an explicit error.
+   */
+  private async makeRoom(requestingSession: string): Promise<boolean> {
+    const previous = this.capacityTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this.capacityTail = previous.then(() => gate);
+    await previous;
+    try {
+      const ownRequest = this.requestedSessions.has(requestingSession) ? 1 : 0;
+      let occupied = this.sessionCount() - ownRequest + this.pendingCapacity;
+      if (occupied >= this.maxWorkers()) {
+        const workerCandidates = [...this.assigned.entries()]
+          .filter(([id, a]) => id !== requestingSession && a.ephemeral && !a.worker.isBusy && !this.sessionTails.has(id))
+          .sort((a, b) => b[1].worker.idleMs() - a[1].worker.idleMs());
+        const oldestWorker = workerCandidates[0];
+        if (oldestWorker) {
+          this.assigned.delete(oldestWorker[0]);
+          this.idleRecycles++;
+          await oldestWorker[1].worker.recycle().catch(() => undefined);
+        } else {
+          const oldestRequested = [...this.requestedSessions.entries()].find(([id, session]) => id !== requestingSession && session.ephemeral);
+          if (oldestRequested) {
+            this.requestedSessions.delete(oldestRequested[0]);
+          } else {
+            const oldestGo = [...this.ephemeralGo]
+              .filter((id) => id !== requestingSession && !this.sessionTails.has(id))
+              .sort((a, b) => (this.goLastUsed.get(a) ?? 0) - (this.goLastUsed.get(b) ?? 0))[0];
+            if (!oldestGo) return false;
+            this.ephemeralGo.delete(oldestGo);
+            this.goSessions.delete(oldestGo);
+            this.goLastUsed.delete(oldestGo);
+            await this.goRunner?.resetSession(oldestGo);
+          }
+        }
+        occupied = this.sessionCount() - ownRequest + this.pendingCapacity;
       }
-      const existed = this.goSessions.has(sessionId);
-      if (!existed) this.goSessions.set(sessionId, 0);
-      return { warm: existed };
+      if (occupied >= this.maxWorkers()) return false;
+      // Reserve synchronously before releasing the gate, so two distinct
+      // session IDs cannot both pass the final slot check.
+      this.pendingCapacity++;
+      return true;
+    } finally {
+      release();
+    }
+  }
+
+  private releaseCapacity(): void {
+    this.pendingCapacity = Math.max(0, this.pendingCapacity - 1);
+  }
+
+  private async ensureGoSession(sessionId: string, ephemeral: boolean): Promise<boolean> {
+    const requested = this.requestedSessions.get(sessionId);
+    if (requested && requested.languageId !== 'go') {
+      throw new Error(`sandbox session "${sessionId}" already belongs to ${requested.languageId}`);
+    }
+    if (this.assigned.has(sessionId)) {
+      throw new Error(`sandbox session "${sessionId}" already belongs to ${this.assigned.get(sessionId)!.languageId}`);
+    }
+    if (this.goSessions.has(sessionId)) {
+      this.goLastUsed.set(sessionId, Date.now());
+      return true;
+    }
+    if (!this.goRunner) throw new Error('Go toolchain unavailable in this sandbox pool');
+    if (!(await this.makeRoom(sessionId))) {
+      throw new Error(`sandbox session limit reached (${this.maxWorkers()}); reset a named session or increase maxWorkers`);
+    }
+    try {
+      await this.goRunner.session(sessionId);
+      this.goSessions.set(sessionId, 0);
+      if (ephemeral || requested?.ephemeral) this.ephemeralGo.add(sessionId);
+      this.requestedSessions.delete(sessionId);
+      this.goLastUsed.set(sessionId, Date.now());
+      return false;
+    } finally {
+      this.releaseCapacity();
+    }
+  }
+
+  createSession(languageId: SandboxLanguage, sessionId: string, ephemeral = false): Promise<{ warm: boolean }> {
+    return this.serializeSession(sessionId, async () => {
+      const assigned = this.assigned.get(sessionId);
+      if (assigned && assigned.languageId !== languageId) {
+        throw new Error(`sandbox session "${sessionId}" already belongs to ${assigned.languageId}`);
+      }
+      const goExists = this.goSessions.has(sessionId);
+      if (goExists && languageId !== 'go') throw new Error(`sandbox session "${sessionId}" already belongs to go`);
+      const requested = this.requestedSessions.get(sessionId);
+      if (requested && requested.languageId !== languageId) {
+        throw new Error(`sandbox session "${sessionId}" already belongs to ${requested.languageId}`);
+      }
+      if (languageId === 'go') return { warm: await this.ensureGoSession(sessionId, ephemeral) };
+      if (assigned) return { warm: assigned.worker.isAlive };
+      if (!requested) {
+        if (!(await this.makeRoom(sessionId))) {
+          throw new Error(`sandbox session limit reached (${this.maxWorkers()}); reset a named session or increase maxWorkers`);
+        }
+        try {
+          this.requestedSessions.set(sessionId, { languageId, ephemeral });
+        } finally {
+          this.releaseCapacity();
+        }
+      }
+      return { warm: false };
+    });
+  }
+
+  private async acquire(lang: SandboxLanguage, sessionId: string, ephemeral: boolean): Promise<{ worker?: WarmWorker; warm: boolean }> {
+    const existing = this.assigned.get(sessionId);
+    const requested = this.requestedSessions.get(sessionId);
+    if (requested && requested.languageId !== lang) {
+      throw new Error(`sandbox session "${sessionId}" already belongs to ${requested.languageId}`);
+    }
+    ephemeral = ephemeral || !!requested?.ephemeral;
+    if (lang === 'go') {
+      const warm = await this.ensureGoSession(sessionId, ephemeral);
+      return { warm };
     }
     if (this.goSessions.has(sessionId)) {
       throw new Error(`sandbox session "${sessionId}" already belongs to go`);
@@ -152,21 +282,31 @@ export class SandboxPool {
       return { worker: existing.worker, warm: true };
     }
     let worker = this.takeFree(lang);
-    let warm = false;
+    const warm = !!worker;
     if (worker) {
       this.warmHits++;
-      warm = true;
+      // Taking a free worker temporarily removes it from the live count. Reserve
+      // that slot during the hand-off so another session cannot over-admit.
+      this.pendingCapacity++;
     } else {
-      worker = this.spawnWorker(lang);
+      if (!(await this.makeRoom(sessionId))) {
+        throw new Error(`sandbox session limit reached (${this.maxWorkers()}); reset a named session or increase maxWorkers`);
+      }
       this.coldStarts++;
-      warm = false;
     }
-    await worker.ready;
-    this.assigned.set(sessionId, { languageId: lang, worker, runs: 0 });
-    return { worker, warm };
+    try {
+      if (!worker) worker = this.spawnWorker(lang);
+      await worker.ready;
+      this.assigned.set(sessionId, { languageId: lang, worker, runs: 0, ephemeral });
+      this.requestedSessions.delete(sessionId);
+      return { worker, warm };
+    } finally {
+      this.releaseCapacity();
+    }
   }
 
   run(opts: SandboxRunOptions): Promise<SandboxRunResult> {
+    const ephemeral = opts.sessionId == null;
     const sessionId = opts.sessionId ?? `sb-${ulid().slice(-10)}`;
     const runId = `run-${ulid().slice(-10)}`;
     const queuedAt = performance.now();
@@ -174,7 +314,7 @@ export class SandboxPool {
       attributes: { languageId: opts.languageId, sessionId, runId },
     });
     const runLog = this.kernel.logger.forExecution('sandbox.run', sessionId).span(span);
-    return this.serializeSession(sessionId, () => this.runInSession(opts, sessionId, runId, queuedAt, span, runLog)).catch((err) => {
+    return this.serializeSession(sessionId, () => this.runInSession(opts, sessionId, runId, queuedAt, span, runLog, ephemeral)).catch((err) => {
       span.setAttribute('error', true).end();
       throw err;
     });
@@ -187,6 +327,7 @@ export class SandboxPool {
     queuedAt: number,
     span: ReturnType<Kernel['tracer']['startSpan']>,
     runLog: ReturnType<Kernel['logger']['forExecution']>,
+    ephemeral: boolean,
   ): Promise<SandboxRunResult> {
     const t0 = queuedAt;
     const queueWaitMs = performance.now() - queuedAt;
@@ -196,6 +337,7 @@ export class SandboxPool {
       if (!this.goRunner) {
         throw new Error('Go toolchain unavailable in this sandbox pool');
       }
+      await this.ensureGoSession(sessionId, ephemeral);
       const r = await this.goRunner.run({
         code: opts.code,
         sessionId,
@@ -204,6 +346,7 @@ export class SandboxPool {
       });
       this.runs++;
       this.goSessions.set(sessionId, (this.goSessions.get(sessionId) ?? 0) + 1);
+      this.goLastUsed.set(sessionId, Date.now());
       const durationMs = performance.now() - t0;
       this.kernel.perfMetrics().record('sandbox.run', durationMs);
       const lines = collectSandboxOutput(this.kernel, 'go', sessionId, runId, r.stdout, r.stderr);
@@ -219,6 +362,9 @@ export class SandboxPool {
         durationMs,
         stdout: r.stdout,
         stderr: r.stderr,
+        stdoutTruncated: r.stdoutTruncated,
+        stderrTruncated: r.stderrTruncated,
+        logLinesTruncated: r.logLinesTruncated,
         ok: r.exitCode === 0 && !r.timedOut,
         logLines: lines,
         timedOut: r.timedOut,
@@ -230,7 +376,7 @@ export class SandboxPool {
       };
     }
 
-    const { worker, warm } = await this.acquire(opts.languageId, sessionId);
+    const { worker, warm } = await this.acquire(opts.languageId, sessionId, ephemeral);
     if (!worker) {
       throw new Error(`sandbox worker for ${opts.languageId} unavailable`);
     }
@@ -297,6 +443,8 @@ export class SandboxPool {
       durationMs,
       stdout: res.stdout,
       stderr: res.stderr,
+      stdoutTruncated: res.stdoutTruncated,
+      stderrTruncated: res.stderrTruncated,
       ok: res.ok,
       error: res.error,
       logLines: lines,
@@ -322,17 +470,43 @@ export class SandboxPool {
         if (w.isAlive && w.idleMs() > maxIdleMs) {
           this.idleRecycles++;
           void w.recycle().catch(() => undefined);
-        } else if (w.isAlive) {
+        } else if (w.isAlive || w.isStarting) {
           keep.push(w);
         }
       }
       this.freeWarm.set(lang, keep);
+    }
+    const sessionIdleMs = Math.max(0, this.opts.maxSessionIdleMs ?? 5 * 60_000);
+    if (sessionIdleMs > 0) {
+      for (const [sessionId] of this.requestedSessions) {
+        if (this.sessionTails.has(sessionId)) continue;
+        this.requestedSessions.delete(sessionId);
+        this.kernel.logger.forExecution('sandbox.session', sessionId).info('Unused named sandbox session expired after idle timeout', { idleMs: sessionIdleMs });
+      }
+      for (const [sessionId, session] of this.assigned) {
+        if (!session.ephemeral || session.worker.isBusy || this.sessionTails.has(sessionId) || session.worker.idleMs() <= sessionIdleMs) continue;
+        this.assigned.delete(sessionId);
+        this.idleRecycles++;
+        this.kernel.logger.forExecution('sandbox.session', sessionId).info('Unnamed sandbox session expired after idle timeout', { idleMs: session.worker.idleMs(), runs: session.runs });
+        void session.worker.recycle().catch(() => undefined);
+      }
+      const now = Date.now();
+      for (const sessionId of this.ephemeralGo) {
+        const idleMs = now - (this.goLastUsed.get(sessionId) ?? now);
+        if (this.sessionTails.has(sessionId) || idleMs <= sessionIdleMs) continue;
+        this.ephemeralGo.delete(sessionId);
+        this.goSessions.delete(sessionId);
+        this.goLastUsed.delete(sessionId);
+        this.kernel.logger.forExecution('sandbox.session', sessionId).info('Unnamed Go sandbox session expired after idle timeout', { idleMs });
+        void this.goRunner?.resetSession(sessionId);
+      }
     }
   }
 
   /** Dispose a session's worker (or Go scratch dir) and forget it. */
   reset(sessionId: string): Promise<boolean> {
     return this.serializeSession(sessionId, async () => {
+      if (this.requestedSessions.delete(sessionId)) return true;
       const a = this.assigned.get(sessionId);
       if (a) {
         this.assigned.delete(sessionId);
@@ -341,6 +515,8 @@ export class SandboxPool {
       }
       if (this.goSessions.has(sessionId)) {
         this.goSessions.delete(sessionId);
+        this.ephemeralGo.delete(sessionId);
+        this.goLastUsed.delete(sessionId);
         await this.goRunner?.resetSession(sessionId);
         return true;
       }
@@ -350,6 +526,9 @@ export class SandboxPool {
 
   list(): SandboxSessionInfo[] {
     const out: SandboxSessionInfo[] = [];
+    for (const [sessionId, requested] of this.requestedSessions) {
+      out.push({ sessionId, languageId: requested.languageId, warm: false, runs: 0 });
+    }
     for (const [sessionId, a] of this.assigned) {
       out.push({ sessionId, languageId: a.languageId, warm: a.worker.isAlive, runs: a.runs });
     }
@@ -362,8 +541,8 @@ export class SandboxPool {
   /** Number of currently-alive persistent workers (for the status bar). */
   workerCount(): number {
     let n = 0;
-    for (const list of this.freeWarm.values()) n += list.filter((w) => w.isAlive).length;
-    for (const a of this.assigned.values()) if (a.worker.isAlive) n++;
+    for (const list of this.freeWarm.values()) n += list.filter((w) => w.isAlive || w.isStarting).length;
+    for (const a of this.assigned.values()) if (a.worker.isAlive || a.worker.isStarting) n++;
     return n;
   }
 
@@ -373,7 +552,13 @@ export class SandboxPool {
       for (const w of list) await w.recycle().catch(() => undefined);
     }
     for (const a of this.assigned.values()) await a.worker.recycle().catch(() => undefined);
+    for (const id of this.goSessions.keys()) await this.goRunner?.resetSession(id).catch(() => false);
     this.freeWarm.clear();
     this.assigned.clear();
+    this.requestedSessions.clear();
+    this.goSessions.clear();
+    this.ephemeralGo.clear();
+    this.goLastUsed.clear();
+    this.sessionTails.clear();
   }
 }

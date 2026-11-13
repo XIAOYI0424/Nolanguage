@@ -433,7 +433,7 @@
     mdAfterDocSwitch();
     // Stale marks from the previous document must not follow the caret here.
     clearDiags();
-    if (lspLang()) BRIDGE.send({ kind: 'check', code: ta.value, language: lspLang() });
+    requestCheck();
     pushRecent(name);
     savePrefs({ tabs: TABS, current: currentFile });
   }

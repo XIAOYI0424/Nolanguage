@@ -22,6 +22,7 @@
  *       PYTHON_BIN             interpreter to use
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { gzipSync } from 'node:zlib';
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -237,18 +238,28 @@ export async function main(
   // Optional by design: if construction fails the panel still works. The pool
   // pre-warms `minSize` idle workers so the first sandbox run is already warm.
   let exec: ExecService | undefined;
+  const sandboxMinRaw = Number(process.env.SANDBOX_MIN ?? 0);
+  const sandboxMaxRaw = Number(process.env.SANDBOX_MAX_WORKERS ?? 8);
+  const sandboxIdleRaw = Number(process.env.SANDBOX_SESSION_IDLE ?? 300_000);
+  // The panel's regular Run path uses WorkspaceService, not the MCP warm pool;
+  // leave the pool cold unless an operator explicitly opts into pre-warming.
+  const sandboxMin = Number.isFinite(sandboxMinRaw) ? Math.max(0, Math.floor(sandboxMinRaw)) : 0;
+  const sandboxMaxWorkers = Number.isFinite(sandboxMaxRaw) ? Math.max(1, Math.floor(sandboxMaxRaw)) : 8;
+  const sandboxSessionIdleMs = Number.isFinite(sandboxIdleRaw) ? Math.max(0, Math.floor(sandboxIdleRaw)) : 300_000;
   try {
     exec = new ExecService(kernel, {
       pythonBin: process.env.PYTHON_BIN,
       goBin: process.env.GO_BIN,
       nodeBin: process.env.NODE_BIN,
-      minSize: Number(process.env.SANDBOX_MIN ?? 1),
+      minSize: sandboxMin,
+      maxWorkers: sandboxMaxWorkers,
+      maxSessionIdleMs: sandboxSessionIdleMs,
       maxIdleMs: Number(process.env.SANDBOX_MAX_IDLE ?? 60_000),
       runTimeoutMs: process.env.PANEL_RUN_TIMEOUT ? Number(process.env.PANEL_RUN_TIMEOUT) : 15_000,
     });
     exec.registerCommands();
     workspace.setExec(exec);
-    kernel.logger.root().info('Execution plane ready', { minSize: Number(process.env.SANDBOX_MIN ?? 1) });
+    kernel.logger.root().info('Execution plane ready', { minSize: sandboxMin, maxWorkers: sandboxMaxWorkers, ephemeralIdleMs: sandboxSessionIdleMs });
   } catch (err) {
     kernel.logger.root().warn('Execution plane unavailable', { error: (err as Error).message });
   }
@@ -793,6 +804,7 @@ export async function main(
     const extensionsHtml = renderExtensionsHtml(port);
     const pluginsHtml = renderPluginsHtml();
     const pycharmHtml = renderPyCharmHtml(port);
+    const gzipHtmlCache = new Map<string, Buffer>();
 
     ws = new WebSocketServer({
       port,
@@ -804,7 +816,29 @@ export async function main(
       onRequest: (req, res) => {
         const url = (req.url ?? '/').split('?')[0];
         const html = (body: string): void => {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          const accepted = String(req.headers['accept-encoding'] ?? '');
+          // Parse Accept-Encoding: match "gzip" and check its q-value is not 0.
+          const gzipMatch = /(?:^|,\s*)gzip(?:;\s*q=([0-9.]+))?/i.exec(accepted);
+          const gzipQ = gzipMatch ? (gzipMatch[1] !== undefined ? parseFloat(gzipMatch[1]) : 1) : 0;
+          const wantsGzip = gzipQ > 0;
+          const headers: Record<string, string | number> = {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            vary: 'Accept-Encoding',
+          };
+          if (wantsGzip && Buffer.byteLength(body) >= 16 * 1024) {
+            let compressed = gzipHtmlCache.get(body);
+            if (!compressed) {
+              compressed = gzipSync(Buffer.from(body), { level: 6 });
+              gzipHtmlCache.set(body, compressed);
+            }
+            headers['content-encoding'] = 'gzip';
+            headers['content-length'] = compressed.length;
+            res.writeHead(200, headers);
+            res.end(compressed);
+            return;
+          }
+          res.writeHead(200, headers);
           res.end(body);
         };
         // The PyCharm-style shell is the workspace; the old Vue IDE page is gone.

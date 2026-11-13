@@ -206,7 +206,9 @@ export class GitProbe {
   /** Probe (or return the cached value when `force` is false). */
   async probe(force = false): Promise<GitInfo> {
     if (!force && this.cached) return this.cached;
-    if (!force && this.inflight) return this.inflight;
+    // Concurrent forced polls/refreshes represent one point-in-time read; do
+    // not launch another three-process probe while the first one is running.
+    if (this.inflight) return this.inflight;
     const p = probeGit(this.cwd, this.bin).then((info) => {
       this.cached = info;
       this.inflight = undefined;

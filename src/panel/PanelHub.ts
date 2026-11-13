@@ -79,6 +79,9 @@ export type PanelServerMessage =
       signal: string | null;
       stdout: string;
       stderr: string;
+      stdoutTruncated?: boolean;
+      stderrTruncated?: boolean;
+      logLinesTruncated?: boolean;
       durationMs: number;
       timedOut: boolean;
       logLines: number;

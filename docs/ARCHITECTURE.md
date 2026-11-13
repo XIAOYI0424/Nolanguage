@@ -1,8 +1,8 @@
 # 架构契约（Architecture Contract）
 
-> 版本 0.7.22 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
+> 版本 0.7.23 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
-这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 451 imports · 18/18`，**零个已声明环**。
+这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`157 files · 452 imports · 18/18`，**零个已声明环**。
 
 ---
 
@@ -346,7 +346,24 @@ GitHub runner 的 `ci:install-smoke` 仍待远端验证：当前 checkout 未配
 
 **结论**：`npm test` 还必须保留文件数守卫；它能抓“少跑了文件”，但不能抓“文件被收集却没有任何用例”。因此单元测试的汇总也应明确给出并核对测试总数，不能只依赖 Vitest 退出码。
 
-## 十二、还没做的
+## 十二、轻量化（0.7.23）
+
+- SEA release `minify: true`，默认无 inline sourcemap；`NOLANGUAGE_DEBUG_SOURCEMAP=1` 是本地排障开关。注意 Node 本体约 83 MiB 的不可减基础成本；前端 raw string 内部还要各自单独 minify。
+- 运行池默认 `SANDBOX_MIN=0`。上限 `SANDBOX_MAX_WORKERS=8`；命名会话达到上限时显式拒绝，不自动丢 Python namespace。只有自动生成的匿名会话可按 LRU 回收；idle 到期默认 5 分钟，`SANDBOX_SESSION_IDLE=0` 关闭会话回收。
+- Python LSP eager=false，首次诊断/补全时启动；PANEL_EAGER_LSP=1 仍可统一强制 eager。
+- `/` IDE 大 HTML 根据 Accept-Encoding gzip，压缩结果在进程内缓存；其余路由现状不变。
+- 子进程每 stream 捕获最多 4 MiB、每次运行最多记录 10,000 telemetry lines；实时回传字节也遵守 capture cap；IDE console DOM 最多 512 Ki characters。过量有明显截断提示，不再无限追加 DOM/log。Live Check 对大于 1 Mi-character 的文件暂停，Run 保留；Find in Files debounce 120ms，限 16 Mi characters 扫描 / 1,000 条结果。
+- 语言估算只在 LSP 实际运行时计入 reclaimable 部分；固定 runner/profiler 估算本身已经超过 total budget 时，不再误杀所有活动 LSP。`memoryHint` 仍是估算，不是 RSS。
+- SQLite rotation 首轮延迟 60s，此后每 6h 最多 500 行一批；有积压时 1s 后再轮，失败写 warning，下次仍会重试。仅 kernel 自己创建的文件 store 自动维护。
+- GitProbe coalesce in-flight forced calls；commit watcher 已取得的 GitInfo 直接给 checkpoint，避免再 spawn Git。
+
+轻量化的验收分开看：SEA 文件大小、安装包大小、IDE gzip 传输大小、启动/首屏时延、总进程 RSS/空闲 CPU 和长运行后 DB/DOM 上界。bundle/minify 只能减少应用 JS 开销，不能去掉 Node runtime；本轮没有 OS 级 RSS / CPU 基准，不能声称这些数字已下降。
+
+### Tauri 包装状态
+
+沿用现有 Rust 壳和 sidecar，不重写。Tauri build 产物可以生成，但其是否可运行必须单独验收：本机历史记录有 WebView2 blank / page-load timeout，打包成功不代表壳已可用。构建尺寸通常还含一份 Nolanguage engine sidecar，不能用 Tauri 安装包体积推断“少了一份 Node”；以本轮 bundle build 与 smoke 实测补录。
+
+## 十三、还没做的
 
 1. **插件市场远程安装 + `trust.signature` 验签**。
 2. **`ci:install-smoke` 只在开发机上验证过** —— GitHub runner 上的临时目录与权限策略未实测。

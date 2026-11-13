@@ -3,34 +3,65 @@
   // what was missing is the editor asking. A debounced check turns the manual
   // Check button into live diagnostics, the way every IDE behaves.
   var diagTimer = 0;
+  var CHECK_MAX_CHARS = 1024 * 1024;
+  var checkSizeNotice = false;
   function requestCheck() {
     var lg = lspLang();
-    if (!lg) { clearDiags(); return; }
+    if (!lg) { checkSizeNotice = false; clearDiags(); return; }
+    if (ta.value.length > CHECK_MAX_CHARS) {
+      clearDiags();
+      if (!checkSizeNotice) toast('Live checks paused for files larger than 1 Mi characters. Run remains available.');
+      checkSizeNotice = true;
+      return;
+    }
+    checkSizeNotice = false;
     BRIDGE.send({ kind: 'check', code: ta.value, language: lg });
   }
   function scheduleCheck() { clearTimeout(diagTimer); diagTimer = setTimeout(requestCheck, 300); }
 
   // ---------- run ----------
+  var RUN_OUTPUT_LIMIT = 512 * 1024;
+  var RUN_OUTPUT_CHARS = 0;
+  var RUN_OUTPUT_TRUNCATED = false;
+  function resetRunOutput(html) {
+    var out = $('runOut'); if (!out) return;
+    out.innerHTML = html || '';
+    RUN_OUTPUT_CHARS = (out.textContent || '').length;
+    RUN_OUTPUT_TRUNCATED = false;
+  }
   function runCode() {
+    var lg = lspLang();
+    if (!lg) { toast('run: only Python / Go / JavaScript are supported yet'); return; }
     activeBottom = 'run'; $('dock').classList.remove('hidden'); renderDock();
-    var out = $('runOut');
-    out.innerHTML = '<span class="cmd">&gt; ' + lg + ' ' + esc(currentFile) + '</span>\n';
+    resetRunOutput('<span class="cmd">&gt; ' + lg + ' ' + esc(currentFile) + '</span>\n');
     // Run follows the file on screen: its language (honouring an explicit
     // #stLang override) and its buffer. This is the "run the open file"
     // contract the UI suite asserts — a Run/Debug *configuration* must never
     // hijack the editor, so it is not consulted here. Debug (Shift+F9) is where
     // the configuration drives things: program, args, env and cwd.
-    var lg = lspLang();
-    if (!lg) { toast('run: only Python / Go / JavaScript are supported yet'); return; }
     BRIDGE.send({ kind: 'run', code: ta.value, language: lg, sessionId: 'pycharm' });
-    BRIDGE.send({ kind: 'check', code: ta.value, language: lg });
+    requestCheck();
     toast('Running ' + currentFile + ' …');
     var ri = $('runIn'); if (ri) { ri.disabled = false; ri.focus(); }
   }
   function appendRun(text, cls) {
-    var out = $('runOut'); if (!out) return;
-    var s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text;
-    out.appendChild(s);
+    var out = $('runOut'); if (!out || RUN_OUTPUT_TRUNCATED) return;
+    text = String(text == null ? '' : text);
+    var remaining = Math.max(0, RUN_OUTPUT_LIMIT - RUN_OUTPUT_CHARS);
+    var clipped = text.length > remaining;
+    if (clipped) text = text.slice(0, remaining);
+    if (text) {
+      var last = out.lastElementChild;
+      if (last && last.className === (cls || '')) last.textContent += text;
+      else { var s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text; out.appendChild(s); }
+      RUN_OUTPUT_CHARS += text.length;
+    }
+    if (clipped) {
+      RUN_OUTPUT_TRUNCATED = true;
+      var notice = document.createElement('span'); notice.className = 'warn';
+      notice.textContent = '\n[console output truncated at ' + RUN_OUTPUT_LIMIT + ' characters]\n';
+      out.appendChild(notice);
+    }
   }
 
   // ---------- stop / debug ----------
@@ -684,13 +715,15 @@
           appendRun('\n[stopped by user]\n', 'warn');
           break;
         }
+        if (m.stdoutTruncated || m.stderrTruncated) appendRun('\n[process output capture limit reached; later chunks were omitted]\n', 'warn');
+        if (m.logLinesTruncated) appendRun('[some output lines were omitted from telemetry]\n', 'dim');
         appendRun('\nProcess finished with exit code ' + (m.exitCode == null ? '?' : m.exitCode) +
           '  (' + fmtMs(m.durationMs) + ')\n', m.exitCode === 0 ? 'ok' : 'err');
         RUN_ACTIVE = false;
         { var ri2 = $('runIn'); if (ri2) ri2.disabled = true; }
         break;
       case 'runStart':
-        { var ro = $('runOut'); if (ro) ro.innerHTML = '<span class="dim">Running ' + currentFile + ' …</span>'; }
+        resetRunOutput('<span class="dim">Running ' + currentFile + ' …</span>');
         RUN_ACTIVE = true;
         { var ri3 = $('runIn'); if (ri3) { ri3.disabled = false; ri3.focus(); } }
         break;

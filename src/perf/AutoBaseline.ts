@@ -1,4 +1,5 @@
 import type { CorrelationBus } from '../correlation/CorrelationBus.js';
+import type { GitInfo } from '../git/GitProbe.js';
 import type { LiveMetrics } from './LiveMetrics.js';
 import { BaselineStore, fmtPct } from './BaselineStore.js';
 import type { BaselineComparison, BaselineRecord } from './BaselineStore.js';
@@ -110,15 +111,17 @@ export class AutoBaseline {
    *
    * Concurrent calls are coalesced so a burst of triggers produces one row.
    */
-  async checkpoint(reason = 'manual'): Promise<BaselineCheckpoint> {
+  async checkpoint(reason = 'manual', observedGit?: GitInfo): Promise<BaselineCheckpoint> {
     if (this.pending) return this.pending;
-    const p = this.runCheckpoint(reason).finally(() => { this.pending = undefined; });
+    const p = this.runCheckpoint(reason, observedGit).finally(() => { this.pending = undefined; });
     this.pending = p;
     return p;
   }
 
-  private async runCheckpoint(reason: string): Promise<BaselineCheckpoint> {
-    const git = await this.correlation.prime(true);
+  private async runCheckpoint(reason: string, observedGit?: GitInfo): Promise<BaselineCheckpoint> {
+    const git = observedGit
+      ? await this.correlation.prime(false, observedGit)
+      : await this.correlation.prime(true);
 
     const baseline = this.baselines.capture(this.metrics.summaries(), {
       gitCommit: git.commit,
@@ -197,10 +200,12 @@ export class AutoBaseline {
    */
   start(): void {
     if (this.stopWatch || this.pollMs <= 0) return;
-    this.stopWatch = this.correlation.probe.watch((_info, previous) => {
+    this.stopWatch = this.correlation.probe.watch((info, previous) => {
       if (previous === undefined && this.count > 0) return;
       const reason = previous === undefined ? 'initial' : 'git-commit';
-      void this.checkpoint(reason).catch(() => {
+      // The watcher already performed the full probe; feed that observation
+      // directly into the checkpoint instead of spawning Git again.
+      void this.checkpoint(reason, info).catch(() => {
         // A failed checkpoint must not kill the poll loop.
       });
     });

@@ -10,6 +10,8 @@
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ide.ts
  */
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { gunzipSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { RawWsClient } from './lib/RawWsClient.js';
 import { sampleById } from '../src/panel/samples.js';
@@ -47,6 +49,18 @@ async function waitForHttp(port: number, ms: number): Promise<unknown> {
   }
 }
 
+function getRawHttp(port: number, path: string, headers: Record<string, string> = {}): Promise<{ headers: import('node:http').IncomingHttpHeaders; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path, headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 async function main(): Promise<void> {
   const child = spawn(
     process.execPath,
@@ -79,6 +93,14 @@ async function main(): Promise<void> {
       workspace: { bufferPath: string; pythonBin: string; lsp: { available: boolean; serverName: string } };
     };
     check('server exposes a workspace', !!health.workspace?.bufferPath, health.appVersion);
+
+    const compressedPage = await getRawHttp(PORT, '/', { 'accept-encoding': 'gzip' });
+    const htmlBody = compressedPage.headers['content-encoding'] === 'gzip' ? gunzipSync(compressedPage.body) : compressedPage.body;
+    check('IDE page negotiates gzip for its large self-contained HTML', compressedPage.headers['content-encoding'] === 'gzip' && compressedPage.body.length < htmlBody.length * 0.6, `${compressedPage.body.length} / ${htmlBody.length} bytes`);
+    check('gzip page contains the IDE shell after decompression', htmlBody.toString('utf8').includes('id="runBtn"'));
+    check('HTML compression varies by Accept-Encoding', String(compressedPage.headers.vary || '').includes('Accept-Encoding'));
+    const uncompressedPage = await getRawHttp(PORT, '/', { 'accept-encoding': 'gzip;q=0' });
+    check('IDE page respects gzip;q=0', uncompressedPage.headers['content-encoding'] !== 'gzip' && uncompressedPage.body.toString('utf8').includes('id="runBtn"'));
 
     // Only connect once the HTTP endpoint answers, so the socket cannot be
     // refused before the server is listening.
