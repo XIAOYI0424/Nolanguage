@@ -7,7 +7,7 @@
 围绕可复核的成本分四层处理：
 
 1. **发包体积**：主进程 bundle `minify: true`，release 默认不嵌 inline sourcemap；需要调试映射时设 `NOLANGUAGE_DEBUG_SOURCEMAP=1`。应用 bundle 重建前约 5.50 MiB，其中 map 约 3.65 MiB；必须以本版完整产物实测净体积。
-2. **按需启动**：sandbox `SANDBOX_MIN` 默认 0（普通 IDE Run 本来就走 WorkspaceService，不依赖 MCP warm pool）；Python LSP 的 manifest eager 改为 false，Check/Complete 首用时启动。
+2. **按需启动**：sandbox `SANDBOX_MIN` 默认 0（普通 IDE Run 本来就走 WorkspaceService，不依赖 MCP warm pool）；Python LSP 保持 eager（主语言需要即时 Check/Complete），非主语言 LSP 可按需启动。
 3. **资源上限**：sandbox 默认最多 8 个 worker/Go session；命名 session 不会自动清状态，达到上限会明确要求 reset 或调整 `SANDBOX_MAX_WORKERS`。未命名临时 session 5 分钟空闲后回收；`SANDBOX_SESSION_IDLE=0` 禁用此回收。并发不同 session 的容量预留串行化，避免刚好同时抢过上限。关闭 ExecService 也清理 Go scratch sessions。预热上限仍受 `SANDBOX_MIN` / per-language idle `maxSize` 约束。
 4. **长期数据/前端**：语言内存估算把未运行 LSP 的 hint 从活动总量排除；非可回收 runner/profiler 估算已超预算时，不再为了“省”总预算误杀所有 LSP。子进程返回捕获每 stream 4 MiB、telemetry 每 run 10,000 行，显示截断标记；IDE run console DOM 512 Ki chars，Find 去抖并限制 1,000 个匹配 / 16 Mi characters；>1 Mi-character 文件暂缓实时诊断而仍可运行。日志保留后台首轮延迟 60s、每批 500 行，整完 1s 续批、无积压后每 6h 轮转。Git forced probes 共用正在运行的请求，基线 watcher 把已 probe 结果直接交给 checkpoint，免去二次 Git 子进程。大 HTML 经 gzip 协商并缓存压缩结果。
 
@@ -17,12 +17,13 @@
 
 ### 验证
 
-- `verify-exec`：43+ 检查（含 worker limit race、named-session refusal、capture byte/log-line caps）
+- `verify-exec`：51 检查（含 worker limit race、named-session refusal、capture byte/log-line caps、concurrent last-slot admission）
 - `verify-pycharm`：311+ 检查（含 512 KiB console、large-file diagnostics pause、Find cap）
 - `verify-ide`：gzip negotiation + decompression
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
+- 全套回归：`verify-all` 2146/2146 across 47 suites；`npm test` 38/38；`ci:pure` 406/406。
 
 ## 0.7.22 — 2026-11-13
 
