@@ -19,11 +19,11 @@
 
 - `verify-exec`：51 检查（含 worker limit race、named-session refusal、capture byte/log-line caps、concurrent last-slot admission）
 - `verify-pycharm`：311+ 检查（含 512 KiB console、large-file diagnostics pause、Find cap）
-- `verify-ide`：gzip negotiation + decompression
+- `verify-ide`：gzip negotiation + decompression；`run` 的客户端 `timeoutMs`（生效 + 非法值回退）
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2147/2147 across 47 suites；`npm test` 38/38；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2150/2150 across 47 suites；`npm test` 44/44；`ci:pure` 406/406。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -50,6 +50,17 @@ install smoke: ok
 ```
 
 两个 job 全部 success（`Ensure NSIS` → `Build installer` → `Silent install + health smoke` → 产物上传）。这是本项目第一次在真实 runner 上完成「构建 → 全量回归 → 打包 → 安装 → 探活」的闭环。
+
+### 本地软件测试又抓到两个问题
+
+自动化门禁全绿之后，把打包产物当普通软件用了一遍（自写 `.tmp/e2e-pkg.ts`，49 项）：`/health`、6 个页面路由、gzip 协商与 `q=0`、Python/Go/JavaScript 真执行、Go 编译错误、Python 命名空间跨 run 保留、异常后会话存活、Markdown 预览、死循环超时、`resetSession`、kill 后端口释放。两项与预期不符：
+
+| 问题 | 表现 | 修法 |
+|---|---|---|
+| `run` 丢弃客户端 `timeoutMs` | 传 `timeoutMs: 4000`，实际按 manifest 的 15000ms 超时（实测 15063ms）。`WorkspaceService.run` 本来就支持，`profile` 命令也一直在传，只有 `handleRun` 没转发 | 新增 `src/panel/run-timeout.ts`：`NaN`/`Infinity`/非数字/布尔/数组一律回退成 manifest 默认（`setTimeout(NaN)` 会立刻触发，等于把每次运行秒杀），`0`/负数抬到 500ms，超过 10 分钟压到 10 分钟 |
+| `ci:install-smoke` 留下开始菜单 | 每次跑完 `Start Menu\Programs\Nolanguage` 都还在，里面「Uninstall Nolanguage」指向已被删除的目录。脚本只快照/还原注册表和 receipt，漏了开始菜单 | 快照整个目录 → `finally` 还原；原本没有就删掉。两个只有真跑才会发现的坑：`Copy-Item <dir> -Destination <dir>` 在目标仍存在时会把源**嵌套**进去（要复制 `"$src\*"`）；还原失败必须降级成 `Write-Warning`，否则 `finally` 抛错会把「冒烟通过」变成「冒烟失败」 |
+
+两条回归都做了「故意注入违规 → FAIL，还原 → PASS」验证：撤掉 `handleRun` 的转发后，`the client timeout beats the manifest default` 报 `15075ms` 失败；恢复后回到 3030ms。开始菜单的两条分支也分别实测（有则还原、无则清除，跑完 `ls` 为空）。
 
 
 ## 0.7.22 — 2026-11-13

@@ -19,6 +19,7 @@ import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '
 import { discoverBinary } from '../../langs/discover.js';
 import type { WorkspaceService } from '../WorkspaceService.js';
 import { stateFor, dropDap, peekConnection } from '../conn-state.js';
+import { boundedRunTimeout } from '../run-timeout.js';
 import { asLanguage } from './languages.js';
 
 const execAsync = promisify(execCb);
@@ -204,6 +205,9 @@ export async function handleRun(
   const language = asLanguage(msg.language, workspace);
   // `mode` selects `go test` over `go run`; ignored by Python.
   const mode = msg.mode === 'test' ? 'test' : 'run';
+  // A client may bound the run; an unusable value means "use the manifest
+  // default" rather than "fire immediately" (see run-timeout.ts).
+  const timeoutMs = boundedRunTimeout(msg.timeoutMs);
   try {
     // Announce the run so the UI can show a busy state before the toolchain boots.
     const st = stateFor(client);
@@ -212,6 +216,7 @@ export async function handleRun(
       sessionId,
       reset: msg.reset === true,
       mode,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       onData: (stream, text) => reply({ kind: 'runOut', stream, text }),
       onStdinReady: (sink) => { st.runSink = sink; },
     });

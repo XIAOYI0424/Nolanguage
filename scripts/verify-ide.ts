@@ -200,6 +200,50 @@ async function main(): Promise<void> {
       JSON.stringify(String(r4?.stdout ?? '').trim()),
     );
 
+    // ---------- a client-supplied run timeout ----------
+    // The `run` message accepts `timeoutMs`, and `WorkspaceService.run` honours
+    // it — but the handler never forwarded it, so every run silently got the
+    // manifest default (15s for Python). A caller who believes the run is
+    // bounded, and it is not, is worse off than one who knows there is no
+    // bound. These two checks are the regression: one proves the budget is
+    // applied, the other proves a typo cannot turn it into "abort at birth".
+    {
+      const t0 = Date.now();
+      client.clearReceived();
+      client.send({
+        kind: 'run',
+        language: 'python',
+        sessionId: 'verify-timeout',
+        code: 'import time\nwhile True:\n    time.sleep(0.05)',
+        timeoutMs: 3000,
+      });
+      const timed = await client.waitFor('runResult', 40_000);
+      const elapsed = Date.now() - t0;
+      check('run honours a client-supplied timeout', timed?.timedOut === true, `timedOut=${timed?.timedOut}`);
+      check(
+        'the client timeout beats the manifest default',
+        elapsed < 12_000,
+        `${elapsed}ms (the manifest default is 15000ms)`,
+      );
+    }
+
+    {
+      client.clearReceived();
+      client.send({
+        kind: 'run',
+        language: 'python',
+        sessionId: 'verify',
+        code: 'print("still runs")',
+        timeoutMs: 'not-a-number',
+      });
+      const bogus = await client.waitFor('runResult', 25_000);
+      check(
+        'a bogus timeout falls back instead of aborting the run',
+        bogus?.exitCode === 0 && bogus?.timedOut !== true,
+        `exit=${bogus?.exitCode} timedOut=${bogus?.timedOut}`,
+      );
+    }
+
     // ---------- check (LSP diagnostics) ----------
     if (health.workspace.lsp.available) {
       client.clearReceived();

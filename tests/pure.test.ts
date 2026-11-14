@@ -26,6 +26,7 @@ import { discoverInterpreters, pickInterpreter, shortVersion } from '../src/lang
 import { decodeEntities, findAll, options, parseXml } from '../src/util/xml';
 import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
+import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../src/panel/run-timeout';
 
 const near = (a: number, b: number, tol: number): boolean => Math.abs(a - b) <= tol;
 
@@ -283,5 +284,47 @@ describe('.idea import', () => {
     const out = await importIdeaProject(join(tmpdir(), 'nlg-no-such-project-xyz'));
     expect(out.missing).toBe(true);
     expect(out.configurations).toEqual([]);
+  });
+});
+
+describe('run timeout · a client budget that means something', () => {
+  it('treats absent values as "use the manifest default"', () => {
+    expect(boundedRunTimeout(undefined)).toBeUndefined();
+    expect(boundedRunTimeout(null)).toBeUndefined();
+    expect(boundedRunTimeout('')).toBeUndefined();
+  });
+
+  it('rejects values that are not a number at all', () => {
+    // `Number('abc')` is NaN and `setTimeout(NaN)` fires immediately: a typo
+    // would abort every run at birth, which reads as a crash.
+    expect(boundedRunTimeout('abc')).toBeUndefined();
+    expect(boundedRunTimeout(Number.NaN)).toBeUndefined();
+    expect(boundedRunTimeout(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(boundedRunTimeout({})).toBeUndefined();
+    expect(boundedRunTimeout(true)).toBeUndefined();
+    expect(boundedRunTimeout([5000])).toBeUndefined();
+  });
+
+  it('clamps a zero or negative budget up to the minimum', () => {
+    expect(boundedRunTimeout(0)).toBe(RUN_TIMEOUT_MIN_MS);
+    expect(boundedRunTimeout(-1)).toBe(RUN_TIMEOUT_MIN_MS);
+    expect(boundedRunTimeout(-99999)).toBe(RUN_TIMEOUT_MIN_MS);
+  });
+
+  it('clamps an absurd budget down to the maximum', () => {
+    expect(boundedRunTimeout(1e9)).toBe(RUN_TIMEOUT_MAX_MS);
+    expect(boundedRunTimeout(RUN_TIMEOUT_MAX_MS + 1)).toBe(RUN_TIMEOUT_MAX_MS);
+  });
+
+  it('keeps a sane budget exactly as asked', () => {
+    expect(boundedRunTimeout(4000)).toBe(4000);
+    expect(boundedRunTimeout(RUN_TIMEOUT_MIN_MS)).toBe(RUN_TIMEOUT_MIN_MS);
+    expect(boundedRunTimeout(RUN_TIMEOUT_MAX_MS)).toBe(RUN_TIMEOUT_MAX_MS);
+  });
+
+  it('accepts a numeric string from the wire and rounds fractions', () => {
+    expect(boundedRunTimeout('4000')).toBe(4000);
+    expect(boundedRunTimeout(4000.7)).toBe(4001);
+    expect(boundedRunTimeout(4000.2)).toBe(4000);
   });
 });
