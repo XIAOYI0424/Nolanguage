@@ -16,12 +16,14 @@
 #    repository lives.
 #
 # 2. **It puts back whatever install was already there.** The installer writes
-#    one HKCU uninstall key and one receipt, so a smoke run on a machine with a
-#    real install would otherwise delete that install's registration and leave
-#    the real directory orphaned. Snapshot before, restore in `finally`.
+#    one HKCU uninstall key, one receipt and a Start Menu folder, so a smoke run
+#    on a machine with a real install would otherwise delete that install's
+#    registration and leave the real directory orphaned. Snapshot before,
+#    restore in `finally` — all three, because the Start Menu was the one that
+#    got forgotten and every run left a shortcut folder behind.
 #
-# It does modify the machine while it runs (registry, Start Menu shortcuts), so
-# it is not part of the default suite.
+# While it runs it does touch the machine (registry, Start Menu, a temp install
+# directory), so it is not part of the default suite.
 
 $ErrorActionPreference = 'Stop'
 
@@ -30,6 +32,7 @@ if (-not (Test-Path $setup)) { throw "installer missing: $setup (run npm run bui
 
 $regKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nolanguage'
 $receipt = Join-Path $env:LOCALAPPDATA 'Nolanguage\install-receipt.json'
+$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Nolanguage'
 
 # ---- snapshot whatever is already installed ----
 $hadKey = Test-Path $regKey
@@ -43,6 +46,27 @@ if ($hadKey) {
 }
 $hadReceipt = Test-Path $receipt
 $savedReceipt = if ($hadReceipt) { Get-Content $receipt -Raw } else { $null }
+
+# The installer creates four Start Menu shortcuts and the uninstaller deletes
+# them, but a run that dies between the two (or an uninstaller that cannot
+# remove a locked .lnk) leaves the folder behind. Snapshotting it means a smoke
+# run can never change what the user sees in the Start Menu — before this, the
+# folder survived every run and ended up holding an "Uninstall Nolanguage"
+# shortcut pointing at a directory that no longer existed.
+$hadStartMenu = Test-Path $startMenu
+$savedStartMenu = $null
+if ($hadStartMenu) {
+  $savedStartMenu = Join-Path ([System.IO.Path]::GetTempPath()) ("nl-smoke-startmenu-" + [guid]::NewGuid().ToString('N'))
+  try {
+    Copy-Item -LiteralPath $startMenu -Destination $savedStartMenu -Recurse -Force -ErrorAction Stop
+  } catch {
+    # A restricted shell (or a policy that denies writes under the Start Menu)
+    # must not turn "cannot snapshot" into "installer is broken". Skip the
+    # restore and say so.
+    Write-Warning "could not snapshot the Start Menu folder: $($_.Exception.Message)"
+    $savedStartMenu = $null
+  }
+}
 
 # ---- run a copy, not the checkout ----
 $temp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
@@ -103,6 +127,26 @@ finally {
     Set-Content -Path $receipt -Value $savedReceipt -NoNewline -Encoding utf8
   } elseif (Test-Path $receipt) {
     Remove-Item -Path $receipt -Force
+  }
+  # Start Menu: put back exactly what was there, or remove what we created.
+  # Best effort on purpose — a restore that cannot write must warn, never throw:
+  # the `finally` block must not replace the real verdict with a cleanup error.
+  try {
+    if ($savedStartMenu) {
+      if (Test-Path $startMenu) { Remove-Item -LiteralPath $startMenu -Recurse -Force -ErrorAction SilentlyContinue }
+      # Copy the *contents*, not the folder: `Copy-Item <dir> -Destination <dir>`
+      # nests the source inside the destination when the destination survives the
+      # Remove-Item above (a locked .lnk is enough), which produced
+      # `Nolanguage\nl-smoke-startmenu-<guid>\Nolanguage.lnk`.
+      New-Item -ItemType Directory -Path $startMenu -Force -ErrorAction Stop | Out-Null
+      Copy-Item -Path (Join-Path $savedStartMenu '*') -Destination $startMenu -Recurse -Force -ErrorAction Stop
+    } elseif (-not $hadStartMenu -and (Test-Path $startMenu)) {
+      Remove-Item -LiteralPath $startMenu -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  } catch {
+    Write-Warning "could not restore the Start Menu folder: $($_.Exception.Message)"
+  } finally {
+    if ($savedStartMenu) { Remove-Item -LiteralPath $savedStartMenu -Recurse -Force -ErrorAction SilentlyContinue }
   }
   Remove-Item -Path $run -Force -ErrorAction SilentlyContinue
   if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
