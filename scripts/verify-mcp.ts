@@ -52,8 +52,32 @@ rl.on('line', (line) => {
 async function main(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'nl-mcp-'));
   const serverPath = join(dir, 'server.cjs');
+  const slowPath = join(dir, 'slow.cjs');
   const configPath = join(dir, 'mcp.json');
   await writeFile(serverPath, FIXTURE, 'utf8');
+  // The same protocol, but `initialize` is answered late — the shape of a first
+  // `npx -y <server>` connect, where the package download eats the budget.
+  await writeFile(
+    slowPath,
+    `
+const delay = Number(process.argv[2] || 2000);
+const rl = require('node:readline').createInterface({ input: process.stdin });
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n');
+rl.on('line', (line) => {
+  let req;
+  try { req = JSON.parse(line); } catch { return; }
+  if (!req || req.id == null) return;
+  const ok = (result) => send({ jsonrpc: '2.0', id: req.id, result });
+  if (req.method === 'initialize') {
+    return setTimeout(() => ok({ protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'slow', version: '1.0.0' } }), delay);
+  }
+  if (req.method === 'tools/list') return ok({ tools: [{ name: 'echo', description: 'late but alive', inputSchema: { type: 'object' } }] });
+  if (req.method === 'tools/call') return ok({ content: [{ type: 'text', text: 'late' }] });
+  return ok({});
+});
+`,
+    'utf8',
+  );
 
   // A `.cmd` shim in its own directory — the exact shape `npx` has on Windows,
   // and the reason a bare command name cannot be spawned directly there
@@ -85,6 +109,11 @@ async function main(): Promise<void> {
             description: 'A bare command name that only exists on PATH',
             env: { PATH: `${shimDir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` },
           },
+          // Same late server, three budgets: generous, tight, and too small to
+          // be usable (which must clamp up, not become "fail instantly").
+          slowGenerous: { command: process.execPath, args: [slowPath, '2000'], timeoutMs: 8000 },
+          slowTight: { command: process.execPath, args: [slowPath, '2000'], timeoutMs: 1000 },
+          slowTiny: { command: process.execPath, args: [slowPath, '2000'], timeoutMs: 50 },
         },
       },
       null,
@@ -97,7 +126,7 @@ async function main(): Promise<void> {
   try {
     await mcp.load();
     const before = mcp.payload();
-    check('mcp: config lists every declared server', before.servers.length === 4, before.servers.map((s) => s.id).join(','));
+    check('mcp: config lists every declared server', before.servers.length === 7, before.servers.map((s) => s.id).join(','));
     check('mcp: servers start idle', before.servers.every((s) => s.status === 'idle' || s.status === 'disabled'));
     check('mcp: a disabled entry is marked', before.servers.some((s) => s.id === 'off' && s.status === 'disabled'));
 
@@ -131,6 +160,53 @@ async function main(): Promise<void> {
         check('mcp: a call through the shim round-trips', String(viaShim.content?.[0]?.text) === '42', String(viaShim.content?.[0]?.text));
         await mcp.disconnect('shim');
       }
+    }
+
+    // ---------- a per-server handshake budget ----------
+    // The default is 12s, which a first `npx -y <server>` can spend entirely on
+    // downloading; the failure then reads as "initialize timed out", i.e. as a
+    // broken server. `timeoutMs` lets a slow server say so.
+    {
+      const t0 = Date.now();
+      const generous = await mcp.connect('slowGenerous');
+      const generousMs = Date.now() - t0;
+      check(
+        'mcp: a slow server connects within its own budget',
+        generous.status === 'ready',
+        `${generous.status} in ${generousMs}ms`,
+      );
+      check('mcp: the slow server still lists its tools', generous.tools.map((t) => t.name).join(',') === 'echo', generous.tools.map((t) => t.name).join(','));
+      await mcp.disconnect('slowGenerous');
+    }
+
+    {
+      let tightError = '';
+      const t0 = Date.now();
+      try {
+        await mcp.connect('slowTight');
+      } catch (err) {
+        tightError = (err as Error).message;
+      }
+      const tightMs = Date.now() - t0;
+      check('mcp: a too-tight budget fails the handshake', /initialize timed out/.test(tightError), tightError || '(connected)');
+      check('mcp: the failure happens at the configured budget', tightMs < 1900, `${tightMs}ms (budget 1000ms, server answers at 2000ms)`);
+      check(
+        'mcp: a failed handshake becomes an error card',
+        mcp.payload().servers.find((s) => s.id === 'slowTight')?.status === 'error',
+        String(mcp.payload().servers.find((s) => s.id === 'slowTight')?.status),
+      );
+    }
+
+    {
+      // 50ms is below the floor, so it must be clamped up rather than making
+      // every connect fail instantly.
+      let tinyError = '';
+      try {
+        await mcp.connect('slowTiny');
+      } catch (err) {
+        tinyError = (err as Error).message;
+      }
+      check('mcp: an unusable budget is clamped, not honoured', /timed out after 1000ms/.test(tinyError), tinyError || '(connected)');
     }
 
     const state = await mcp.connect('fixture');

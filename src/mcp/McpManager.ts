@@ -14,10 +14,16 @@
  *         "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/tmp"],
  *         "env": { "TOKEN": "…" },
  *         "cwd": ".",
- *         "disabled": false
+ *         "disabled": false,
+ *         "timeoutMs": 60000
  *       }
  *     }
  *   }
+ *
+ * `timeoutMs` is optional and exists for servers that start slowly: the default
+ * handshake budget is 12s, and a first `npx` run spends it downloading, so the
+ * failure looks like a broken server instead of a cold cache. See
+ * `McpServerConfig.timeoutMs`.
  *
  * Each entry is a stdio MCP server: the manager spawns it, performs the
  * `initialize` handshake, asks for `tools/list`, and can forward `tools/call`.
@@ -51,6 +57,42 @@ export interface McpServerConfig {
   cwd?: string;
   disabled?: boolean;
   description?: string;
+  /**
+   * How long to wait for *this* server to answer, ms.
+   *
+   * Needed because the default 12s handshake budget is not enough for the
+   * common case: `npx -y some-server` has to download the package on the first
+   * connect, and the failure reads as "initialize timed out" — indistinguishable
+   * from a server that is actually broken. A config that starts slowly says so
+   * here instead of looking dead.
+   *
+   * Applies to the handshake (`initialize` + `tools/list`) and to `tools/call`
+   * unless the call passes its own budget. Clamped to
+   * [MCP_TIMEOUT_MIN_MS, MCP_TIMEOUT_MAX_MS]; an unusable value is ignored.
+   */
+  timeoutMs?: number;
+}
+
+/** Below this a handshake is being abandoned before a process could boot. */
+export const MCP_TIMEOUT_MIN_MS = 1_000;
+
+/** Above this a "timeout" stops protecting anything (10 minutes). */
+export const MCP_TIMEOUT_MAX_MS = 10 * 60_000;
+
+/**
+ * Normalise a config-supplied MCP timeout.
+ *
+ * Same reasoning as the run timeout: `Number('abc')` is NaN and `setTimeout(NaN)`
+ * fires immediately, so a typo would make every connect fail at once. An
+ * unusable value returns `undefined` — "no opinion, use the default" — rather
+ * than a number that means something else.
+ */
+export function boundedMcpTimeout(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'number' && typeof raw !== 'string') return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(MCP_TIMEOUT_MAX_MS, Math.max(MCP_TIMEOUT_MIN_MS, Math.round(n)));
 }
 
 /** What `initialize` reported, trimmed to what a card can show. */
@@ -259,16 +301,17 @@ export class McpManager {
     });
 
     try {
+      const budget = this.handshakeTimeout(cfg);
       const init = (await this.request(live, 'initialize', {
         protocolVersion: '2024-11-05',
         capabilities: {},
         clientInfo: { name: 'nolanguage', version: '0.6.0' },
-      })) as { protocolVersion?: string; serverInfo?: McpServerInfo } | undefined;
+      }, budget)) as { protocolVersion?: string; serverInfo?: McpServerInfo } | undefined;
       state.protocolVersion = init?.protocolVersion;
       state.serverInfo = init?.serverInfo;
       // The spec's second half of the handshake: a notification, no id.
       this.notify(live, 'notifications/initialized', {});
-      const listed = (await this.request(live, 'tools/list', {})) as { tools?: McpToolInfo[] } | undefined;
+      const listed = (await this.request(live, 'tools/list', {}, budget)) as { tools?: McpToolInfo[] } | undefined;
       state.tools = Array.isArray(listed?.tools)
         ? listed!.tools.map((t) => ({ name: String(t.name), description: t.description ?? '', inputSchema: t.inputSchema }))
         : [];
@@ -306,7 +349,28 @@ export class McpManager {
       live = this.live.get(id);
     }
     if (!live) throw new Error(`"${id}" is not connected`);
-    return this.request(live, 'tools/call', { name: tool, arguments: args }, timeoutMs ?? 30_000);
+    return this.request(
+      live,
+      'tools/call',
+      { name: tool, arguments: args },
+      this.callTimeout(this.config[id], timeoutMs),
+    );
+  }
+
+  /** Handshake budget for one server: its own `timeoutMs`, else the default. */
+  private handshakeTimeout(cfg?: McpServerConfig): number {
+    return boundedMcpTimeout(cfg?.timeoutMs) ?? this.timeoutMs;
+  }
+
+  /**
+   * Budget for one `tools/call`.
+   *
+   * Precedence: the caller's explicit value, then the server's configured one,
+   * then the historical 30s. A tool that legitimately runs long belongs in the
+   * config, not in every call site.
+   */
+  private callTimeout(cfg?: McpServerConfig, override?: number): number {
+    return boundedMcpTimeout(override) ?? boundedMcpTimeout(cfg?.timeoutMs) ?? 30_000;
   }
 
   /** Kill every child. Called from the server's shutdown path. */

@@ -28,6 +28,7 @@ import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
 import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../src/panel/run-timeout';
 import { isCmdScript, planMcpSpawn, quoteCmdArg } from '../src/mcp/spawn-command';
+import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../src/mcp/McpManager';
 
 const near = (a: number, b: number, tol: number): boolean => Math.abs(a - b) <= tol;
 
@@ -410,5 +411,41 @@ describe('mcp · turning an mcp.json command into a spawn()', () => {
     // Shell metacharacters must not escape the quoting.
     expect(quoteCmdArg('a&b|c>d')).toBe('"a&b|c>d"');
     expect(quoteCmdArg('50%')).toBe('50%');
+  });
+});
+
+describe('mcp · a per-server handshake budget', () => {
+  it('treats absent values as "use the manager default"', () => {
+    expect(boundedMcpTimeout(undefined)).toBeUndefined();
+    expect(boundedMcpTimeout(null)).toBeUndefined();
+    expect(boundedMcpTimeout('')).toBeUndefined();
+  });
+
+  it('rejects values that are not a number at all', () => {
+    // `setTimeout(NaN)` fires immediately, so a typo in mcp.json would make
+    // every connect fail at once — the opposite of what the field is for.
+    expect(boundedMcpTimeout('soon')).toBeUndefined();
+    expect(boundedMcpTimeout(Number.NaN)).toBeUndefined();
+    expect(boundedMcpTimeout(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(boundedMcpTimeout({})).toBeUndefined();
+    expect(boundedMcpTimeout(true)).toBeUndefined();
+  });
+
+  it('clamps a too-small budget up to the floor', () => {
+    // A server that answers in 2s and a config of 50ms is a mistake, not a
+    // request to abandon the handshake before the process can even boot.
+    expect(boundedMcpTimeout(50)).toBe(MCP_TIMEOUT_MIN_MS);
+    expect(boundedMcpTimeout(0)).toBe(MCP_TIMEOUT_MIN_MS);
+    expect(boundedMcpTimeout(-5)).toBe(MCP_TIMEOUT_MIN_MS);
+  });
+
+  it('clamps an absurd budget down to the ceiling', () => {
+    expect(boundedMcpTimeout(1e9)).toBe(MCP_TIMEOUT_MAX_MS);
+  });
+
+  it('keeps a sane budget exactly as asked', () => {
+    expect(boundedMcpTimeout(60_000)).toBe(60_000);
+    expect(boundedMcpTimeout('45000')).toBe(45_000);
+    expect(boundedMcpTimeout(MCP_TIMEOUT_MIN_MS)).toBe(MCP_TIMEOUT_MIN_MS);
   });
 });

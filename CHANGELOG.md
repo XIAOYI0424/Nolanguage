@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2153/2153 across 47 suites；`npm test` 52/52；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2159/2159 across 47 suites；`npm test` 57/57；`ci:pure` 406/406。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -87,7 +87,19 @@ FAIL  real MCP server connects with command "npx"  — process error: spawn npx 
 - `scripts/verify-mcp.ts` +3 条：造一个 `mcpfixture.cmd` 垫片放在临时目录、挂到该 server 的 `env.PATH` 上，断言能连上、能列工具、能调用。故意把 `planMcpSpawn` 换成直通后报 `spawn mcpfixture ENOENT` FAIL，还原后 15/15。
 - 打包 exe 对真实 server：连接成功、14 个工具、`list_directory` / `read_file` / `write_file` 全部往返正常。
 
-顺带发现（未改）：`initialize` 握手预算是硬编码 12 秒，而首次 `npx` 要下载整包，冷启动很容易超时并报成 `initialize timed out`——看起来像 server 坏了。测试里通过预热缓存绕开；真实用户第一次连接时可能需要更宽松的预算或可配置项。
+### 握手预算改成每 server 可配
+
+上面那句「12 秒硬编码」是本轮唯一没当场修的：首次 `npx` 要下载整包，冷启动很容易超时并报成 `initialize timed out`——读起来像 server 坏了。现在 `mcp.json` 的每个 server 可以写 `timeoutMs`：
+
+```json
+{ "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."], "timeoutMs": 60000 } } }
+```
+
+- 作用于握手（`initialize` + `tools/list`）和 `tools/call`；单次调用传的 `timeoutMs` 优先。
+- 钳到 `[1000, 600000]`：`NaN` / 非数字 / 布尔 / 数组一律当作「没写」回退默认（`setTimeout(NaN)` 会立刻触发，一个笔误就能让所有连接瞬间失败）；低于 1000 抬到 1000，超过 10 分钟压到 10 分钟。
+- 默认值不变：握手 12 秒、调用 30 秒，所以现有配置行为完全不动。
+
+测试：`tests/pure.test.ts` +5 组（共 **57**）；`scripts/verify-mcp.ts` +6 条（共 **21**）——一个「initialize 迟 2 秒才答」的 fixture，配三档预算：8000 正常连上、1000 在 1026ms 报 `initialize timed out` 并落成 error 卡片、50 被钳到 1000（错误信息里就是 `after 1000ms`，证明钳制生效而不是「立刻失败」）。
 
 
 ## 0.7.22 — 2026-11-13
