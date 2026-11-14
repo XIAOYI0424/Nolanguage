@@ -258,7 +258,10 @@ export async function discoverInterpreters(
         sdk.includes(c.version ? `python ${c.version}` : '\u0000') ||
         sdk.includes(basename(c.path).replace(/\.exe$/i, '').toLowerCase());
     }
-    const head = c.version ? `${languageId === 'python' ? 'Python ' : ''}${c.version}` : kindLabel(c.kind);
+    // The list is already scoped to one language, so the label carries only the
+    // version — prefixing it with a language name is how a generic list starts
+    // knowing which languages exist.
+    const head = c.version ? c.version : kindLabel(c.kind);
     c.label = `${head} (${c.source})`;
   }
 

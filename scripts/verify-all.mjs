@@ -57,6 +57,9 @@ const stages = [
   { name: 'Debug · sanitize a recording', script: 'scripts/verify-sanitize.ts' },
   // The architecture contract: layers, cycles, product boundary, budgets.
   { name: 'Arch · contract', script: 'scripts/verify-architecture.ts', pure: true },
+  // Language parity: every plugin is the same shape, and no core layer knows a
+  // language by name. A ratchet on the existing literals, not a cliff.
+  { name: 'Plugins · language parity (manifest shape + literal ratchet)', script: 'scripts/verify-langparity.ts', pure: true },
   // scripts/ was never in tsconfig's include; this ratchets the remainder down.
   { name: 'Arch · types in scripts', script: 'scripts/verify-types.ts' },
   // Documents are claims about the code. Runs after `Arch · contract` because it

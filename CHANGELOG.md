@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2192/2192 across 48 suites；`npm test` 72/72；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2197/2197 across 49 suites；`npm test` 72/72；`ci:pure` 411/411。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -184,6 +184,55 @@ npm run install:app -- -DryRun    # 只打印计划
 冒烟沙箱每次复制一份 93 MB 的 exe，收尾是 best-effort，进程被杀就整目录留下——几十次运行攒到 5.5 GB。现在 `smoke-exe.ts` 启动时清扫**超过一小时**的 `smoke-*` 兄弟目录（只碰自己命名的、且足够旧的，不会干扰并发运行）。
 
 测试：`tests/pure.test.ts` +5 组（共 **72**）覆盖 boot sink（未配置时静默、`0`/`off` 关闭、头部行、错误字段、目标不可写不抛）。
+
+### 语言一致性门禁：`verify:langparity`
+
+「所有语言用同一套框架」这句话，光靠文档守不住。新门禁 `scripts/verify-langparity.ts`（接入 `verify-all`，49 套件）把它变成可失败的四条：
+
+| 检查 | 结果 |
+|---|---|
+| 每个插件都声明同一组核心字段（id/displayName/version/apiVersion/publisher/description/order/trust） | ✅ 8 × 5 |
+| 声明了 `lsp`/`run`/`debug`/`profiler`/`file` 块，就带齐该块的必填子字段 | ✅ 5 个块 |
+| **核心层不得按语言名比较**（`language === 'python'` / `case 'go':`） | ✅ 0 处 |
+| 裸语言字面量按文件预算卡住（只许降不许升） | ✅ 49 处，预算内 |
+
+写门禁时抓出两处真硬编码并修掉：
+
+1. `src/panel/handlers/perf.ts`：`if (language !== 'python')` —— 覆盖率被一个语言名锁死。改成读 manifest 的 **`run.coverage`**（新增字段，Python 声明 `true`），第二个语言想有覆盖率只需在自己 manifest 里打开。
+2. `src/langs/interpreters.ts`：`` `${languageId === 'python' ? 'Python ' : ''}` `` —— 解释器标签硬拼语言名。列表本来就按语言分组，前缀是冗余，去掉。
+
+**Ratchet 而不是一刀切**：现有 49 处裸字面量（`samples.ts` 19 处演示内容、`FsService.ts` 11 处扩展名映射、`LspClient.ts` 6 处 Python 专用发现函数…）都记了预算与理由，只允许下降。新写一个字面量立刻失败。
+
+门禁本身做了注入验证：往 `coverage.ts` 里塞一行 `language === 'python'` → 两条检查同时 FAIL（比较 + 预算），还原后 5/5 通过。
+
+同时修了门禁自己的一个 bug：CRLF 下按 `
+` 分行会留下 ``，而 `$` 不能匹配 `` 之前，导致注释剥离静默失效、文档注释被当成代码报错。
+
+**能力覆盖矩阵**（报告，不强制——这是产品决策）：`lsp` 4/5（zh-cn 是本地化包）、`run` 3/5（markdown 无运行时）、`debug` 2/5、`profiler` 2/5（仅 python/go）。
+
+### 语言一致性门禁：`verify:langparity`
+
+「所有语言用同一套框架」这句话，光靠文档守不住。新门禁 `scripts/verify-langparity.ts`（接入 `verify-all`，49 套件）把它变成可失败的四条：
+
+| 检查 | 结果 |
+|---|---|
+| 每个插件都声明同一组核心字段（id/displayName/version/apiVersion/publisher/description/order/trust） | ✅ 8 × 5 |
+| 声明了 `lsp`/`run`/`debug`/`profiler`/`file` 块，就带齐该块的必填子字段 | ✅ 5 个块 |
+| **核心层不得按语言名比较**（`language === 'python'` / `case 'go':`） | ✅ 0 处 |
+| 裸语言字面量按文件预算卡住（只许降不许升） | ✅ 49 处，预算内 |
+
+写门禁时抓出两处真硬编码并修掉：
+
+1. `src/panel/handlers/perf.ts`：`if (language !== 'python')` —— 覆盖率被一个语言名锁死。改成读 manifest 的 **`run.coverage`**（新增字段，Python 声明 `true`），第二个语言想有覆盖率只需在自己 manifest 里打开。
+2. `src/langs/interpreters.ts`：`` `${languageId === 'python' ? 'Python ' : ''}` `` —— 解释器标签硬拼语言名。列表本来就按语言分组，前缀是冗余，去掉。
+
+**Ratchet 而不是一刀切**：现有 49 处裸字面量（`samples.ts` 19 处演示内容、`FsService.ts` 11 处扩展名映射、`LspClient.ts` 6 处 Python 专用发现函数…）都记了预算与理由，只允许下降。新写一个字面量立刻失败。
+
+门禁本身做了注入验证：往 `coverage.ts` 里塞一行 `language === 'python'` → 两条检查同时 FAIL（比较 + 预算），还原后 5/5 通过。
+
+同时修了门禁自己的一个 bug：CRLF 下按 `\n` 分行会留下 `\r`，而 `$` 不能匹配 `\r` 之前，导致注释剥离静默失效、文档注释被当成代码报错。
+
+**能力覆盖矩阵**（报告，不强制——这是产品决策）：`lsp` 4/5（zh-cn 是本地化包）、`run` 3/5（markdown 无运行时）、`debug` 2/5、`profiler` 2/5（仅 python/go）。
 
 
 ## 0.7.22 — 2026-11-13

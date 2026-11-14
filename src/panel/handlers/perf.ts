@@ -114,16 +114,20 @@ export class PerfHandlers {
   private coverage(msg: Record<string, unknown>, reply: Reply): void {
     const workspace = this.deps.workspace;
     const language = asLanguage(msg.language, workspace);
-    if (language !== 'python') {
+    // Declared by the plugin (`run.coverage`), not compared by name: a language
+    // that grows a line-coverage implementation opts in from its manifest.
+    const spec = workspace.manifests().find((m) => m.id === language);
+    if (!spec?.run?.coverage) {
       reply({
         kind: 'coverageResult',
         ok: false,
         language,
-        error: `line coverage is only implemented for Python (this document is ${language})`,
+        error: `${language} does not declare line coverage (run.coverage)`,
       });
       return;
     }
-    const bin = workspace.languageStatus('python').binary || process.env.PYTHON_BIN || 'python';
+    const bin =
+      workspace.languageStatus(language).binary || spec.run.discovery?.commands?.[0] || '';
     void runPythonCoverage(bin, String(msg.code ?? ''), {
       timeoutMs: msg.timeoutMs ? Number(msg.timeoutMs) : 30_000,
     })

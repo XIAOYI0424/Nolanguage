@@ -88,6 +88,15 @@ export interface RunConfig {
   requires?: string[];
   /** Default timeout for one run. */
   timeoutMs?: number;
+  /**
+   * The plugin ships line coverage for this language.
+   *
+   * Declared rather than inferred: coverage needs an instrumented run, which is
+   * a per-language implementation detail. Before this field the panel compared
+   * `language !== 'python'`, so a second language could never opt in without
+   * editing the panel.
+   */
+  coverage?: boolean;
   /** Command prefix, e.g. `["python"]`. The runtime appends the source/bootstrap. */
   command?: string[];
   /** Source file extension *with* the dot, e.g. `.py`. */

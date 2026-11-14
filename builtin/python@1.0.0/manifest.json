@@ -118,7 +118,8 @@
     },
     "versionArgs": [
       "-V"
-    ]
+    ],
+    "coverage": true
   },
   "profiler": {
     "adapter": "cProfile",
