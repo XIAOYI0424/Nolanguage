@@ -30,6 +30,7 @@ import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../sr
 import { isCmdScript, planMcpSpawn, quoteCmdArg } from '../src/mcp/spawn-command';
 import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../src/mcp/McpManager';
 import { FileTransport } from '../src/log/transports/FileTransport';
+import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
 import { sliceDigest } from '../src/panel/log-digest';
 import { LogLevel } from '../src/log/LogLevel';
 import type { LogRecord } from '../src/log/types';
@@ -595,5 +596,89 @@ describe('log · the NDJSON file transport', () => {
     // Two made it through the queue, the rest are counted, not forgotten.
     expect(stats.written + stats.dropped).toBe(10);
     expect(stats.dropped).toBeGreaterThan(0);
+  });
+});
+
+describe('log · the boot sink that exists before the kernel', () => {
+  let dir = '';
+  const withLogFile = (value: string | undefined): void => {
+    if (value === undefined) delete process.env.NOLANGUAGE_LOG_FILE;
+    else process.env.NOLANGUAGE_LOG_FILE = value;
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nlg-boot-'));
+  });
+  afterEach(() => {
+    withLogFile(undefined);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('stays silent when no log file is configured', () => {
+    withLogFile(undefined);
+    expect(bootLogPath()).toBeUndefined();
+    bootLog('nothing-happens');
+    expect(existsSync(join(dir, 'boot.log'))).toBe(false);
+  });
+
+  it('honours an explicit opt-out', () => {
+    withLogFile('0');
+    expect(bootLogPath()).toBeUndefined();
+    withLogFile('off');
+    expect(bootLogPath()).toBeUndefined();
+  });
+
+  it('writes a header first, then one line per event', () => {
+    const appLog = join(dir, 'logs', 'app.log');
+    withLogFile(appLog);
+    expect(bootLogPath()).toBe(join(dir, 'logs', 'boot.log'));
+    bootLog('boot');
+    bootLog('server-starting', { port: 7310 });
+
+    const lines = readFileSync(join(dir, 'logs', 'boot.log'), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(3);
+    const header = JSON.parse(lines[0]) as Record<string, unknown>;
+    expect(header['#']).toBe('boot');
+    expect(header.pid).toBe(process.pid);
+    const event = JSON.parse(lines[2]) as Record<string, unknown>;
+    expect(event.ev).toBe('server-starting');
+    expect((event as { port?: number }).port).toBe(7310);
+  });
+
+  it('keeps the fields that identify a denied write', () => {
+    // The failure this exists for said only "operation not permitted"; the
+    // path and errno are what make it actionable.
+    withLogFile(join(dir, 'logs', 'app.log'));
+    const err = Object.assign(new Error('EPERM: operation not permitted, open X'), {
+      code: 'EPERM',
+      errno: -4048,
+      syscall: 'open',
+      path: 'C:/temp/nolanguage-embedded/extensions/examples/faulty/extension.json',
+    });
+    bootLogError('embedded-asset', err, { asset: 'extensions/examples/faulty/extension.json' });
+
+    const lines = readFileSync(join(dir, 'logs', 'boot.log'), 'utf8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]) as {
+      ev: string;
+      asset: string;
+      error: { code: string; errno: number; syscall: string; path: string };
+    };
+    expect(entry.ev).toBe('embedded-asset');
+    expect(entry.asset).toContain('faulty/extension.json');
+    expect(entry.error.code).toBe('EPERM');
+    expect(entry.error.errno).toBe(-4048);
+    expect(entry.error.syscall).toBe('open');
+    expect(entry.error.path).toContain('nolanguage-embedded');
+  });
+
+  it('never throws when the target cannot be written', () => {
+    const blocked = join(dir, 'blocked');
+    mkdirSync(blocked, { recursive: true });
+    // Point the log at a directory: every append fails.
+    withLogFile(join(blocked, 'nested'));
+    expect(() => {
+      bootLog('first');
+      bootLog('second');
+    }).not.toThrow();
   });
 });

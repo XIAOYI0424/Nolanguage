@@ -24,7 +24,7 @@
  * is writable from a grandchild process. `NOLANGUAGE_SMOKE_DIR` overrides it.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,12 +107,44 @@ function waitForExit(child: ChildProcess, timeoutMs = 8000): Promise<void> {
   });
 }
 
+/**
+ * Delete sandboxes left by earlier runs.
+ *
+ * Each one holds a 93 MB copy of the exe, and the cleanup at the end is
+ * best-effort — a killed run, a crash, or a timeout leaves the whole directory
+ * behind. A few dozen runs turned `.tmp` into 5.5 GB. Only directories this
+ * script names, and only when they are over an hour old, so a concurrent run
+ * (or a different suite's sandbox) is never touched.
+ */
+async function reapStaleSandboxes(root: string): Promise<void> {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  let entries: string[];
+  try {
+    entries = await readdir(root);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith('smoke-')) continue;
+    const dir = join(root, name);
+    try {
+      const info = await stat(dir);
+      if (!info.isDirectory() || info.mtimeMs > cutoff) continue;
+      await rm(dir, { recursive: true, force: true });
+      console.log(`smoke: reaped stale sandbox ${name}`);
+    } catch {
+      /* another run may be removing it too */
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const exe = join(root, 'dist', 'Nolanguage.exe');
   // See the sandbox note in the header: keep the sandbox inside the project
   // tree so a sandboxed harness still authorises the exe's writes.
   const sandboxRoot = process.env.NOLANGUAGE_SMOKE_DIR ?? join(root, '.tmp');
+  await reapStaleSandboxes(sandboxRoot);
   const sandbox = join(sandboxRoot, `smoke-${process.pid}-${Date.now().toString(36)}`);
   await mkdir(sandbox, { recursive: true });
   const exeInSandbox = join(sandbox, 'Nolanguage.exe');

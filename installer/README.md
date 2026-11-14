@@ -25,7 +25,17 @@ GUI 子系统没有控制台，所以**窗口就是唯一的退出入口**：
 排查用日志（两份，都在 `%LOCALAPPDATA%\Nolanguage\`）：
 
 - `desktop.log` —— 每次启动、清窗口、退出原因各一行；超过 256 KiB 轮转到 `desktop.log.1`（**不再删除重来**，否则最该看的"出事前几条"会先消失）。写入失败会向 stderr 报一次，不再静默。
-- `logs/app.log` —— 内核日志，NDJSON 一行一条，首行是进程头（版本 / 平台 / 启动时间 / pid），按大小轮转到 `.1/.2/.3`。桌面版是 GUI 子系统、没有控制台，这份文件是唯一完整的运行记录；`NOLANGUAGE_LOG_FILE=0` 可关闭。
+- `logs/app.log` —— 内核日志，NDJSON 一行一条，首行是进程头（版本 / 平台 / 启动时间 / pid），按大小轮转到 `.1/.2/.3`。桌面版是 GUI 子系统、没有控制台，这份文件是唯一完整的运行记录。
+- `logs/boot.log` —— **内核起来之前**的日志。启动阶段挂掉（比如 embedded 资源解压被拒）时 `app.log` 根本不会被创建，这时只有它留下线索：进程头 + `server-starting` / `server-ready` 里程碑，失败时还有 `server-start-failed`（带 `asset`、`errno`、`syscall`、`path`）和 `uncaught`。
+
+两个开关：
+
+| 变量 | 作用 |
+|---|---|
+| `NOLANGUAGE_LOG_FILE` | 内核日志路径；`0` / `off` 全部关闭（含 `boot.log`） |
+| `NOLANGUAGE_LOG_LEVEL` | **文件**保留的级别，默认 `INFO`。面板/环形缓冲仍是 `TRACE`，不受影响；排查时设 `debug` 或 `trace` 即可 |
+
+文件默认只留 `INFO` 及以上：桌面跑几天，全量 TRACE 会把轮转文件塞满 `Command xxx started/done` 这类噪音，真正要看的那行反而被埋掉。
 
 实现见 `src/desktop/WebViewHost.ts`（`onClosed` / 进程树清理）、`src/desktop/main.ts`（单实例探测、看门狗）与 `src/desktop/session.ts`（会话 pid 记录、启动前清扫、日志）。
 

@@ -23,6 +23,8 @@ export interface LogSpineOptions {
    * verification suites do not (they must not write into the user's app data).
    */
   filePath?: string;
+  /** Level kept by the file transport. Defaults to INFO: the ring has TRACE. */
+  fileLevel?: LogLevel;
 }
 
 /**
@@ -50,6 +52,7 @@ export class LogSpine {
       // the only transport that leaves something behind after a crash.
       this.file = new FileTransport({
         path: this.opts.filePath,
+        minLevel: this.opts.fileLevel ?? LogLevel.INFO,
         header: {
           version: 1,
           app: this.opts.env.appVersion,

@@ -39,6 +39,8 @@ import { openSystemBrowser, openWebView, webViewProfileDir, type WebViewHandle }
 import { decideLaunch, launchUrl, type BuildIdentity } from './handshake.js';
 import { APP_VERSION } from '../version.js';
 import { appDataPath } from '../util/appData.js';
+import { bootLog, bootLogError, installBootLog } from '../util/bootLog.js';
+import type { EmbeddedAssetError } from '../assets/embeddedAssets.js';
 import {
   clearSession,
   closeRecordedWindow,
@@ -251,6 +253,10 @@ async function main(): Promise<void> {
   if (process.env.NOLANGUAGE_LOG_FILE === undefined) {
     process.env.NOLANGUAGE_LOG_FILE = appDataPath('logs', 'app.log');
   }
+  // Before anything else can fail. Embedded-asset extraction — which is exactly
+  // what died with EPERM on one machine — runs before the kernel exists, so its
+  // only record used to be a stack trace on a stderr a GUI process does not have.
+  installBootLog({ app: APP_VERSION });
   const running = await runningInstance();
   /** Build this launch replaced; shown once in the new window. */
   let updatedFrom: string | undefined;
@@ -317,9 +323,25 @@ async function main(): Promise<void> {
 
   patchSession({ serverPid: process.pid, port: serverPort() });
 
+  bootLog('server-starting', { port: serverPort() });
   const { main: startServer } = await import('../panel/server.js');
-  const server = await startServer();
+  // Everything from here down runs before the kernel exists, so a failure has no
+  // kernel log to land in. Record it and rethrow: the launch must still fail
+  // loudly, but it must leave a trace behind first.
+  let server: Awaited<ReturnType<typeof startServer>>;
+  try {
+    server = await startServer();
+  } catch (err) {
+    // `assets` cannot log (it is layer 0), so it puts the failing asset on the
+    // error; this is the first layer allowed to write it down.
+    bootLogError('server-start-failed', err, {
+      ...((err as EmbeddedAssetError).asset ? { asset: (err as EmbeddedAssetError).asset } : {}),
+      ...((err as EmbeddedAssetError).assetRoot ? { assetRoot: (err as EmbeddedAssetError).assetRoot } : {}),
+    });
+    throw err;
+  }
   const base = server.base;
+  bootLog('server-ready', { base });
   // `?updated=` is only present when this launch replaced an older build: the
   // first frame then says so instead of looking identical to the old one.
   const entryUrl = launchUrl(base, updatedFrom);

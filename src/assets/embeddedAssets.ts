@@ -20,6 +20,20 @@ declare global {
   var __NOLANGUAGE_EMBEDDED__: Record<string, string> | undefined;
 }
 
+/**
+ * A materialisation failure, carrying which asset it was.
+ *
+ * `assets` sits at the bottom of the layer order and may not import the logger,
+ * so the diagnosis travels on the error instead: the caller (which is allowed to
+ * log) reads `asset` and records it. Without this the message said only
+ * "EPERM ... extension.json" with no way to tell which of several hundred
+ * bundled files it meant.
+ */
+export interface EmbeddedAssetError extends Error {
+  asset?: string;
+  assetRoot?: string;
+}
+
 let cache: Map<string, string> | undefined;
 
 function embeddedStore(): Record<string, string> | undefined {
@@ -43,9 +57,18 @@ export function embeddedAssetPath(name: string): string | undefined {
   if (hit && existsSync(hit)) return hit;
 
   const dir = join(tmpdir(), 'nolanguage-embedded');
-  mkdirSync(dir, { recursive: true });
   const target = join(dir, name);
-  if (!existsSync(target)) writeFileSync(target, source, 'utf8');
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (!existsSync(target)) writeFileSync(target, source, 'utf8');
+  } catch (err) {
+    // Annotate and rethrow: behaviour is unchanged, but the caller can now say
+    // *which* asset was refused.
+    const e = err as EmbeddedAssetError;
+    e.asset = name;
+    e.assetRoot = dir;
+    throw e;
+  }
   cache.set(name, target);
   return target;
 }
@@ -72,8 +95,15 @@ export function materializeAssets(prefix: string): string | undefined {
   const root = join(tmpdir(), 'nolanguage-embedded');
   for (const key of keys) {
     const target = join(root, key);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, store[key], 'utf8');
+    try {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, store[key], 'utf8');
+    } catch (err) {
+      const e = err as EmbeddedAssetError;
+      e.asset = key;
+      e.assetRoot = root;
+      throw e;
+    }
   }
   return join(root, ...prefix.split('/').filter(Boolean));
 }

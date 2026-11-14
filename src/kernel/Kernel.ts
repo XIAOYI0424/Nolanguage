@@ -88,6 +88,15 @@ export interface KernelOptions {
    */
   logFile?: string | false;
   /**
+   * Level the **file** transport keeps, independent of the console/ring level.
+   *
+   * The ring buffer wants TRACE (the panel can filter), but a desktop that runs
+   * for days does not: full TRACE fills the rotated files with command
+   * start/done pairs and buries the one line that mattered. Defaults to INFO;
+   * `NOLANGUAGE_LOG_LEVEL` overrides it.
+   */
+  logFileLevel?: LogLevel;
+  /**
    * Dev mode (spec 十): 100% collection — disables log rate-sampling so TRACE /
    * DEBUG records all reach the ring buffer and the panel. Defaults to true.
    */
@@ -181,6 +190,7 @@ export class Kernel implements IKernel {
       sampling: !(opts.devMode ?? true),
       silent: opts.logSilent ?? false,
       filePath: opts.logFile === false ? undefined : opts.logFile,
+      fileLevel: opts.logFileLevel ?? LogLevel.INFO,
     });
     this.storeRequested = opts.store !== false && opts.store !== undefined;
   }

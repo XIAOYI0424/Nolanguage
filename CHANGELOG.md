@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2192/2192 across 48 suites；`npm test` 67/67；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2192/2192 across 48 suites；`npm test` 72/72；`ci:pure` 406/406。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -159,6 +159,31 @@ npm run install:app -- -DryRun    # 只打印计划
 - 装完的 exe **真的起得来**：用 7391 端口（不是 7310，避免被已运行实例代答）探 `/health`，通过后关掉自己启动的进程，不留残留。
 
 实测 13 秒完成（payload 落盘 7 秒），`health: status=ok version=0.7.23-workspace`，退出后无残留进程、无临时目录。`installer/README.md` 同步写清了这条规则和两份日志文件的位置。
+
+### 日志：内核起来之前也要有记录
+
+上一轮补的 `logs/app.log` 有个前提——**内核得先起来**。可偏偏最要命的一类失败发生在它之前：embedded 资源解压。那次 `EPERM ... extension.json` 只留下 stderr 上的一段栈，`app.log` 根本没被创建，`desktop.log` 也没有，因为它的崩溃钩子装得比失败点还晚。
+
+新增 `src/util/bootLog.ts`（`logs/boot.log`）：
+
+- 进程头（版本 / 平台 / 启动时间 / pid / argv）+ 里程碑 `boot` → `server-starting` → `server-ready`，所以只有一行的 `boot.log` 也能告诉你启动走到哪一步；
+- 失败记录 `server-start-failed` / `uncaught`，带 `asset`、`code`、`errno`、`syscall`、`path`——"operation not permitted" 本身没有信息量，是哪次写、写到哪才是；
+- 用 `uncaughtExceptionMonitor` 而不是 `uncaughtException`：只观察，不改变 Node 的崩溃语义（普通监听器会让坏掉的进程继续活着）；
+- 单独一个文件而不是并进 `app.log`：`app.log` 承诺"首行是进程头"，冒烟测试就在断言这一条，先写 boot 行会破坏每个读取方的前提。
+
+**层级问题**：`assets` 是第 0 层，`log` 是第 2 层，`assets → log` 被 `verify:arch` 判为向上依赖（先试 `log`，再试同层的 `util`，都被拒）。最后的解法是不引入依赖——`materializeAssets` 只把出错的 asset 名挂到 error 上（`EmbeddedAssetError`），由第 13 层的 `desktop/main.ts` 记下来。
+
+### 文件日志默认降到 INFO
+
+`NOLANGUAGE_LOG_LEVEL` 控制**文件**保留的级别，默认 `INFO`；面板与环形缓冲仍是 `TRACE`，互不影响。桌面跑几天的话，全量 TRACE 会把轮转文件塞满 `Command xxx started/done`，真正要看的那行被埋掉。
+
+实测同一个 exe：默认 `22 INFO + 1 WARN`（零 TRACE），`NOLANGUAGE_LOG_LEVEL=debug` 多出 DEBUG 行；刻意触发 EPERM 时 `boot.log` 记下 `asset: extensions/examples/faulty/extension.json` 与完整 errno。
+
+### 顺手：`.tmp` 从 5.5 GB 清到 1 MB
+
+冒烟沙箱每次复制一份 93 MB 的 exe，收尾是 best-effort，进程被杀就整目录留下——几十次运行攒到 5.5 GB。现在 `smoke-exe.ts` 启动时清扫**超过一小时**的 `smoke-*` 兄弟目录（只碰自己命名的、且足够旧的，不会干扰并发运行）。
+
+测试：`tests/pure.test.ts` +5 组（共 **72**）覆盖 boot sink（未配置时静默、`0`/`off` 关闭、头部行、错误字段、目标不可写不抛）。
 
 
 ## 0.7.22 — 2026-11-13

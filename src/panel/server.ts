@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { Kernel } from '../kernel/Kernel.js';
 import { appDataPath } from '../util/appData.js';
-import { LogLevel } from '../log/LogLevel.js';
+import { LogLevel, levelFromName } from '../log/LogLevel.js';
 import { WebSocketServer, type WebSocketConnection } from '../net/websocket.js';
 import { PanelHub, type PanelFilter, type PanelSink } from './PanelHub.js';
 import { renderPanelHtml } from '../ui/ui.js';
@@ -157,6 +157,9 @@ export async function main(
     // Set by the desktop entry (`src/desktop/main.ts`); unset in suites, which
     // must not write into the user's app data. `NOLANGUAGE_LOG_FILE=0` opts out.
     logFile: logFileFromEnv(),
+    // Independent of the console/ring level: the panel keeps TRACE, the file
+    // keeps INFO unless NOLANGUAGE_LOG_LEVEL says otherwise.
+    logFileLevel: levelFromName(process.env.NOLANGUAGE_LOG_LEVEL ?? 'INFO'),
     // Stage 6 · baseline system: SQLite warm tier + auto-baselines on every
     // git commit change. `PANEL_NO_STORE=1` falls back to memory-only.
     store: process.env.PANEL_NO_STORE === '1' ? false : (process.env.NOLANGUAGE_DB ?? true),
