@@ -439,6 +439,15 @@ async function main(): Promise<void> {
     );
 
     // ---------- logs reach the Logs tab ----------
+    // Emit a fresh user-code line right before reading. The digest carries at
+    // most 300 records per frame and then advances its cursor past the rest
+    // (`pushNewLogs`), so asserting on the very first run's output races that
+    // bound — it started failing once a few extra runs were added ahead of this
+    // check. A marker produced here is guaranteed to still be inside the tail.
+    client.clearReceived();
+    client.send({ kind: 'run', sessionId: 'verify', code: 'print("log-marker-777")' });
+    await client.waitFor('runResult', 30_000);
+
     // Use the accumulated history: `clearReceived()` is called between
     // requests, so `received` only holds the most recent frames.
     const logFrames = client.findInHistory('log');
@@ -448,14 +457,14 @@ async function main(): Promise<void> {
     check('log frames delivered', records.length > 0, `${records.length} records`);
     // Under a full-suite run the log frame can land a beat after the run
     // result. Poll the accumulated history instead of trusting one snapshot.
-    let userCode = records.find((r) => r.scope === 'user-code' && /answer 42/.test(r.message));
+    let userCode = records.find((r) => r.scope === 'user-code' && /log-marker-777/.test(r.message));
     const userCodeDeadline = Date.now() + 5000;
     while (!userCode && Date.now() < userCodeDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       const latest = client
         .findInHistory('log')
         .flatMap((m) => m.records as Array<{ scope: string; message: string; level: number }>);
-      userCode = latest.find((r) => r.scope === 'user-code' && /answer 42/.test(r.message));
+      userCode = latest.find((r) => r.scope === 'user-code' && /log-marker-777/.test(r.message));
     }
     check(
       'user-code records reach the UI',
