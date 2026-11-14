@@ -38,6 +38,7 @@ import { dirname, join } from 'node:path';
 import { openSystemBrowser, openWebView, webViewProfileDir, type WebViewHandle } from './WebViewHost.js';
 import { decideLaunch, launchUrl, type BuildIdentity } from './handshake.js';
 import { APP_VERSION } from '../version.js';
+import { appDataPath } from '../util/appData.js';
 import {
   clearSession,
   closeRecordedWindow,
@@ -244,6 +245,12 @@ async function main(): Promise<void> {
   // source run (`nlg ide`) or a test server must never overwrite the receipt
   // with `node.exe` — doctor would then report the wrong "installed app".
   process.env.NOLANGUAGE_DESKTOP = '1';
+  // The desktop build has no console, so the kernel log has to land in a file or
+  // it lands nowhere. Set before the server module is imported — it reads this
+  // once, when it builds the kernel. `NOLANGUAGE_LOG_FILE=0` opts out.
+  if (process.env.NOLANGUAGE_LOG_FILE === undefined) {
+    process.env.NOLANGUAGE_LOG_FILE = appDataPath('logs', 'app.log');
+  }
   const running = await runningInstance();
   /** Build this launch replaced; shown once in the new window. */
   let updatedFrom: string | undefined;

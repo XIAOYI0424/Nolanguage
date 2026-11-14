@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2189/2189 across 48 suites；`npm test` 57/57；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2192/2192 across 48 suites；`npm test` 67/67；`ci:pure` 406/406。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -116,6 +116,30 @@ FAIL  real MCP server connects with command "npx"  — process error: spawn npx 
 外加一次空配置启动验证 `mcpInitConfig`。服务端全是运行时写出的 `.cjs` fixture，不需要网络、不需要真实 MCP 包。
 
 写这个套件时踩到一个失败模式：第一版把每次等待都设成 30–40 秒，偶发一次收不到帧之后，后面 14 条检查全部超时，汇总看起来像「14 处坏了」，实际是「一次卡住」。现在每次等待空手而归时会顺手问一次 `/health`，进程没了就打印日志尾巴并抛错，汇总里只有一条 `ABORTED: ...`。
+
+### 日志系统：补上「落盘」，并让丢日志这件事不再无声
+
+排查上面那个安装问题时，最难受的一点是**没有日志可看**。翻完代码，原因很直接：
+
+- 内核日志只走 `ConsoleTransport`，而桌面版是 **GUI 子系统 exe，没有控制台**——等于写进了虚空；
+- 唯一的持久化是 SQLite 温层，而它在 profile 目录只读时会直接报 `attempt to write a readonly database`，然后退回纯内存；
+- `desktop.log` 只记启动事件，而且**超过 256 KiB 就删掉重来**——最该看的「出事前几条」永远第一个消失；
+- 更糟的是它的写入失败被 `catch {}` 完全吞掉。那次排查时它一直是空的，却没有任何地方说「写不进去」。
+
+四处都改了：
+
+| 改动 | 之前 | 现在 |
+|---|---|---|
+| 内核日志落盘 | 无（GUI 下等于丢弃） | 新增 `src/log/transports/FileTransport.ts`：NDJSON，一行一条，首行是进程头（版本/平台/启动时间/pid）。默认 `logs/app.log`，`NOLANGUAGE_LOG_FILE=0` 可关 |
+| 轮转 | 超限即删 | 按大小轮转 `.1/.2/.3` 保留 3 代；**写入前**判断，保证 `app.log` 始终存在（否则崩溃时最后一批记录只躺在 `.1` 里） |
+| 面板丢日志 | `fresh.slice(-300)` 后游标照走，**永久静默丢弃** | 帧里带 `dropped: n`，面板渲染一行「… N 条日志已跳过」，不再让时间线看起来连续 |
+| `desktop.log` | 删除重来 + 失败静默 | 轮转到 `.1`；首次写失败向 stderr 报一次（之后不再刷屏） |
+
+`FileTransport` 的三条边界：单行超长时**截断消息再重新序列化**（直接切 JSON 字符串会产出解析不了的行）；队列上限 5000 条，溢出计数而不是无限增长；写入失败只记账（`stats()`）从不抛出——日志系统不该有能力弄挂应用。
+
+测试：`tests/pure.test.ts` +10 组（共 **67**）覆盖 `sliceDigest` 与 `FileTransport`（头部行、级别过滤、轮转代数、截断后仍是合法 JSON、路径不可写时不抛且记账、队列上限）；`smoke-exe` +3 条（共 **27**）在**打包 exe** 上断言日志文件存在、首行是进程头、每条都是单行 JSON。
+
+实测：打包后的 exe 启动 16 秒写出 25 行，含 `INFO`/`WARN`/`DEBUG`，组件覆盖 `kernel`、`lsp.nolanguage-py`、`extension.demo.hello`，WARN 带结构化字段（`method`、`durationMs`、`thresholdMs`）。
 
 
 ## 0.7.22 — 2026-11-13

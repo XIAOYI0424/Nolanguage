@@ -24,7 +24,7 @@
  * install directory — see `src/util/appData.ts` for why.
  */
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { appDataPath } from '../util/appData.js';
 
 /**
@@ -42,14 +42,32 @@ export function logDesktop(event: string, detail?: Record<string, unknown>): voi
   try {
     const file = appDataPath('desktop.log');
     mkdirSync(appDataPath(), { recursive: true });
-    // Bounded: one file, ~256 KiB, then start over. Nobody rotates logs by hand.
-    if (existsSync(file) && statSync(file).size > 256 * 1024) rmSync(file, { force: true });
+    // Bounded at ~256 KiB, but **rotated, not deleted**. The old code removed
+    // the file and started over, so the entries that explain a failure — the
+    // ones just before it — were the first thing thrown away.
+    if (existsSync(file) && statSync(file).size > 256 * 1024) {
+      renameSync(file, `${file}.1`);
+    }
     const line = `${new Date().toISOString()} ${event}${detail ? ' ' + JSON.stringify(detail) : ''}\n`;
     appendFileSync(file, line, 'utf8');
-  } catch {
-    /* ignore */
+  } catch (err) {
+    // Still never throws — diagnostics must not break a launch. But swallowing
+    // the failure entirely is how a whole afternoon was spent wondering why
+    // desktop.log had no entries: the writes were being denied and nothing said
+    // so. Report it once, on stderr, and keep going.
+    if (!desktopLogBroken) {
+      desktopLogBroken = true;
+      try {
+        process.stderr.write(`[desktop] cannot write ${appDataPath('desktop.log')}: ${(err as Error).message}\n`);
+      } catch {
+        /* stderr may be gone too */
+      }
+    }
   }
 }
+
+/** Set after the first write failure, so the warning appears exactly once. */
+let desktopLogBroken = false;
 
 /** Everything a launch needs to know about the session that came before it. */
 export interface SessionState {

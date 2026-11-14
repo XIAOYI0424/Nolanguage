@@ -21,6 +21,7 @@ import type { Kernel } from '../kernel/Kernel.js';
 import type { Disposable } from '../kernel/types.js';
 import type { ExtensionPanelInfo } from '../extensions/ExtensionManager.js';
 import type { FsEntry, FsFile } from './FsService.js';
+import { LOG_DIGEST_MAX, sliceDigest } from './log-digest.js';
 
 export type PanelLevelName =
   | 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL' | 'AUDIT' | 'METRIC';
@@ -378,7 +379,18 @@ export class PanelHub {
     if (!fresh.length) return;
     // Digest carries TRACE..WARN; WARN+ already went out live. Sending them
     // again is harmless for the UI (dedup by id) and guarantees no gaps.
-    this.broadcast({ kind: 'log', at: Date.now(), records: fresh.slice(-300).map(toClientLog) });
+    //
+    // The frame is capped, and the cursor still moves past everything — so the
+    // records above the cap are gone. That is acceptable (a burst must not stall
+    // the socket) but it must not be *silent*: `dropped` lets the panel say
+    // "…412 条已跳过" instead of showing an unexplained jump in the timeline.
+    const digest = sliceDigest(fresh, LOG_DIGEST_MAX);
+    this.broadcast({
+      kind: 'log',
+      at: Date.now(),
+      records: digest.records.map(toClientLog),
+      ...(digest.dropped ? { dropped: digest.dropped } : {}),
+    });
   }
 
   private currentSlowEntries(): SlowEntry[] {

@@ -694,6 +694,21 @@
         break;
       case 'log':
         (m.records || []).forEach(function (r) { LOGS.push(r); });
+        // The digest frame is capped at 300 records and the server advances its
+        // cursor past everything it read, so a burst can lose records. It says
+        // how many: render that as a line, because a silent jump in the timeline
+        // reads as "nothing happened here", which is a lie.
+        if (m.dropped) {
+          LOGS.push({
+            id: 'gap-' + (m.at || Date.now()),
+            ts: m.at || Date.now(),
+            level: 3,
+            levelName: 'WARN',
+            component: 'panel',
+            scope: 'kernel',
+            message: '… ' + m.dropped + ' 条日志已跳过（面板每帧上限 300 条；完整记录见 logs/app.log）',
+          });
+        }
         if (LOGS.length > 2000) LOGS = LOGS.slice(-1500);
         if (activeBottom === 'logs') renderLogs();
         break;

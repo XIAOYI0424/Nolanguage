@@ -78,6 +78,16 @@ export interface KernelOptions {
   /** Suppress the console transport (tests, embedded use, panel-only runs). */
   logSilent?: boolean;
   /**
+   * Write the kernel log to this file as NDJSON (rotated by size).
+   *
+   * The packaged desktop is a GUI-subsystem exe: the console transport writes to
+   * nothing, and the SQLite warm tier can be unavailable on a read-only profile
+   * directory. Without a file there is no record of a run at all — which is what
+   * made one launch impossible to diagnose. Off unless a host opts in, so the
+   * verification suites never write into the user's app data.
+   */
+  logFile?: string | false;
+  /**
    * Dev mode (spec 十): 100% collection — disables log rate-sampling so TRACE /
    * DEBUG records all reach the ring buffer and the panel. Defaults to true.
    */
@@ -170,6 +180,7 @@ export class Kernel implements IKernel {
       correlation: this.correlation,
       sampling: !(opts.devMode ?? true),
       silent: opts.logSilent ?? false,
+      filePath: opts.logFile === false ? undefined : opts.logFile,
     });
     this.storeRequested = opts.store !== false && opts.store !== undefined;
   }

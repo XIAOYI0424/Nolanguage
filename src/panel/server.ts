@@ -135,12 +135,28 @@ export async function main(
   /** Set when `WorkspaceService.init()` failed; reported through `/health`. */
   let workspaceFailure: string | undefined;
 
+  /**
+   * NDJSON kernel log path from the environment.
+   *
+   * `NOLANGUAGE_LOG_FILE` is a path, or `0`/`off` to disable. The desktop entry
+   * sets a default under `%LOCALAPPDATA%\Nolanguage\logs`; a bare suite run
+   * leaves it unset and writes nothing.
+   */
+  function logFileFromEnv(): string | false {
+    const raw = process.env.NOLANGUAGE_LOG_FILE;
+    if (!raw || raw === '0' || raw.toLowerCase() === 'off') return false;
+    return raw;
+  }
+
   const kernel = new Kernel({
     appVersion: APP_VERSION,
     slowThresholdMs: Number(process.env.PANEL_SLOW_MS ?? 60),
     logLevel: LogLevel.TRACE,
     logPretty: !stdio,
     logSilent: stdio,
+    // Set by the desktop entry (`src/desktop/main.ts`); unset in suites, which
+    // must not write into the user's app data. `NOLANGUAGE_LOG_FILE=0` opts out.
+    logFile: logFileFromEnv(),
     // Stage 6 · baseline system: SQLite warm tier + auto-baselines on every
     // git commit change. `PANEL_NO_STORE=1` falls back to memory-only.
     store: process.env.PANEL_NO_STORE === '1' ? false : (process.env.NOLANGUAGE_DB ?? true),

@@ -11,7 +11,7 @@
  * not a replacement.
  */
 // Test functions are supplied by the active Vitest collector (see globals in vitest.config.ts).
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -29,6 +29,10 @@ import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
 import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../src/panel/run-timeout';
 import { isCmdScript, planMcpSpawn, quoteCmdArg } from '../src/mcp/spawn-command';
 import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../src/mcp/McpManager';
+import { FileTransport } from '../src/log/transports/FileTransport';
+import { sliceDigest } from '../src/panel/log-digest';
+import { LogLevel } from '../src/log/LogLevel';
+import type { LogRecord } from '../src/log/types';
 
 const near = (a: number, b: number, tol: number): boolean => Math.abs(a - b) <= tol;
 
@@ -447,5 +451,149 @@ describe('mcp · a per-server handshake budget', () => {
     expect(boundedMcpTimeout(60_000)).toBe(60_000);
     expect(boundedMcpTimeout('45000')).toBe(45_000);
     expect(boundedMcpTimeout(MCP_TIMEOUT_MIN_MS)).toBe(MCP_TIMEOUT_MIN_MS);
+  });
+});
+
+describe('log · the digest never hides a gap', () => {
+  it('passes a small burst through untouched', () => {
+    const out = sliceDigest(['a', 'b', 'c'], 300);
+    expect(out.records).toEqual(['a', 'b', 'c']);
+    expect(out.dropped).toBe(0);
+  });
+
+  it('keeps the newest records and counts the rest', () => {
+    // A log panel is read backwards: the tail is what explains the failure.
+    const burst = Array.from({ length: 1000 }, (_, i) => i);
+    const out = sliceDigest(burst, 300);
+    expect(out.records).toHaveLength(300);
+    expect(out.records[0]).toBe(700);
+    expect(out.records[299]).toBe(999);
+    // The count is the whole point: silently dropping 700 records makes the
+    // timeline look continuous when it is not.
+    expect(out.dropped).toBe(700);
+  });
+
+  it('treats a non-positive cap as "drop everything, say so"', () => {
+    expect(sliceDigest([1, 2, 3], 0)).toEqual({ records: [], dropped: 3 });
+  });
+
+  it('does not mutate the input', () => {
+    const burst = [1, 2, 3, 4];
+    sliceDigest(burst, 2);
+    expect(burst).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe('log · the NDJSON file transport', () => {
+  const record = (over: Partial<LogRecord> = {}): LogRecord =>
+    ({
+      id: 'r1',
+      timestamp: 1_700_000_000_000_000_000,
+      level: LogLevel.INFO,
+      message: 'hello',
+      resource: { scope: 'kernel', component: 'test' },
+      scope: {},
+      correlation: { sessionId: 's1' } as LogRecord['correlation'],
+      environment: {} as LogRecord['environment'],
+      fields: {},
+      ...over,
+    }) as LogRecord;
+
+  let dir = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nlg-logfile-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes a header line and one JSON object per record', () => {
+    const path = join(dir, 'app.log');
+    const t = new FileTransport({ path, header: { version: 1, app: 'test' } });
+    t.write(record({ message: 'first' }));
+    t.write(record({ message: 'second', level: LogLevel.WARN }));
+    t.close();
+
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(3);
+    const header = JSON.parse(lines[0]) as Record<string, unknown>;
+    expect(header['#']).toBe('header');
+    expect(header.app).toBe('test');
+    const first = JSON.parse(lines[1]) as Record<string, unknown>;
+    expect(first.msg).toBe('first');
+    expect(first.lvl).toBe('INFO');
+    expect(first.comp).toBe('test');
+    const second = JSON.parse(lines[2]) as Record<string, unknown>;
+    expect(second.lvl).toBe('WARN');
+  });
+
+  it('drops records below the configured level', () => {
+    const path = join(dir, 'app.log');
+    const t = new FileTransport({ path, minLevel: LogLevel.WARN });
+    t.write(record({ message: 'trace', level: LogLevel.TRACE }));
+    t.write(record({ message: 'error', level: LogLevel.ERROR }));
+    t.close();
+    const text = readFileSync(path, 'utf8');
+    expect(text).not.toContain('trace');
+    expect(text).toContain('error');
+  });
+
+  it('rotates by size and keeps the requested generations', () => {
+    const path = join(dir, 'app.log');
+    // Tiny cap so a handful of records forces several rotations. Flushed in
+    // batches on purpose: the transport coalesces a burst into one write, so a
+    // single burst rotates once no matter how many records it holds.
+    const t = new FileTransport({ path, maxBytes: 400, keep: 2 });
+    for (let batch = 0; batch < 6; batch++) {
+      for (let i = 0; i < 4; i++) t.write(record({ message: `b${batch}-${i}-${'x'.repeat(40)}` }));
+      t.flush();
+    }
+    t.close();
+
+    expect(existsSync(path)).toBe(true);
+    expect(existsSync(`${path}.1`)).toBe(true);
+    // `keep: 2` means .1 and .2 survive; .3 is removed.
+    expect(existsSync(`${path}.2`)).toBe(true);
+    expect(existsSync(`${path}.3`)).toBe(false);
+    // Nothing was lost silently along the way.
+    expect(t.stats().rotations).toBeGreaterThan(0);
+    expect(t.stats().errors).toBe(0);
+  });
+
+  it('truncates a huge record without producing invalid JSON', () => {
+    const path = join(dir, 'app.log');
+    const t = new FileTransport({ path, maxLineBytes: 300 });
+    t.write(record({ message: 'y'.repeat(5000) }));
+    t.close();
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    const last = JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+    expect(String(last.msg)).toContain('truncated');
+    expect(String(last.msg).length).toBeLessThan(1000);
+  });
+
+  it('never throws when the path cannot be written, and counts it', () => {
+    // A directory used as a file: appendFileSync fails, the transport must not.
+    const path = join(dir, 'nested');
+    mkdirSync(path, { recursive: true });
+    const t = new FileTransport({ path });
+    expect(() => {
+      t.write(record({ message: 'into a directory' }));
+      t.close();
+    }).not.toThrow();
+    const stats = t.stats();
+    expect(stats.errors).toBeGreaterThan(0);
+    expect(stats.lastError).toBeTruthy();
+    expect(stats.written).toBe(0);
+  });
+
+  it('caps the queue instead of growing without bound', () => {
+    const path = join(dir, 'app.log');
+    const t = new FileTransport({ path, maxQueue: 2 });
+    for (let i = 0; i < 10; i++) t.write(record({ message: `m${i}` }));
+    t.close();
+    const stats = t.stats();
+    // Two made it through the queue, the rest are counted, not forgotten.
+    expect(stats.written + stats.dropped).toBe(10);
+    expect(stats.dropped).toBeGreaterThan(0);
   });
 });

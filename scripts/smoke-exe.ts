@@ -24,7 +24,7 @@
  * is writable from a grandchild process. `NOLANGUAGE_SMOKE_DIR` overrides it.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { copyFile, mkdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -320,6 +320,29 @@ async function main(): Promise<void> {
         check(s.size > 0, 'sqlite warm tier persisted', `${s.size} bytes`);
       } catch {
         check(false, 'sqlite warm tier persisted', `missing: ${dbPath}`);
+      }
+
+      // ---- 5b. the kernel log reached a file -------------------------------
+      // A GUI build has no console, so without this transport the only record of
+      // a run is whatever survived in memory — nothing, once it exits. Assert on
+      // the shape, not just the presence: a header line proves the file was
+      // opened by this process, and a record proves the pipeline is wired.
+      const logPath = join(appDataDir, 'logs', 'app.log');
+      try {
+        const text = await readFile(logPath, 'utf8');
+        const lines = text.trim().split('\n').filter(Boolean);
+        const header = JSON.parse(lines[0] ?? '{}') as Record<string, unknown>;
+        check(lines.length > 1, 'the kernel log is written to a file', `${lines.length} line(s)`);
+        check(header['#'] === 'header' && !!header.app, 'the log file starts with a process header', `${header.app} · pid ${header.pid}`);
+        check(lines.slice(1).every((l) => {
+          try {
+            return typeof (JSON.parse(l) as Record<string, unknown>).msg === 'string';
+          } catch {
+            return false;
+          }
+        }), 'log records are one JSON object per line', `${lines.length - 1} record(s)`);
+      } catch (err) {
+        check(false, 'the kernel log is written to a file', `${logPath}: ${(err as Error).message}`);
       }
 
       // ---- 6. built-in extensions, unpacked from the exe --------------------

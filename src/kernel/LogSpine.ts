@@ -3,6 +3,7 @@ import { LogPipeline } from '../log/LogPipeline.js';
 import { LogFactory } from '../log/LogFactory.js';
 import { LogSampler } from '../log/LogSampler.js';
 import { ConsoleTransport } from '../log/transports/ConsoleTransport.js';
+import { FileTransport } from '../log/transports/FileTransport.js';
 import { LogLevel } from '../log/LogLevel.js';
 import type { LogEnvironment } from '../log/types.js';
 import type { CorrelationBus } from '../correlation/CorrelationBus.js';
@@ -17,6 +18,11 @@ export interface LogSpineOptions {
   sampling?: boolean;
   /** Skip the console transport entirely (tests / embedded use). */
   silent?: boolean;
+  /**
+   * NDJSON log file, rotated by size. Opt-in: the packaged desktop sets it, the
+   * verification suites do not (they must not write into the user's app data).
+   */
+  filePath?: string;
 }
 
 /**
@@ -26,6 +32,8 @@ export interface LogSpineOptions {
 export class LogSpine {
   pipeline!: LogPipeline;
   factory!: LogFactory;
+  /** Present only when a file path was supplied. */
+  file?: FileTransport;
   private opts: LogSpineOptions;
 
   constructor(opts: LogSpineOptions) {
@@ -36,6 +44,21 @@ export class LogSpine {
     this.pipeline = new LogPipeline({ minLevel: this.opts.level ?? LogLevel.TRACE });
     if (!this.opts.silent) {
       this.pipeline.addTransport(new ConsoleTransport({ pretty: this.opts.pretty ?? true }));
+    }
+    if (this.opts.filePath) {
+      // A GUI build has no console, and the warm tier can be read-only: this is
+      // the only transport that leaves something behind after a crash.
+      this.file = new FileTransport({
+        path: this.opts.filePath,
+        header: {
+          version: 1,
+          app: this.opts.env.appVersion,
+          platform: `${this.opts.env.os}/${this.opts.env.arch}`,
+          startedAt: new Date().toISOString(),
+          pid: process.pid,
+        },
+      });
+      this.pipeline.addTransport(this.file);
     }
     // Dev mode keeps every record; prod applies rate-sampling + dedup.
     if (this.opts.sampling === false) this.pipeline.setSampler(new LogSampler({ enabled: false }));
@@ -52,6 +75,7 @@ export class LogSpine {
 
   async flush(): Promise<void> {
     await this.pipeline.flush();
+    this.file?.close();
   }
 }
 
