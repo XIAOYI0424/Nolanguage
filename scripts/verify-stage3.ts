@@ -135,10 +135,25 @@ async function main(): Promise<void> {
     sharedPerf.map((p) => p.resource.scope).join(','),
   );
 
-  // ---------- slow path (RPC) ----------
+  // ---------- slow path ----------
+  // The threshold is 40ms, so "was anything slow?" is a property of the host:
+  // on a fast CI runner every LSP roundtrip came in under it and this check
+  // failed with `none` — which is correct behaviour, not a regression. Force a
+  // slow command instead, so the detector is exercised deterministically. The
+  // opportunistic RPC slow paths are still reported in the detail line.
+  const rpcSlow = kernel.slowPaths().length;
+  const slowCmd = kernel.commands.register('verify.slow', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return 'slow';
+  });
+  try {
+    await kernel.commands.execute('verify.slow');
+  } finally {
+    slowCmd.dispose();
+  }
   const slow = kernel.slowPaths();
-  check('slow RPC roundtrip captured', slow.length >= 1,
-    slow.map((s) => `${s.name}=${(s.duration ?? 0).toFixed(0)}ms`).join(', ') || 'none');
+  check('a slow command is captured as a slow path', slow.length >= 1,
+    `${slow.map((s) => `${s.name}=${(s.duration ?? 0).toFixed(0)}ms`).join(', ') || 'none'} (rpc slow paths seen: ${rpcSlow})`);
   check('slow path duration is the measured cost', slow.every((s) => (s.duration ?? 0) > 0),
     slow.length ? `${(slow[0].duration ?? 0).toFixed(1)}ms` : 'n/a');
 
