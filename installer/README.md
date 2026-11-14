@@ -22,7 +22,10 @@ GUI 子系统没有控制台，所以**窗口就是唯一的退出入口**：
 - 浏览器把窗口"托管"给已在跑的 Edge 进程时（新进程秒退），服务**不会**误判成"窗口关了"而退出；
 - 万一被外部强杀（任务管理器 / 安全软件），窗口会留在 `127.0.0.1:<port>` 上显示连不上 —— 下次启动会自动清掉它。
 
-排查用日志：`%LOCALAPPDATA%\Nolanguage\desktop.log`（每次启动、清窗口、退出原因各一行，超过 256 KiB 自动重写）。
+排查用日志（两份，都在 `%LOCALAPPDATA%\Nolanguage\`）：
+
+- `desktop.log` —— 每次启动、清窗口、退出原因各一行；超过 256 KiB 轮转到 `desktop.log.1`（**不再删除重来**，否则最该看的"出事前几条"会先消失）。写入失败会向 stderr 报一次，不再静默。
+- `logs/app.log` —— 内核日志，NDJSON 一行一条，首行是进程头（版本 / 平台 / 启动时间 / pid），按大小轮转到 `.1/.2/.3`。桌面版是 GUI 子系统、没有控制台，这份文件是唯一完整的运行记录；`NOLANGUAGE_LOG_FILE=0` 可关闭。
 
 实现见 `src/desktop/WebViewHost.ts`（`onClosed` / 进程树清理）、`src/desktop/main.ts`（单实例探测、看门狗）与 `src/desktop/session.ts`（会话 pid 记录、启动前清扫、日志）。
 
@@ -38,6 +41,27 @@ GUI 子系统没有控制台，所以**窗口就是唯一的退出入口**：
 4. **完成页** —— 可勾选"运行 Nolanguage (Desktop)"
 
 安装内容：`Nolanguage.exe`、`uninstall.exe`、`nlg.cmd`（命令行入口）、`path-tool.ps1`（PATH 记录/还原），开始菜单「Nolanguage」「Nolanguage (Web)」「Uninstall Nolanguage」，桌面快捷方式，以及 `HKCU` 卸载项（`DisplayIcon` / `EstimatedSize` / `QuietUninstallString`，设置 → 应用 里可正常卸载）。全程无需管理员权限。
+
+### 从仓库安装：`npm run install:app`
+
+**不要在仓库目录里双击 `installer\Nolanguage-Setup.exe`。** 同一份安装包，复制到 `%TEMP%`、`D://` 或仓库父目录都是 1–3 秒装完；从 checkout 里运行却可能跑 90 秒什么都不写（39 KB 的最小 NSIS 安装包也能复现，所以是环境问题，不是负载问题）。这条规则没人看得见，于是有了这个命令：
+
+```bash
+npm run install:app                 # 装到上次的目录（读注册表 InstallLocation）
+npm run install:app -- -Dir D://X    # 指定目录
+npm run install:app -- -DryRun      # 只打印计划，不安装
+```
+
+它做的事就是那条隐性规则：**复制到临时目录 → 静默安装 → 校验**。校验不只看文件在不在：
+
+| 检查 | 为什么 |
+|---|---|
+| 目标 exe 存在且 > 10 MB | 安装器会先返回、后落盘，零字节占位不算成功 |
+| 注册表 `InstallLocation` 指向目标 | 装到了别处等于下次升级找不到 |
+| `uninstall.exe` 与开始菜单快捷方式存在 | 缺一个就等于装了个没法卸载的东西 |
+| 装完的 exe 真的起得来并回答 `/health` | 文件在 ≠ 能运行；端口用 7391，避免被已运行的实例代答 |
+
+实测：13 秒完成（payload 落盘 7 秒），`health: status=ok version=0.7.23-workspace`，退出后不留进程和临时目录。
 
 ### 安装后就有 `nlg`（无需 Node、无需源码树）
 

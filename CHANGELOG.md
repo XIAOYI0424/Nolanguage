@@ -141,6 +141,25 @@ FAIL  real MCP server connects with command "npx"  — process error: spawn npx 
 
 实测：打包后的 exe 启动 16 秒写出 25 行，含 `INFO`/`WARN`/`DEBUG`，组件覆盖 `kernel`、`lsp.nolanguage-py`、`extension.demo.hello`，WARN 带结构化字段（`method`、`durationMs`、`thresholdMs`）。
 
+### `npm run install:app`：把「别在仓库里双击」变成一条命令
+
+上一轮排查留下的那条隐性规则——安装包从 checkout 里运行会 90 秒不产出文件，复制到别处就 1–3 秒——现在被编码进 `installer/install-app.ps1`：
+
+```bash
+npm run install:app              # 装到上次的目录（读注册表 InstallLocation）
+npm run install:app -- -Dir D://X # 指定目录
+npm run install:app -- -DryRun    # 只打印计划
+```
+
+内部就是那条规则：复制到临时目录 → `/S` 静默安装 → 校验。校验不只看文件在不在：
+
+- 目标 exe **> 10 MB**（安装器先返回、后落盘，零字节占位不算成功）；
+- 注册表 `InstallLocation` **指向目标**（装到别处，下次升级就找不到）；
+- `uninstall.exe` 与开始菜单快捷方式存在（缺一个等于装了个卸不掉的东西）；
+- 装完的 exe **真的起得来**：用 7391 端口（不是 7310，避免被已运行实例代答）探 `/health`，通过后关掉自己启动的进程，不留残留。
+
+实测 13 秒完成（payload 落盘 7 秒），`health: status=ok version=0.7.23-workspace`，退出后无残留进程、无临时目录。`installer/README.md` 同步写清了这条规则和两份日志文件的位置。
+
 
 ## 0.7.22 — 2026-11-13
 

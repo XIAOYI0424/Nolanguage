@@ -71,6 +71,7 @@
     "ci:pure": "npm run typecheck && npm test && npm run verify:pure",
     "ci:integration": "npm run build:exe && npm run verify:sidecar && npm run verify && npm run build:setup",
     "ci:install-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/smoke-install.ps1",
+    "install:app": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/install-app.ps1",
     "verify:ci": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-ci.ts"
   },
   "devDependencies": {
