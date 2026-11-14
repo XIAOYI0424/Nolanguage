@@ -125,6 +125,11 @@ const stages = [
   // Needs `npm run build:exe` (or build-to-exe.bat) first; skipped when the
   // packaged binary is absent, so a fresh clone still verifies.
   { name: 'Package · packaged exe smoke test', script: 'scripts/smoke-exe.ts', requiresExe: true },
+  // The MCP panel as a user meets it: mcp.json -> the shipped exe -> the
+  // sidebar. `verify-mcp` covers the manager; this covers the wiring, including
+  // a per-server `timeoutMs` and the failure cards (dead server, disabled,
+  // unknown id).
+  { name: 'Package · MCP client in the packaged exe', script: 'scripts/verify-mcp-exe.ts', requiresExe: true },
   // `nlg web` / `nlg desktop` entry points boot the workspace server.
   { name: 'CLI · nlg web / nlg desktop launch', script: 'scripts/verify-cli-launch.ts' },
 ];

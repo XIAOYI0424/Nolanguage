@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2159/2159 across 47 suites；`npm test` 57/57；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2189/2189 across 48 suites；`npm test` 57/57；`ci:pure` 406/406。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -100,6 +100,22 @@ FAIL  real MCP server connects with command "npx"  — process error: spawn npx 
 - 默认值不变：握手 12 秒、调用 30 秒，所以现有配置行为完全不动。
 
 测试：`tests/pure.test.ts` +5 组（共 **57**）；`scripts/verify-mcp.ts` +6 条（共 **21**）——一个「initialize 迟 2 秒才答」的 fixture，配三档预算：8000 正常连上、1000 在 1026ms 报 `initialize timed out` 并落成 error 卡片、50 被钳到 1000（错误信息里就是 `after 1000ms`，证明钳制生效而不是「立刻失败」）。
+
+### 新增套件：打包 exe 里的 MCP 面板
+
+`verify-mcp` 驱动的是 `McpManager`，覆盖协议但不覆盖用户真正走的路：`mcp.json` → exe → 侧边栏。新增 `scripts/verify-mcp-exe.ts`（`Package · MCP client in the packaged exe`，30 条，约 11 秒），用面板同一套 WebSocket 消息打打包好的 exe，配置里一次放齐五种卡片状态：
+
+| 条目 | 期望 |
+|---|---|
+| `demo` | 握手 → 4 个工具 → echo/add 往返 → 工具级错误 `ok:false` → 单次 `timeoutMs` 覆盖生效 |
+| `broken` | 启动即退，卡片要带退出码和 stderr |
+| `picky` | `disabled: true`，连接被拒 |
+| `slowGood` | `initialize` 迟 2 秒，预算 8000 → 连上（且确实等了 >1.5s） |
+| `slowBad` | 同一 server，预算 1000 → 在预算处失败 |
+
+外加一次空配置启动验证 `mcpInitConfig`。服务端全是运行时写出的 `.cjs` fixture，不需要网络、不需要真实 MCP 包。
+
+写这个套件时踩到一个失败模式：第一版把每次等待都设成 30–40 秒，偶发一次收不到帧之后，后面 14 条检查全部超时，汇总看起来像「14 处坏了」，实际是「一次卡住」。现在每次等待空手而归时会顺手问一次 `/health`，进程没了就打印日志尾巴并抛错，汇总里只有一条 `ABORTED: ...`。
 
 
 ## 0.7.22 — 2026-11-13

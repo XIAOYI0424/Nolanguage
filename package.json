@@ -21,6 +21,7 @@
     "verify:ui-dom": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-ui-dom.ts",
     "verify:go": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-go.ts",
     "verify:smoke": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/smoke-exe.ts",
+    "verify:mcp-exe": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-mcp-exe.ts",
     "verify:baseline": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-baseline.ts",
     "verify:extensions": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-extensions.ts",
     "build:exe": "node scripts/build-exe.mjs",
