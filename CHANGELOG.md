@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2150/2150 across 47 suites；`npm test` 44/44；`ci:pure` 406/406。
+- 全套回归：`verify-all` 2153/2153 across 47 suites；`npm test` 52/52；`ci:pure` 406/406。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -61,6 +61,33 @@ install smoke: ok
 | `ci:install-smoke` 留下开始菜单 | 每次跑完 `Start Menu\Programs\Nolanguage` 都还在，里面「Uninstall Nolanguage」指向已被删除的目录。脚本只快照/还原注册表和 receipt，漏了开始菜单 | 快照整个目录 → `finally` 还原；原本没有就删掉。两个只有真跑才会发现的坑：`Copy-Item <dir> -Destination <dir>` 在目标仍存在时会把源**嵌套**进去（要复制 `"$src\*"`）；还原失败必须降级成 `Write-Warning`，否则 `finally` 抛错会把「冒烟通过」变成「冒烟失败」 |
 
 两条回归都做了「故意注入违规 → FAIL，还原 → PASS」验证：撤掉 `handleRun` 的转发后，`the client timeout beats the manifest default` 报 `15075ms` 失败；恢复后回到 3030ms。开始菜单的两条分支也分别实测（有则还原、无则清除，跑完 `ls` 为空）。
+
+### MCP 集成实测：Windows 上 `"command": "npx"` 根本起不来
+
+用软件自己的 MCP 面板跑了两轮：一轮对自建 stdio server（40 项，覆盖握手 / 列工具 / 调用 / 工具报错 / 调用超时 / 进程秒退 / 禁用 / 未知 id / 断开 / 按需重连 / 重载配置 / 空配置初始化），一轮对真实的 `@modelcontextprotocol/server-filesystem`。第一轮 40/40 通过，第二轮直接暴露一个 Windows 专属缺陷：
+
+```
+FAIL  real MCP server connects with command "npx"  — process error: spawn npx ENOENT
+```
+
+实测三种写法：
+
+| 写法 | 结果 | 原因 |
+|---|---|---|
+| `spawn('npx')` | `ENOENT` | CreateProcess 不查 `PATHEXT`，找不到 `npx.cmd` |
+| `spawn('npx.cmd')` | `EINVAL` | `.cmd` 是给 cmd.exe 的脚本，不是加载器能起的镜像 |
+| `spawn('npx', {shell:true})` | 可以 | 走 shell |
+
+而 `mcpInitConfig` 写出的示例、以及 MCP 生态里几乎所有配置，都是 `"command": "npx"` —— 也就是说 **MCP 面板在 Windows 上对最常见的配置是死的**。
+
+修法：新增 `src/mcp/spawn-command.ts`，像 shell 那样解析——按 `PATH` × `PATHEXT` 找到真实文件，`.cmd`/`.bat` 交给 `cmd.exe` 并逐个参数加引号（`shell:true` 时 Node 是裸拼接，`C:/my dir` 会被拆成两个参数）。非 Windows 与已是绝对路径/带扩展名的情况原样透传，**现有可用配置零回归**。解析用的是**子进程的 PATH**（`env.PATH` 可能覆盖），不是我们自己的。
+
+测试三层：
+- `tests/pure.test.ts` +8 组：解析规则、`.cmd`/`.exe` 分流、不可解析时保持 ENOENT、引号规则（空串、空格、内嵌引号、`&|<>`）。
+- `scripts/verify-mcp.ts` +3 条：造一个 `mcpfixture.cmd` 垫片放在临时目录、挂到该 server 的 `env.PATH` 上，断言能连上、能列工具、能调用。故意把 `planMcpSpawn` 换成直通后报 `spawn mcpfixture ENOENT` FAIL，还原后 15/15。
+- 打包 exe 对真实 server：连接成功、14 个工具、`list_directory` / `read_file` / `write_file` 全部往返正常。
+
+顺带发现（未改）：`initialize` 握手预算是硬编码 12 秒，而首次 `npx` 要下载整包，冷启动很容易超时并报成 `initialize timed out`——看起来像 server 坏了。测试里通过预热缓存绕开；真实用户第一次连接时可能需要更宽松的预算或可配置项。
 
 
 ## 0.7.22 — 2026-11-13

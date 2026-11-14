@@ -8,7 +8,7 @@
  * Run: node --experimental-loader ./resolve-loader.mjs \
  *        --experimental-transform-types scripts/verify-mcp.ts
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpManager } from '../src/mcp/McpManager.js';
@@ -54,6 +54,23 @@ async function main(): Promise<void> {
   const serverPath = join(dir, 'server.cjs');
   const configPath = join(dir, 'mcp.json');
   await writeFile(serverPath, FIXTURE, 'utf8');
+
+  // A `.cmd` shim in its own directory — the exact shape `npx` has on Windows,
+  // and the reason a bare command name cannot be spawned directly there
+  // (`spawn('npx')` is ENOENT, `spawn('npx.cmd')` is EINVAL). Pointing a server
+  // entry at it, with that directory on the child's PATH, is the regression
+  // test for `planMcpSpawn`. Skipped off Windows, where the shim means nothing.
+  const shimDir = join(dir, 'shim');
+  const shimName = process.platform === 'win32' ? 'mcpfixture.cmd' : 'mcpfixture';
+  await mkdir(shimDir, { recursive: true });
+  await writeFile(
+    join(shimDir, shimName),
+    process.platform === 'win32'
+      ? `@echo off\r\n"${process.execPath}" "${serverPath}" %*\r\n`
+      : `#!/bin/sh\nexec "${process.execPath}" "${serverPath}" "$@"\n`,
+    'utf8',
+  );
+
   await writeFile(
     configPath,
     JSON.stringify(
@@ -62,6 +79,12 @@ async function main(): Promise<void> {
           fixture: { command: process.execPath, args: [serverPath], description: 'Test fixture' },
           broken: { command: 'nolanguage-definitely-not-a-binary', args: [] },
           off: { command: process.execPath, args: [serverPath], disabled: true },
+          shim: {
+            command: 'mcpfixture',
+            args: [],
+            description: 'A bare command name that only exists on PATH',
+            env: { PATH: `${shimDir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` },
+          },
         },
       },
       null,
@@ -74,9 +97,41 @@ async function main(): Promise<void> {
   try {
     await mcp.load();
     const before = mcp.payload();
-    check('mcp: config lists every declared server', before.servers.length === 3, before.servers.map((s) => s.id).join(','));
+    check('mcp: config lists every declared server', before.servers.length === 4, before.servers.map((s) => s.id).join(','));
     check('mcp: servers start idle', before.servers.every((s) => s.status === 'idle' || s.status === 'disabled'));
     check('mcp: a disabled entry is marked', before.servers.some((s) => s.id === 'off' && s.status === 'disabled'));
+
+    // A bare name resolved through PATH, launched through the shell shim. This
+    // is the case that was dead on Windows: the config form every MCP example
+    // uses ("command": "npx") could not be spawned at all.
+    //
+    // Wrapped, because the failure mode is a rejected connect (ENOENT/EINVAL),
+    // and an uncaught rejection would abort the suite instead of printing the
+    // one line that says what broke.
+    if (process.platform === 'win32') {
+      let shimState: { status: string; error: string; tools: Array<{ name: string }> } | undefined;
+      let shimError = '';
+      try {
+        shimState = await mcp.connect('shim');
+      } catch (err) {
+        shimError = (err as Error).message;
+      }
+      check(
+        'mcp: a bare command name is resolved on PATH',
+        shimState?.status === 'ready',
+        shimState ? `${shimState.status} ${shimState.error}` : shimError,
+      );
+      check(
+        'mcp: the PATH-resolved server lists tools',
+        (shimState?.tools ?? []).map((t) => t.name).join(',') === 'echo,add',
+        (shimState?.tools ?? []).map((t) => t.name).join(',') || '(none)',
+      );
+      if (shimState?.status === 'ready') {
+        const viaShim = (await mcp.callTool('shim', 'add', { a: 40, b: 2 })) as { content?: Array<{ text?: string }> };
+        check('mcp: a call through the shim round-trips', String(viaShim.content?.[0]?.text) === '42', String(viaShim.content?.[0]?.text));
+        await mcp.disconnect('shim');
+      }
+    }
 
     const state = await mcp.connect('fixture');
     check('mcp: connect performs the initialize handshake', state.status === 'ready' && state.protocolVersion === '2024-11-05', state.protocolVersion ?? '');

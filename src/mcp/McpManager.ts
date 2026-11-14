@@ -41,6 +41,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { appDataPath } from '../util/appData.js';
+import { planMcpSpawn } from './spawn-command.js';
 
 /** One declared server. Everything but `command` is optional. */
 export interface McpServerConfig {
@@ -208,11 +209,24 @@ export class McpManager {
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(cfg.command, state.args, {
+      // On Windows a bare `npx` cannot be spawned at all (ENOENT: CreateProcess
+      // does not consult PATHEXT; EINVAL: a .cmd is not a loadable image). The
+      // plan resolves it through PATH/PATHEXT and routes .cmd/.bat via cmd.exe;
+      // everywhere else it is the identity.
+      //
+      // Resolve against the *child's* PATH, not ours: a server entry may set
+      // `env.PATH` to reach a toolchain we do not have.
+      const childEnv = { ...process.env, ...(cfg.env || {}) };
+      const plan = planMcpSpawn(cfg.command, state.args, {
+        ...(childEnv.PATH !== undefined ? { PATH: childEnv.PATH } : {}),
+        ...(childEnv.PATHEXT !== undefined ? { PATHEXT: childEnv.PATHEXT } : {}),
+      });
+      child = spawn(plan.command, plan.args, {
         cwd: cfg.cwd || process.cwd(),
-        env: { ...process.env, ...(cfg.env || {}) },
+        env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        ...(plan.shell ? { shell: true } : {}),
       });
     } catch (err) {
       state.status = 'error';

@@ -27,6 +27,7 @@ import { decodeEntities, findAll, options, parseXml } from '../src/util/xml';
 import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
 import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../src/panel/run-timeout';
+import { isCmdScript, planMcpSpawn, quoteCmdArg } from '../src/mcp/spawn-command';
 
 const near = (a: number, b: number, tol: number): boolean => Math.abs(a - b) <= tol;
 
@@ -326,5 +327,88 @@ describe('run timeout · a client budget that means something', () => {
     expect(boundedRunTimeout('4000')).toBe(4000);
     expect(boundedRunTimeout(4000.7)).toBe(4001);
     expect(boundedRunTimeout(4000.2)).toBe(4000);
+  });
+});
+
+describe('mcp · turning an mcp.json command into a spawn()', () => {
+  // A fixture PATH holding one shim of each kind, so the resolution rules can be
+  // checked without a real npm install.
+  let dir = '';
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nlg-mcp-path-'));
+    writeFileSync(join(dir, 'npx.cmd'), '@echo off\r\n');
+    writeFileSync(join(dir, 'tool.exe'), 'MZ');
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // A function, not a const: `beforeAll` assigns `dir` after the describe body
+  // runs, so a captured object would hold the empty string forever.
+  const win = (): { platform: NodeJS.Platform; PATH: string; PATHEXT: string } => ({
+    platform: 'win32',
+    PATH: dir,
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+  });
+
+  it('leaves the command alone off Windows', () => {
+    const plan = planMcpSpawn('npx', ['-y', 'pkg'], { ...win(), platform: 'linux' });
+    expect(plan).toEqual({ command: 'npx', args: ['-y', 'pkg'], shell: false });
+  });
+
+  it('resolves a bare name to its .cmd shim and asks for a shell', () => {
+    // This is the bug a local run found: `spawn('npx')` is ENOENT on Windows,
+    // and `spawn('npx.cmd')` is EINVAL. Both are only launchable via cmd.exe.
+    const plan = planMcpSpawn('npx', ['-y', '@modelcontextprotocol/server-filesystem', 'C:/my dir'], win());
+    // Same file: Windows paths are case-insensitive, and the resolver echoes the
+    // extension as PATHEXT spells it.
+    expect(plan.command.toLowerCase()).toBe(join(dir, 'npx.cmd').toLowerCase());
+    expect(plan.shell).toBe(true);
+    // Quoted, or the space in the path would split the argument.
+    expect(plan.args).toEqual(['-y', '@modelcontextprotocol/server-filesystem', '"C:/my dir"']);
+  });
+
+  it('resolves a bare name to an .exe without a shell', () => {
+    const plan = planMcpSpawn('tool', ['--flag'], win());
+    expect(plan.command.toLowerCase()).toBe(join(dir, 'tool.exe').toLowerCase());
+    expect(plan.shell).toBe(false);
+    expect(plan.args).toEqual(['--flag']);
+  });
+
+  it('passes an explicit path through untouched', () => {
+    const cmd = join(dir, 'tool.exe');
+    const plan = planMcpSpawn(cmd, ['a'], win());
+    expect(plan).toEqual({ command: cmd, args: ['a'], shell: false });
+  });
+
+  it('routes an explicit .cmd path through the shell too', () => {
+    const cmd = join(dir, 'npx.cmd');
+    const plan = planMcpSpawn(cmd, ['-y', 'pkg'], win());
+    expect(plan.shell).toBe(true);
+    expect(plan.command).toBe(cmd);
+  });
+
+  it('leaves an unresolvable name alone so spawn reports ENOENT', () => {
+    const plan = planMcpSpawn('definitely-not-here', ['x'], win());
+    expect(plan).toEqual({ command: 'definitely-not-here', args: ['x'], shell: false });
+  });
+
+  it('recognises both script extensions', () => {
+    expect(isCmdScript('a.cmd')).toBe(true);
+    expect(isCmdScript('a.BAT')).toBe(true);
+    expect(isCmdScript('a.exe')).toBe(false);
+    expect(isCmdScript('a')).toBe(false);
+  });
+
+  it('quotes only the arguments that need it', () => {
+    expect(quoteCmdArg('plain')).toBe('plain');
+    expect(quoteCmdArg('two words')).toBe('"two words"');
+    expect(quoteCmdArg('C:/my dir')).toBe('"C:/my dir"');
+    expect(quoteCmdArg('')).toBe('""');
+    // A quote inside an argument is doubled, which is what the C runtime undoes.
+    expect(quoteCmdArg('say "hi"')).toBe('"say ""hi"""');
+    // Shell metacharacters must not escape the quoting.
+    expect(quoteCmdArg('a&b|c>d')).toBe('"a&b|c>d"');
+    expect(quoteCmdArg('50%')).toBe('50%');
   });
 });
