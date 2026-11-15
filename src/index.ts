@@ -95,7 +95,7 @@ export type { JsonRpcMessage, RpcHooks, RpcClientOptions } from './lsp/jsonrpc.j
 export { LspLogCollector } from './lsp/LspLogCollector.js';
 export type { LspLogCollectorOptions, LspLogStats } from './lsp/LspLogCollector.js';
 export {
-  LspClient, discoverPythonServer, fallbackServerSpec, canImportModule, fileUri,
+  LspClient, fileUri,
 } from './lsp/LspClient.js';
 export type {
   LspClientOptions, LspLaunchSpec, LspClientEvents, ServerCapabilities,

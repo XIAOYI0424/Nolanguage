@@ -18,7 +18,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Kernel } from '../src/kernel/Kernel.js';
 import { LogLevel, LOG_LEVEL_NAMES } from '../src/log/LogLevel.js';
-import { LspClient, discoverPythonServer, fileUri } from '../src/lsp/LspClient.js';
+import { LspClient, fileUri } from '../src/lsp/LspClient.js';
+import { discoverPythonServer } from '../src/python/serverDiscovery.js';
 import { PythonRunner } from '../src/python/PythonRunner.js';
 import type { Diagnostic } from '../src/lsp/LspClient.js';
 

@@ -236,6 +236,25 @@ npm run install:app -- -DryRun    # 只打印计划
 测试 +6 组（共 **78**）：`{toolchain}`/`{embedded:}` 展开、缺 toolchain 拒绝、资源不存在拒绝、id 默认值、纯命令透传、畸形声明不抛。
 
 **踩到一个坑**：`verify:smoke` 用 `dist/` 里现成的 exe，**不会自动重建**。改完 `src/` 或 `builtin/` 直接跑冒烟会得到「Python LSP 起不来」的假回归——重建后即 PASS（`nolanguage-py`）。
+### `src/lsp` 彻底语言无关：Python 的发现逻辑搬回 `src/python`
+
+上一轮把 `bundledFallback` 从引擎搬进 manifest 后，`src/lsp` 里还剩最后一处语言知识：`discoverPythonServer` / `canImportModule` / `fallbackServerSpec` —— 它们写死 Python 的可执行名、Python 的模块名、Python 的脚本路径，却住在通用客户端里。
+
+搬到新模块 **`src/python/serverDiscovery.ts`**（9 层，向 `lsp`(6) 依赖是向下）。顺带简化的地方：`fallbackServerPath()` 原来写 `new URL('../python/pyrightServer.py', import.meta.url)`，现在模块就在 `src/python/` 里，改成 `./pyrightServer.py`。
+
+**同时删掉两个隐式 Python 默认值**——它们比搬移本身更危险：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `LspClientOptions.launch` | 可选，注释写「否则自动检测」 | **必填**。原来缺省时会 `await discoverPythonServer()`，也就是说**任何语言忘了传 launch，都会静默起一个 Python 服务** |
+| 构造器 | `opts.launch?.languageId ?? 'python'` | `opts.launch.languageId` |
+
+四个构造点本来就都显式传了 `launch`，所以这是一次纯收紧。
+
+效果：`src/lsp/LspClient.ts` 的语言字面量 **6 → 1**，剩下的那一个是 `contentFormat: ['markdown', 'plaintext']`——LSP 的 MIME 类型，不是语言判断。ratchet 总预算 48 → **43**。
+
+验证覆盖：`verify:stage3`（源码模式跑真 LSP）与打包冒烟（`python LSP is ready — nolanguage-py`）都通过，说明搬移在两种模式下都成立。
+
 
 
 ### 语言一致性门禁：`verify:langparity`

@@ -82,8 +82,12 @@ export interface LspLaunchSpec {
 }
 
 export interface LspClientOptions {
-  /** Override server discovery (otherwise auto-detected). */
-  launch?: LspLaunchSpec;
+  /**
+   * The server to launch. Required: this client used to default to
+   * `discoverPythonServer()` when it was missing, so a caller that forgot the
+   * spec silently started a Python server regardless of the language.
+   */
+  launch: LspLaunchSpec;
   /** Per-request timeout. */
   timeoutMs?: number;
   /** Diagnostics threshold for the `lsp.diagnostic` warning. */
@@ -104,7 +108,7 @@ export class LspClient extends EventEmitter {
   private logger?: Logger;
   private kernel?: Kernel;
   private opts: LspClientOptions;
-  private launch?: LspLaunchSpec;
+  private launch: LspLaunchSpec;
   private _capabilities: ServerCapabilities = {};
   private diagnosticsByUri = new Map<string, Diagnostic[]>();
   private openVersions = new Map<string, number>();
@@ -114,12 +118,12 @@ export class LspClient extends EventEmitter {
   private startedAt = 0;
   private stopped = false;
 
-  constructor(opts: LspClientOptions = {}) {
+  constructor(opts: LspClientOptions) {
     super();
     this.opts = opts;
     this.launch = opts.launch;
-    this.languageId = opts.launch?.languageId ?? 'python';
-    this.serverName = opts.launch?.serverName ?? 'unknown';
+    this.languageId = opts.launch.languageId;
+    this.serverName = opts.launch.serverName ?? opts.launch.languageId;
   }
 
   get capabilities(): ServerCapabilities {
@@ -163,7 +167,7 @@ export class LspClient extends EventEmitter {
     this.kernel = kernel;
     // Resolve the launch spec once into a non-optional local so the rest of the
     // method reads cleanly and cannot race on `this.launch`.
-    const launch = this.launch ?? (await discoverPythonServer());
+    const launch = this.launch;
     launch.cwd ??= process.cwd();
     this.launch = launch;
     this.logger = kernel.logger.forLanguageServer(this.languageId, `lsp.${launch.serverName}`);
@@ -516,90 +520,6 @@ export class LspClient extends EventEmitter {
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/**
- * Discover a Python language server. Preference order:
- *  1. `pyright-langserver` (npm global) — the spec's target server.
- *  2. `python -m pyright.langserver` — only if the `pyright` module is actually
- *     importable (a bare `python` on PATH is not proof pyright is installed).
- *  3. The bundled fallback server (`src/python/pyrightServer.py`), which speaks
- *     real LSP so the closed loop runs even with no network / no pyright.
- *
- * Async because step 2 has to run the interpreter; see `canImportModule`.
- */
-export async function discoverPythonServer(
-  pythonBin = process.env.PYTHON_BIN ?? 'python',
-): Promise<LspLaunchSpec> {
-  if (commandExists('pyright-langserver')) {
-    return { languageId: 'python', serverName: 'pyright', command: 'pyright-langserver', args: ['--stdio'] };
-  }
-  if (await canImportModule(pythonBin, 'pyright')) {
-    return {
-      languageId: 'python',
-      serverName: 'pyright',
-      command: pythonBin,
-      args: ['-m', 'pyright.langserver', '--stdio'],
-    };
-  }
-  return fallbackServerSpec(pythonBin);
-}
-
-/**
- * True if `python -c "import <mod>"` succeeds (used to verify pyright really
- * exists).
- *
- * Async `spawn` rather than `spawnSync`: the synchronous variant is blocked in
- * some sandboxed environments (it fails with EBUSY while async spawn succeeds),
- * which would silently downgrade every caller to the fallback server.
- */
-export function canImportModule(pythonBin: string, module: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (v: boolean): void => {
-      if (!settled) {
-        settled = true;
-        resolve(v);
-      }
-    };
-    try {
-      const child = spawn(pythonBin, ['-c', `import ${module}`], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.on('error', () => done(false));
-      child.on('close', (code) => done(code === 0));
-      setTimeout(() => {
-        child.kill();
-        done(false);
-      }, 8000).unref?.();
-    } catch {
-      done(false);
-    }
-  });
-}
-
-export function fallbackServerSpec(pythonBin: string): LspLaunchSpec {
-  return {
-    languageId: 'python',
-    serverName: 'nolanguage-py',
-    command: pythonBin,
-    args: ['-u', fallbackServerPath()],
-    cwd: process.cwd(),
-  };
-}
-
-function fallbackServerPath(): string {
-  // In a packaged build the script ships inside the executable; otherwise it
-  // is resolved relative to this module: ../python/pyrightServer.py
-  const embedded = embeddedAssetPath('pyrightServer.py');
-  if (embedded) return embedded;
-  try {
-    return fileURLToPath(new URL('../python/pyrightServer.py', import.meta.url));
-  } catch {
-    // A bundled module may not expose a file:// URL — nothing we can do here.
-    return 'pyrightServer.py';
-  }
 }
 
 /** Cheap PATH probe for an executable on PATH (plus explicit paths). */

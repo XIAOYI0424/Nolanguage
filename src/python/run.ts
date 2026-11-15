@@ -20,7 +20,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Kernel } from '../kernel/Kernel.js';
 import { LogLevel, LOG_LEVEL_NAMES } from '../log/LogLevel.js';
-import { LspClient, discoverPythonServer, fallbackServerSpec, fileUri } from '../lsp/LspClient.js';
+import { LspClient, fileUri } from '../lsp/LspClient.js';
+import { discoverPythonServer, fallbackServerSpec } from './serverDiscovery.js';
 import { PythonRunner } from './PythonRunner.js';
 import type { Diagnostic } from '../lsp/LspClient.js';
 

@@ -68,10 +68,11 @@ const BLOCK_FIELDS: Record<string, readonly string[]> = {
  * number goes **up**. Lowering a number here is the goal of every cleanup.
  *
  * The numbers are the measured baseline when this gate was written (49 in
- * total, now 48). Three sites were fixed on the way in — coverage no longer
+ * total, now 43). Four sites were fixed on the way in — coverage no longer
  * checks `language !== 'python'` (it reads `run.coverage`), the interpreter list
- * no longer prefixes labels with a language name, and the bundled LSP fallback
- * moved from a Python-only helper into the manifest.
+ * no longer prefixes labels with a language name, the bundled LSP fallback
+ * moved from a Python-only helper into the manifest, and Python's server
+ * discovery moved out of the generic client into `src/python/`.
  */
 const LITERAL_BUDGET: Record<string, number> = {
   // Demo workspace content: one starter file per language. Data, not logic —
@@ -81,9 +82,10 @@ const LITERAL_BUDGET: Record<string, number> = {
   // `file.extensions`; the static table stays only for languages that have no
   // plugin (json, yaml, shell, ...).
   'src/panel/FsService.ts': 11,
-  // `discoverPythonServer` / `fallbackServerSpec` live in the generic client.
-  // They belong in `src/python/`; the manifest already has `lsp.discovery`.
-  'src/lsp/LspClient.ts': 6,
+  // One left, and it is not a language: `contentFormat: ['markdown',
+  // 'plaintext']` is an LSP MIME type. `discoverPythonServer` and friends moved
+  // to `src/python/serverDiscovery.ts`, where the language is allowed to live.
+  'src/lsp/LspClient.ts': 1,
   // Per-language defaults and notes in the language/migration handlers.
   'src/panel/handlers/languages.ts': 6,
   'src/panel/handlers/migration.ts': 4,

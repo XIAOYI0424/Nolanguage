@@ -16,7 +16,8 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { LspClient, discoverPythonServer, fileUri } from '../lsp/LspClient.js';
+import { LspClient, fileUri } from '../lsp/LspClient.js';
+import { discoverPythonServer } from '../python/serverDiscovery.js';
 import { PythonRunner } from '../python/PythonRunner.js';
 import type { Kernel } from '../kernel/Kernel.js';
 import type { Diagnostic } from '../lsp/LspClient.js';
