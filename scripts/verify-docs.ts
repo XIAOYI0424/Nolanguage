@@ -33,7 +33,7 @@
  *
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-docs.ts
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -187,12 +187,49 @@ const appVersion = /APP_VERSION\s*=\s*'([\d.]+)-workspace'/.exec(read('src/versi
   );
 }
 
+/**
+ * True when any source file is newer than the cached architecture summary.
+ *
+ * `verify:docs` compares `ARCHITECTURE.md` against that cache, so without this
+ * check a source change that adds an import passes locally and fails in CI —
+ * which is exactly what happened once and cost a round trip.
+ */
+function summaryIsStale(summaryPath: string): boolean {
+  const summaryAt = statSync(summaryPath).mtimeMs;
+  const walk = (dir: string): boolean => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const st = statSync(p);
+      if (st.isDirectory()) {
+        if (walk(p)) return true;
+      } else if (st.mtimeMs > summaryAt) {
+        return true;
+      }
+    }
+    return false;
+  };
+  try {
+    return walk(join(ROOT, 'src'));
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------- D7 the contract's numbers
 
 {
   const summaryPath = join(ROOT, '.tmp', 'arch-summary.json');
   if (!existsSync(summaryPath)) {
     check('docs: the architecture numbers are checkable', false, 'run npm run verify:arch first (.tmp/arch-summary.json missing)');
+  } else if (summaryIsStale(summaryPath)) {
+    // The summary is a cache written by `verify:arch`. Comparing the contract
+    // against a summary older than the source is how a green run hides a real
+    // drift: the numbers matched the cache, not the code. Fail loudly instead.
+    check(
+      'docs: the architecture summary is newer than src/',
+      false,
+      'stale .tmp/arch-summary.json — run `npm run verify:arch` before `verify:docs`',
+    );
   } else {
     const s = JSON.parse(readFileSync(summaryPath, 'utf8')) as { files: number; imports: number; checks: number; total: number };
     const arch = textOf.get('docs/ARCHITECTURE.md') ?? '';

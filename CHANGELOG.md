@@ -343,6 +343,14 @@ npm run install:app -- -DryRun    # 只打印计划
 
 所以理性顺序是**先做五个导航能力**——高收益、零常驻代价；打包语言服务则应该按语言按需启动，而不是全量常驻。
 
+### 顺手修掉一个会制造假绿的门禁漏洞
+
+给 `server.ts` 加了 `import { bootLog }` 之后，导入数从 474 变成 475。本地 `verify:docs` **通过了**，CI 却失败——因为 `verify:docs` 比对的是 `.tmp/arch-summary.json` 这个**缓存**，而我在改完源码后没有重跑 `verify:arch`，缓存里还是 474。
+
+现在 `verify:docs` 会先检查缓存是否比 `src/` 新，过期就直接失败并提示「先跑 verify:arch」。注入验证过：`touch src/version.ts` → FAIL，重跑 arch → PASS。
+
+这个漏洞的危险之处不是它错了，而是它**绿得毫无征兆**——只有 CI 才发现。
+
 
 
 
