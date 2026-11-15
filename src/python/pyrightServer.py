@@ -127,6 +127,11 @@ class Server:
                         "textDocumentSync": {"openClose": True, "change": 1},
                         "completionProvider": {"triggerCharacters": [".", "("]},
                         "hoverProvider": True,
+                        "definitionProvider": True,
+                        "referencesProvider": True,
+                        "renameProvider": True,
+                        "codeActionProvider": True,
+                        "workspaceSymbolProvider": True,
                         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
                     },
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
@@ -178,6 +183,26 @@ class Server:
 
         if method == "textDocument/hover":
             self.respond(msg_id, self.hover(params))
+            return True
+
+        if method == "textDocument/definition":
+            self.respond(msg_id, self.definition(params))
+            return True
+
+        if method == "textDocument/references":
+            self.respond(msg_id, self.references(params))
+            return True
+
+        if method == "textDocument/rename":
+            self.respond(msg_id, self.rename(params))
+            return True
+
+        if method == "textDocument/codeAction":
+            self.respond(msg_id, self.code_actions(params))
+            return True
+
+        if method == "workspace/symbol":
+            self.respond(msg_id, self.workspace_symbols(params))
             return True
 
         if method == "textDocument/diagnostic":
@@ -311,6 +336,207 @@ class Server:
 
         return diags
 
+
+    # ---------------- navigation ----------------
+    #
+    # Same-file only: this server has no index, so `workspace/symbol` answers for
+    # the open document. That is a limit of the fallback, not of the protocol —
+    # pyright answers across the project.
+    #
+    # Positions are 0-based line/character, as LSP counts them. This stub counts
+    # code points, which matches UTF-16 for ASCII; an emoji on the same line as an
+    # identifier can shift a column.
+
+    def _doc(self, params: dict[str, Any]) -> tuple[str, "Doc | None"]:
+        uri = params.get("textDocument", {}).get("uri", "")
+        return uri, self.docs.get(uri)
+
+    def _ident_at(self, text: str, line: int, character: int) -> tuple[str, int, int] | None:
+        """Identifier under the cursor, with its start/end column on that line."""
+        rows = text.splitlines()
+        if line < 0 or line >= len(rows):
+            return None
+        row = rows[line]
+        character = max(0, min(character, len(row)))
+        start = character
+        while start > 0 and (row[start - 1].isalnum() or row[start - 1] == "_"):
+            start -= 1
+        end = character
+        while end < len(row) and (row[end].isalnum() or row[end] == "_"):
+            end += 1
+        if start == end:
+            return None
+        return row[start:end], start, end
+
+    def _name_span(self, text: str, node: ast.AST, name: str) -> tuple[int, int, int]:
+        """(line, start, end) of `name` on the node's first line."""
+        rows = text.splitlines()
+        line = getattr(node, "lineno", 1) - 1
+        row = rows[line] if 0 <= line < len(rows) else ""
+        start = row.find(name, getattr(node, "col_offset", 0))
+        if start < 0:
+            start = getattr(node, "col_offset", 0)
+        return line, start, start + len(name)
+
+    def _loc(self, uri: str, line: int, start: int, end: int) -> dict[str, Any]:
+        return {
+            "uri": uri,
+            "range": {
+                "start": {"line": line, "character": start},
+                "end": {"line": line, "character": end},
+            },
+        }
+
+    def _parse(self, text: str) -> ast.AST | None:
+        try:
+            return ast.parse(text)
+        except SyntaxError:
+            return None
+
+    def _occurrences(self, text: str, tree: ast.AST, name: str) -> list[tuple[int, int, int]]:
+        spans = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+                spans.append(self._name_span(text, node, name))
+            elif isinstance(node, ast.Name) and node.id == name:
+                spans.append((node.lineno - 1, node.col_offset, node.col_offset + len(name)))
+        return sorted(set(spans))
+
+    def definition(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        uri, doc = self._doc(params)
+        if doc is None:
+            return []
+        pos = params.get("position", {})
+        hit = self._ident_at(doc.text, pos.get("line", 0), pos.get("character", 0))
+        tree = self._parse(doc.text)
+        if hit is None or tree is None:
+            return []
+        name = hit[0]
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+                line, start, end = self._name_span(doc.text, node, name)
+                out.append(self._loc(uri, line, start, end))
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name:
+                out.append(self._loc(uri, node.lineno - 1, node.col_offset, node.col_offset + len(name)))
+        return out
+
+    def references(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        uri, doc = self._doc(params)
+        if doc is None:
+            return []
+        pos = params.get("position", {})
+        hit = self._ident_at(doc.text, pos.get("line", 0), pos.get("character", 0))
+        tree = self._parse(doc.text)
+        if hit is None or tree is None:
+            return []
+        include_decl = (params.get("context") or {}).get("includeDeclaration", True)
+        spans = self._occurrences(doc.text, tree, hit[0])
+        if not include_decl:
+            here = (pos.get("line", 0), hit[1])
+            spans = [sp for sp in spans if (sp[0], sp[1]) != here]
+        return [self._loc(uri, line, start, end) for line, start, end in spans]
+
+    def rename(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        uri, doc = self._doc(params)
+        new_name = params.get("newName", "")
+        # An invalid identifier would leave a file that no longer parses; refusing
+        # here is the difference between a warning and a broken edit.
+        if doc is None or not new_name.isidentifier():
+            return None
+        pos = params.get("position", {})
+        hit = self._ident_at(doc.text, pos.get("line", 0), pos.get("character", 0))
+        tree = self._parse(doc.text)
+        if hit is None or tree is None:
+            return None
+        edits = []
+        for line, start, end in self._occurrences(doc.text, tree, hit[0]):
+            edits.append(
+                {
+                    "range": {
+                        "start": {"line": line, "character": start},
+                        "end": {"line": line, "character": end},
+                    },
+                    "newText": new_name,
+                }
+            )
+        if not edits:
+            return None
+        return {"changes": {uri: edits}}
+
+    def code_actions(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        uri, doc = self._doc(params)
+        if doc is None:
+            return []
+        tree = self._parse(doc.text)
+        if tree is None:
+            return []
+        used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        used |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        actions: list[dict[str, Any]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Import):
+                continue
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if bound in used:
+                    continue
+                line = node.lineno - 1
+                actions.append(
+                    {
+                        "title": f"Remove unused import '{alias.name}'",
+                        "kind": "quickfix",
+                        "edit": {
+                            "changes": {
+                                uri: [
+                                    {
+                                        "range": {
+                                            "start": {"line": line, "character": 0},
+                                            "end": {"line": line + 1, "character": 0},
+                                        },
+                                        "newText": "",
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                )
+        return actions
+
+    def workspace_symbols(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        query = (params.get("query") or "").lower()
+        out = []
+        for uri, doc in self.docs.items():
+            tree = self._parse(doc.text)
+            if tree is None:
+                continue
+            for node in tree.body:
+                name = None
+                kind = 13
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    name, kind = node.name, 12
+                elif isinstance(node, ast.ClassDef):
+                    name, kind = node.name, 5
+                elif isinstance(node, ast.Assign):
+                    targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                    name = targets[0] if targets else None
+                if not name or (query and query not in name.lower()):
+                    continue
+                line, start, end = self._name_span(doc.text, node, name)
+                out.append(
+                    {
+                        "name": name,
+                        "kind": kind,
+                        "location": {
+                            "uri": uri,
+                            "range": {
+                                "start": {"line": line, "character": start},
+                                "end": {"line": line, "character": end},
+                            },
+                        },
+                    }
+                )
+        return out
 
 def _range(line: int, char: int, length: int = 1) -> dict[str, Any]:
     return {

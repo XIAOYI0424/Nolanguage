@@ -24,6 +24,13 @@ import {
 } from '../src/perf/Attribution';
 import { discoverInterpreters, pickInterpreter, shortVersion } from '../src/langs/interpreters';
 import { buildExtensionIndex, languageForName } from '../src/langs/extensionIndex';
+import {
+  declaresFeature,
+  normalizeCodeActions,
+  normalizeLocations,
+  normalizeSymbols,
+  normalizeWorkspaceEdit,
+} from '../src/lsp/navigation';
 import { decodeEntities, findAll, options, parseXml } from '../src/util/xml';
 import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
@@ -861,5 +868,65 @@ describe('extensions · one table answers "what language is this file"', () => {
     expect(index.get('tsx')).toBe('typescript');
     expect(index.get('py')).toBe('python');
     expect(index.get('json')).toBe('json');
+  });
+});
+
+describe('lsp · navigation results are normalised in one place', () => {
+  it('accepts every shape textDocument/definition may return', () => {
+    const range = { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } };
+    // A server may answer with one Location, an array, a LocationLink, or null.
+    expect(normalizeLocations({ uri: 'a.py', range })).toHaveLength(1);
+    expect(normalizeLocations([{ uri: 'a.py', range }, { uri: 'b.py', range }])).toHaveLength(2);
+    expect(normalizeLocations([{ targetUri: 'c.py', targetSelectionRange: range }])[0].uri).toBe('c.py');
+    expect(normalizeLocations(null)).toEqual([]);
+    // Garbage in must not throw: a malformed location is dropped, not fatal.
+    expect(normalizeLocations([{ nope: true }])).toEqual([]);
+  });
+
+  it('flattens both workspace-edit dialects', () => {
+    const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } };
+    const changes = normalizeWorkspaceEdit({ changes: { 'a.py': [{ range, newText: 'x' }] } });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ uri: 'a.py', newText: 'x' });
+    // documentChanges is what servers send when they support versioned edits.
+    const docChanges = normalizeWorkspaceEdit({
+      documentChanges: [{ textDocument: { uri: 'b.py' }, edits: [{ range, newText: 'y' }] }],
+    });
+    expect(docChanges).toHaveLength(1);
+    expect(docChanges[0].uri).toBe('b.py');
+    // A create/rename/delete operation has no edits and must be skipped.
+    expect(normalizeWorkspaceEdit({ documentChanges: [{ kind: 'create', uri: 'c.py' }] })).toEqual([]);
+  });
+
+  it('keeps a command-only code action visible but inert', () => {
+    const actions = normalizeCodeActions([
+      { title: 'Organise imports', kind: 'source.organizeImports', edit: { changes: { 'a.py': [] } } },
+      { title: 'Run a command', command: 'x.y' },
+    ]);
+    expect(actions.map((a) => a.title)).toEqual(['Organise imports', 'Run a command']);
+    expect(actions[1].edits).toBeUndefined();
+  });
+
+  it('flattens workspace symbols to uri + line', () => {
+    const symbols = normalizeSymbols([
+      {
+        name: 'add',
+        kind: 12,
+        location: { uri: 'a.py', range: { start: { line: 3, character: 4 }, end: { line: 3, character: 7 } } },
+      },
+    ]);
+    expect(symbols).toEqual([{ name: 'add', kind: 12, uri: 'a.py', line: 3 }]);
+  });
+
+  it('treats an unadvertised capability as unsupported, not as empty', () => {
+    // This is the whole point of the distinction: `false` and "absent" both mean
+    // the server cannot answer, and the UI must say so instead of showing [].
+    expect(declaresFeature({}, 'definition')).toBe(false);
+    expect(declaresFeature({ definitionProvider: false }, 'definition')).toBe(false);
+    expect(declaresFeature({ definitionProvider: true }, 'definition')).toBe(true);
+    expect(declaresFeature({ definitionProvider: {} }, 'definition')).toBe(true);
+    // workspace/symbol and codeAction use different keys than the rest.
+    expect(declaresFeature({ workspaceSymbolProvider: true }, 'workspaceSymbol')).toBe(true);
+    expect(declaresFeature({ codeActionProvider: true }, 'codeAction')).toBe(true);
   });
 });

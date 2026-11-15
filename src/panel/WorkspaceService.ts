@@ -39,6 +39,7 @@ import { defaultRuntimeRegistry } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { setExtensionManifests } from '../langs/extensionIndex.js';
+import { unsupported, type CodeAction, type Location, type NavResult, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
 import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
 import { ProfileManager, parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
@@ -881,6 +882,86 @@ export class WorkspaceService {
       } catch {
         return [];
       }
+    });
+  }
+
+  /**
+   * The five navigation requests share this shape: resolve the slot, make sure a
+   * server is up, sync the buffer, ask.
+   *
+   * Unlike `complete`/`hover` they do **not** swallow failures into an empty
+   * result: "no server" and "nothing found" must stay distinguishable, which is
+   * what `NavResult` carries.
+   */
+  async definition(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<Location[]>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<Location[]>(slot.lspError ?? `${id} has no language server`);
+      slot.lsp.changeDocument(slot.docUri, code, id);
+      return slot.lsp.definition(slot.docUri, { line, character });
+    });
+  }
+
+  async references(
+    id: LanguageId,
+    code: string,
+    line: number,
+    character: number,
+    includeDeclaration = true,
+  ): Promise<NavResult<Location[]>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<Location[]>(slot.lspError ?? `${id} has no language server`);
+      slot.lsp.changeDocument(slot.docUri, code, id);
+      return slot.lsp.references(slot.docUri, { line, character }, includeDeclaration);
+    });
+  }
+
+  async renameSymbol(
+    id: LanguageId,
+    code: string,
+    line: number,
+    character: number,
+    newName: string,
+  ): Promise<NavResult<TextEdit[]>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<TextEdit[]>(slot.lspError ?? `${id} has no language server`);
+      slot.lsp.changeDocument(slot.docUri, code, id);
+      return slot.lsp.renameSymbol(slot.docUri, { line, character }, newName);
+    });
+  }
+
+  async codeActions(
+    id: LanguageId,
+    code: string,
+    line: number,
+    character: number,
+  ): Promise<NavResult<CodeAction[]>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<CodeAction[]>(slot.lspError ?? `${id} has no language server`);
+      slot.lsp.changeDocument(slot.docUri, code, id);
+      const position = { line, character };
+      return slot.lsp.codeActions(slot.docUri, { start: position, end: position }, []);
+    });
+  }
+
+  async workspaceSymbols(id: LanguageId, query: string): Promise<NavResult<SymbolInformation[]>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<SymbolInformation[]>(slot.lspError ?? `${id} has no language server`);
+      return slot.lsp.workspaceSymbols(query);
     });
   }
 

@@ -20,6 +20,21 @@ import { EventEmitter } from 'node:events';
 import { JsonRpcConnection, type JsonRpcMessage } from './jsonrpc.js';
 import { LspLogCollector, type LspLogStats } from './LspLogCollector.js';
 import { embeddedAssetPath } from '../assets/embeddedAssets.js';
+import {
+  declaresFeature,
+  normalizeCodeActions,
+  normalizeLocations,
+  normalizeSymbols,
+  normalizeWorkspaceEdit,
+  supported,
+  unsupported,
+  type CodeAction,
+  type Location,
+  type NavFeature,
+  type NavResult,
+  type SymbolInformation,
+  type TextEdit,
+} from './navigation.js';
 import type { Kernel } from '../kernel/Kernel.js';
 import type { Logger } from '../log/Logger.js';
 
@@ -386,6 +401,72 @@ export class LspClient extends EventEmitter {
     });
     this.kernel?.perfMetrics().record('lsp.hover', performance.now() - t0);
     return res;
+  }
+
+  // ---------------- navigation (definition / references / rename / actions) ----------------
+
+  /**
+   * One place for the four failure modes these five requests share:
+   * not advertised, not implemented, a real RPC error, and success.
+   *
+   * `unsupported` is returned rather than thrown because "this server cannot do
+   * that" is a normal answer — the panel shows the reason instead of an empty
+   * list, which would read as "nothing found".
+   */
+  private async nav<T>(
+    feature: NavFeature,
+    method: string,
+    params: unknown,
+    normalize: (raw: unknown) => T,
+  ): Promise<NavResult<T>> {
+    if (!declaresFeature(this._capabilities as Record<string, unknown>, feature)) {
+      return unsupported<T>(`${this.serverName} does not advertise ${feature}`);
+    }
+    const t0 = performance.now();
+    try {
+      const raw = await this.requireRpc().request<unknown>(method, params);
+      this.kernel?.perfMetrics().record(`lsp.${feature}`, performance.now() - t0);
+      return supported(normalize(raw));
+    } catch (err) {
+      const code = (err as { rpcCode?: number }).rpcCode;
+      if (code === -32601) return unsupported<T>(`${this.serverName} does not implement ${method}`);
+      throw err;
+    }
+  }
+
+  definition(uri: string, position: Position): Promise<NavResult<Location[]>> {
+    return this.nav('definition', 'textDocument/definition', { textDocument: { uri }, position }, normalizeLocations);
+  }
+
+  references(uri: string, position: Position, includeDeclaration = true): Promise<NavResult<Location[]>> {
+    return this.nav(
+      'references',
+      'textDocument/references',
+      { textDocument: { uri }, position, context: { includeDeclaration } },
+      normalizeLocations,
+    );
+  }
+
+  async renameSymbol(uri: string, position: Position, newName: string): Promise<NavResult<TextEdit[]>> {
+    const r = await this.nav('rename', 'textDocument/rename', { textDocument: { uri }, position, newName }, normalizeWorkspaceEdit);
+    // LSP answers `null` for "this symbol cannot be renamed" (a keyword, a
+    // builtin, an invalid new name). That is not the same as "nothing to change"
+    // and must not render as an empty result the user cannot explain.
+    if (r.ok && r.value.length === 0) return unsupported('the server cannot rename this symbol');
+    return r;
+  }
+
+  codeActions(uri: string, range: Range, diagnostics: unknown[] = []): Promise<NavResult<CodeAction[]>> {
+    return this.nav(
+      'codeAction',
+      'textDocument/codeAction',
+      { textDocument: { uri }, range, context: { diagnostics } },
+      normalizeCodeActions,
+    );
+  }
+
+  workspaceSymbols(query: string): Promise<NavResult<SymbolInformation[]>> {
+    return this.nav('workspaceSymbol', 'workspace/symbol', { query }, normalizeSymbols);
   }
 
   /** Ask for diagnostics explicitly (pull) when the server supports it. */

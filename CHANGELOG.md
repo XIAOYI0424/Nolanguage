@@ -350,6 +350,37 @@ npm run install:app -- -DryRun    # 只打印计划
 现在 `verify:docs` 会先检查缓存是否比 `src/` 新，过期就直接失败并提示「先跑 verify:arch」。注入验证过：`touch src/version.ts` → FAIL，重跑 arch → PASS。
 
 这个漏洞的危险之处不是它错了，而是它**绿得毫无征兆**——只有 CI 才发现。
+### 五个导航能力：协议层与客户端完成，内置 Python 服务也实现了
+
+清单里最贵的一项（高收益、零常驻代价）落地了。
+
+**协议与客户端**：
+
+- `src/lsp/navigation.ts`：五个能力的结果类型与归一化。LSP 的返回形状很随意——`definition` 可能是 `Location | Location[] | LocationLink[] | null`，`rename` 可能是 `changes` 或 `documentChanges`——分支只写一次。
+- `LspClient` 加 `definition` / `references` / `renameSymbol` / `codeActions` / `workspaceSymbols`，统一走一个 `nav()`：**服务端没声明 → `unsupported`；服务端返回 -32601 → `unsupported`；真错误才抛**。为此给 JSON-RPC 错误补了 `rpcCode` 字段，不再靠字符串匹配。
+- `PanelHub` 五个结果帧，每个都带 `unsupported?: string`。
+- `src/panel/handlers/navigation.ts`：五个处理器，`references` 与 `workspaceSymbol` 超上限时带 `truncated`。
+
+**关键区分**：「没有结果」和「这个服务不会」必须分开。合并成空数组的话，用户看到的是「没找到」，而真相是「没装 gopls」。
+
+**内置 Python 服务补齐五个方法**（`ast`，同文件范围）：跳转定义、查找引用、符号重命名（非法标识符直接拒绝，而不是产出一个语法坏掉的文件）、快速修复（未使用 import）、全局符号。所以**不装 pyright 也能用**。
+
+端到端实测（打包 exe → WS → 服务端 → LSP 客户端 → python 服务）：
+
+| 能力 | 结果 |
+|---|---|
+| 跳转定义 | `add(...)` → 1 处，line 0 col 4 |
+| 查找引用 | 2 处（定义 + 调用） |
+| 符号重命名 | 2 处编辑；`2bad` 被拒并给出理由 |
+| 快速修复 | `Remove unused import 'os'` |
+| 全局符号 | 查询 `ad` → `add:function` |
+
+**一个设计修正**：清单原本计划在 manifest 里加 `lsp.capabilities` 作为声明。实现时改成读服务端 `initialize` 返回的 `*Provider` 字段——那才是权威来源；manifest 再写一份只会制造第二处真相，而清理这类重复正是这一周在做的事。
+
+**尚未做**：客户端按键与结果面板（协议已通，用户还按不出来）；gopls / tsserver / marksman 装上即生效，因为请求已经是通用的。
+
+测试 +5 组（共 **94**）：四种 definition 返回形状、两种 workspace-edit 方言、command-only action、符号扁平化、以及「未声明能力 ≠ 空结果」。
+
 
 
 

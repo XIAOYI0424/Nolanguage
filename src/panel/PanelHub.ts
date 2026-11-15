@@ -46,6 +46,33 @@ export interface PanelHubOptions {
 }
 
 // -------- wire protocol (server -> client) --------
+/** Wire shapes for the navigation results (already normalised by `lsp/navigation`). */
+export interface NavLocation {
+  uri: string;
+  line: number;
+  character: number;
+}
+export interface NavEdit {
+  uri: string;
+  line: number;
+  character: number;
+  endLine: number;
+  endCharacter: number;
+  newText: string;
+}
+export interface NavAction {
+  title: string;
+  kind?: string;
+  edits?: NavEdit[];
+}
+export interface NavSymbol {
+  name: string;
+  kind: string;
+  uri: string;
+  line: number;
+  containerName?: string;
+}
+
 export type PanelServerMessage =
   | {
       kind: 'hello';
@@ -97,6 +124,14 @@ export type PanelServerMessage =
     }
   | { kind: 'completion'; requestId: number; items: Array<{ label: string; kind?: number; detail?: string }> }
   | { kind: 'hover'; requestId: number; hover: unknown }
+  // ---- navigation (the five LSP requests) ----
+  // `unsupported` is carried on every result: "no results" and "this server
+  // cannot do that" look identical otherwise, and the panel has to say which.
+  | { kind: 'definitionResult'; requestId: number; locations: NavLocation[]; unsupported?: string }
+  | { kind: 'referencesResult'; requestId: number; locations: NavLocation[]; truncated?: boolean; unsupported?: string }
+  | { kind: 'renameResult'; requestId: number; edits: NavEdit[]; unsupported?: string }
+  | { kind: 'codeActionResult'; requestId: number; actions: NavAction[]; unsupported?: string }
+  | { kind: 'workspaceSymbolResult'; requestId: number; symbols: NavSymbol[]; truncated?: boolean; unsupported?: string }
   | { kind: 'session'; sessionId: string; reset: boolean }
   | { kind: 'error'; message: string }
   // ---- Project explorer (file system) ----

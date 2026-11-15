@@ -192,7 +192,12 @@ export class JsonRpcConnection extends EventEmitter {
       const durationMs = performance.now() - p.t0;
       if (msg.error) {
         this.opts.hooks?.onRoundtrip?.({ method: p.method, durationMs, ok: false, id, traceId: p.traceId });
-        p.reject(new Error(`RPC error ${msg.error.code}: ${msg.error.message}`));
+        // Keep the JSON-RPC code: -32601 (method not found) is how a server says
+        // "I do not implement that", which callers must distinguish from a real
+        // failure. String-matching the message would be fragile across servers.
+        const err = new Error(`RPC error ${msg.error.code}: ${msg.error.message}`) as Error & { rpcCode?: number };
+        err.rpcCode = msg.error.code;
+        p.reject(err);
       } else {
         this.opts.hooks?.onRoundtrip?.({ method: p.method, durationMs, ok: true, id, traceId: p.traceId });
         p.resolve(msg.result);

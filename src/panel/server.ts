@@ -56,6 +56,13 @@ import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '
 import { discoverBinary } from '../langs/discover.js';
 import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleHover, handleMdRender } from './handlers/languages.js';
 import { envToolchains, handleImportIdea, handleInterpreters, handleSetInterpreter } from './handlers/migration.js';
+import {
+  handleCodeAction,
+  handleDefinition,
+  handleReferences,
+  handleRenameSymbol,
+  handleWorkspaceSymbol,
+} from './handlers/navigation.js';
 import { handleAttribute } from './handlers/attribution.js';
 import { languageRoots, pluginPayload } from './handlers/plugins.js';
 import { PerfHandlers } from './handlers/perf.js';
@@ -712,6 +719,23 @@ export async function main(
         case 'complete':
         case 'completion': // accept both spellings
           void handleComplete(workspace, msg, reply);
+          break;
+
+        // ---- navigation: the five requests the client can now send ----
+        case 'definition':
+          void handleDefinition(workspace, msg, reply);
+          break;
+        case 'references':
+          void handleReferences(workspace, msg, reply);
+          break;
+        case 'renameSymbol':
+          void handleRenameSymbol(workspace, msg, reply);
+          break;
+        case 'codeAction':
+          void handleCodeAction(workspace, msg, reply);
+          break;
+        case 'workspaceSymbol':
+          void handleWorkspaceSymbol(workspace, msg, reply);
           break;
 
         case 'hover':
