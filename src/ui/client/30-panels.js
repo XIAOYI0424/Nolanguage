@@ -67,6 +67,13 @@
       if (e.key === 'Escape') { e.preventDefault(); CMP.dismissed = true; cmpClose(); return; }
     }
     if (e.ctrlKey && (e.key === ' ' || e.key === 'Spacebar')) { e.preventDefault(); requestComplete(); return; }
+    // Navigation, with the keys the checklist settled on. Shift+F6 here is the
+    // symbol rename; the project tree keeps Shift+F6 for renaming a file, so the
+    // two never fire for the same intent.
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key || '').toLowerCase() === 'b') { e.preventDefault(); navDefinition(); return; }
+    if (e.altKey && e.key === 'F7') { e.preventDefault(); navReferences(); return; }
+    if (e.shiftKey && e.key === 'F6') { e.preventDefault(); navRename(); return; }
+    if (e.altKey && e.key === 'Enter') { e.preventDefault(); navCodeActions(); return; }
     if (e.key === 'Tab') { e.preventDefault(); insertText('    '); scheduleComplete(); return; }
     if (e.key === 'Enter') { e.preventDefault(); autoIndentEnter(); scheduleComplete(); return; }
     if (e.key === 'Escape') { CMP.dismissed = true; cmpClose(); return; }

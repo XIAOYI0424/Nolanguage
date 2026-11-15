@@ -169,7 +169,12 @@ check('shell: inline script parses', (() => {
 //   - the assembled script must have substituted every one of them.
 const CLIENT_DIR = join(ROOT, 'src', 'ui', 'client');
 const fragmentFiles = readdirSync(CLIENT_DIR).filter((f) => f.endsWith('.js')).sort();
-check('client: split into 6-9 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 9, fragmentFiles.join(','));
+// The band keeps the client from collapsing back into one 4,200-line literal
+// (the old shape) or splintering into dozens of files. It was 6-9 until the five
+// navigation capabilities arrived; that is a coherent feature and earned its own
+// shard, so the ceiling moved by one rather than merging it into a file it does
+// not belong to.
+check('client: split into 6-10 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 10, fragmentFiles.join(','));
 check(
   'client: every fragment on disk is wired into the assembler',
   fragmentFiles.length === CLIENT_FRAGMENTS.length &&

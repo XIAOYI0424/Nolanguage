@@ -712,6 +712,15 @@
         if (LOGS.length > 2000) LOGS = LOGS.slice(-1500);
         if (activeBottom === 'logs') renderLogs();
         break;
+      // The five navigation results all land in one handler: it owns the
+      // requestId table, so the switch only has to forward.
+      case 'definitionResult':
+      case 'referencesResult':
+      case 'renameResult':
+      case 'codeActionResult':
+      case 'workspaceSymbolResult':
+        navOnFrame(m);
+        break;
       case 'diagnostics':
         // A switch can move the document on while a check is in flight; showing
         // the old language's problems under the new one would be a lie.

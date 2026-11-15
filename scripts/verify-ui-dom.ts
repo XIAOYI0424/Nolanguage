@@ -18,6 +18,7 @@ import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { renderPanelHtml } from '../src/ui/ui.js';
+import { renderPyCharmHtml } from '../src/panel/pycharm-ui.js';
 import { renderPerfHtml } from '../src/ui/perf-ui.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
@@ -386,11 +387,108 @@ async function testPerf(): Promise<void> {
   w.close();
 }
 
+// ============================================================ navigation
+
+/**
+ * The five navigation capabilities are only reachable if the keys actually send
+ * the requests, and if a reply actually moves the caret. Both halves are checked
+ * here against the real client shards running in jsdom.
+ */
+async function testNavigation(): Promise<void> {
+  FakeSocket.instances = [];
+  // The IDE shell, not the dev panel: `#ta` only exists here.
+  const { window: w, socket } = mountPage(renderPyCharmHtml(7310));
+  await settle(w);
+  socket.deliver({ kind: 'hello', appVersion: '0.7.23', arch: 'x64', os: 'Windows 11' });
+  // Without a server-capable language the handlers refuse before sending, which
+  // is correct behaviour but would make this test vacuous.
+  socket.deliver({
+    kind: 'workspace',
+    languages: [{ id: 'python', displayName: 'Python', supportsRun: true, hasLsp: true, extensions: ['py'] }],
+  });
+  await settle(w);
+
+  const ta = q(w, '#ta');
+  const cases: Array<[string, Record<string, unknown>, string]> = [
+    ['Ctrl+B', { key: 'b', ctrlKey: true }, 'definition'],
+    ['Alt+F7', { key: 'F7', altKey: true }, 'references'],
+    ['Shift+F6', { key: 'F6', shiftKey: true }, 'renameSymbol'],
+    ['Alt+Enter', { key: 'Enter', altKey: true }, 'codeAction'],
+  ];
+  for (const [label, init, kind] of cases) {
+    socket.sent.length = 0;
+    fire(w, ta, 'keydown', init);
+    await settle(w);
+    // Shift+F6 opens a dialog first; the request only goes out on submit.
+    if (kind === 'renameSymbol') {
+      const ok = q(w, '#dlgRoot .dlg-btn.primary') ?? q(w, '#dlgRoot button');
+      const input = q(w, '#dlgRoot input');
+      if (input) { input.value = 'sum2'; }
+      if (ok) { fire(w, ok, 'click'); }
+      await settle(w);
+    }
+    const sent = socket.lastSentOf(kind);
+    check(
+      `nav: ${label} sends ${kind}`,
+      !!sent && sent.language === 'python',
+      sent ? `${sent.kind} line=${sent.line}` : 'nothing sent',
+    );
+  }
+
+  // Ctrl+T is workspace-wide: it opens a query dialog, then sends on submit.
+  socket.sent.length = 0;
+  fire(w, w.document.body, 'keydown', { key: 't', ctrlKey: true });
+  await settle(w);
+  const symInput = q(w, '#dlgRoot input');
+  const symOk = q(w, '#dlgRoot .dlg-btn.primary') ?? q(w, '#dlgRoot button');
+  if (symInput) symInput.value = 'add';
+  if (symOk) fire(w, symOk, 'click');
+  await settle(w);
+  check('nav: Ctrl+T sends workspaceSymbol', !!socket.lastSentOf('workspaceSymbol'), socket.lastSentOf('workspaceSymbol') ? 'sent' : 'nothing sent');
+
+  // A reply must move the caret: that is the whole point of "go to definition".
+  socket.sent.length = 0;
+  fire(w, ta, 'keydown', { key: 'b', ctrlKey: true });
+  await settle(w);
+  const def = socket.lastSentOf('definition');
+  if (def) {
+    socket.deliver({
+      kind: 'definitionResult',
+      requestId: def.requestId,
+      // Line 4 of the sample is `def fib(n):`. Line 2 is blank, and a character
+      // offset on an empty line spills into the following newlines - which is
+      // correct for the editor and useless for an assertion.
+      locations: [{ uri: 'main.py', line: 4, character: 4 }],
+    });
+    await settle(w);
+  }
+  // A location in another buffer is applied after the buffer loads (the client
+  // waits 260 ms), so this assertion has to outlive that delay.
+  await settle(w, 320);
+  check('nav: a definition reply moves the caret', (q(w, '#stPos')?.textContent ?? '').indexOf('Ln 5, Col 5') === 0, q(w, '#stPos')?.textContent ?? '?');
+
+  // "unsupported" must not look like "nothing found".
+  socket.sent.length = 0;
+  fire(w, ta, 'keydown', { key: 'b', ctrlKey: true });
+  await settle(w);
+  const def2 = socket.lastSentOf('definition');
+  if (def2) {
+    socket.deliver({ kind: 'definitionResult', requestId: def2.requestId, locations: [], unsupported: 'gopls does not advertise definition' });
+    await settle(w);
+  }
+  const modalText = (q(w, '#dlgRoot')?.textContent ?? '');
+  check('nav: unsupported is reported, not shown as empty', modalText.indexOf('gopls does not advertise') >= 0, modalText.slice(0, 60) || '(no dialog)');
+
+  w.close();
+}
+
 // =============================================================== run
 
 await testMonitor();
 console.log('');
 await testPerf();
+console.log('');
+await testNavigation();
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

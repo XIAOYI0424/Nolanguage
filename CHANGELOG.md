@@ -380,6 +380,37 @@ npm run install:app -- -DryRun    # 只打印计划
 **尚未做**：客户端按键与结果面板（协议已通，用户还按不出来）；gopls / tsserver / marksman 装上即生效，因为请求已经是通用的。
 
 测试 +5 组（共 **94**）：四种 definition 返回形状、两种 workspace-edit 方言、command-only action、符号扁平化、以及「未声明能力 ≠ 空结果」。
+### 客户端接上五个导航按键
+
+协议通了不等于能用——用户得按得出来。
+
+`src/ui/client/68-nav.js`（新分片）：
+
+| 键 | 动作 |
+|---|---|
+| `Ctrl+B` / `Ctrl+单击` | 跳转定义（多处时列出选择） |
+| `Alt+F7` | 查找引用（浮层列表，带 `truncated` 提示） |
+| `Shift+F6` | 符号重命名（编辑器内；项目树里仍是文件重命名） |
+| `Alt+Enter` | 快速修复 |
+| `Ctrl+T` | 全局符号搜索（先问查询词） |
+
+结果用**键盘可导航的浮层**（↑↓/Enter/Esc），DOM 在 JS 里按需创建——HTML 壳是带反引号守卫的模板字符串，这种只在需要时出现的东西不该写成静态标记。
+
+**两个坑，都值得记**：
+
+1. **分片位置**：一开始把 `75-nav.js` 放在 `70-shell.js` 之后，而 `70-shell.js` 的最后一行关闭了主 IIFE。于是 `navDefinition` 落在了全局作用域，`30-panels.js` 的按键处理器里看不见它——表现是「按了没反应，也不报错」（`preventDefault` 已执行，随后 `ReferenceError` 被 jsdom 吞掉）。改名为 `68-nav.js` 放在 IIFE 内即解决。
+2. **分片不能有反引号**：注释里的 `` `code` `` 风格也会让 `verify-pycharm` 的「no fragment contains a backtick」失败。已全部改成普通引号。
+
+`verify-ui-dom` 加 7 条断言，真派发键盘事件并检查发出的帧：
+
+- `Ctrl+B` / `Alt+F7` / `Shift+F6` / `Alt+Enter` / `Ctrl+T` 各自发出正确的请求；
+- 收到 `definitionResult` 后光标真的移到目标位置（`Ln 5, Col 5`）；
+- `unsupported` 弹对话框，**不是**空列表。
+
+写这条测试时还踩了一次「测试错了而不是代码错了」：我给的坐标落在样例文件的**空行**上，字符偏移溢出到下一行，光标停在 `Ln 5, Col 3`。代码是对的，断言选了无意义的坐标。
+
+分片数从 9 变 10，`verify-pycharm` 的区间随之从 6–9 放宽到 6–10——那条门禁的本意是防止退回「一个 4200 行的模板字面量」，不是精确卡在 9。
+
 
 
 

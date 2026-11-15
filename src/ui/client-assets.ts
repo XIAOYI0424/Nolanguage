@@ -25,6 +25,7 @@
  *  50-runtime      run / debug / coverage / formatting / terminal / messages
  *  60-menus        menus, theme, language mode, modals, settings, run configs
  *  70-shell        pickers, search, toolbar, keymap, interpreter, boot
+ *  68-nav          definition / references / rename / quick fix / symbols
  */
 import core from './client/00-core.js?raw';
 import state from './client/10-state.js?raw';
@@ -35,6 +36,7 @@ import preview from './client/45-preview.js?raw';
 import runtime from './client/50-runtime.js?raw';
 import menus from './client/60-menus.js?raw';
 import shell from './client/70-shell.js?raw';
+import nav from './client/68-nav.js?raw';
 
 export interface ClientFragment {
   /** File name, for error messages and the self-containment checks. */
@@ -52,5 +54,9 @@ export const CLIENT_FRAGMENTS: ClientFragment[] = [
   { file: '45-preview.js', text: preview },
   { file: '50-runtime.js', text: runtime },
   { file: '60-menus.js', text: menus },
+  // Navigation must load *inside* the main IIFE: 70-shell closes it on its last
+  // line, and a shard appended after that would define its functions in the
+  // global scope where 30-panels' key handler cannot see them.
+  { file: '68-nav.js', text: nav },
   { file: '70-shell.js', text: shell },
 ];
