@@ -23,7 +23,7 @@
 - `verify-baseline`：bounded retention batches、Git probe
 - `verify-plugins`：active-vs-estimated budget
 - Tauri bundle build 与 runtime smoke 结果按本次实测补录；build 成功不表示 WebView2 启动正常。
-- 全套回归：`verify-all` 2197/2197 across 49 suites；`npm test` 72/72；`ci:pure` 411/411。
+- 全套回归：`verify-all` 2199/2199 across 49 suites；`npm test` 89/89；`ci:pure` 413/413。
 
 ### 第一次真正在 GitHub runner 上跑 CI
 
@@ -276,6 +276,36 @@ npm run install:app -- -DryRun    # 只打印计划
 - **`src/langs` 纳入字面量统计**。之前只统计 `src/panel` + `src/lsp`，而解释器表和**第三份**扩展名映射（`ideaImport.ts`，9 处）正好住在 `src/langs` 里，属于规则空档。预算 43 → **55**（新增 `interpreters.ts` 3 处兜底表键 + `ideaImport.ts` 9 处扩展名映射，都记了成因）。
 
 测试 +5 组（共 **83**）：未知语言靠声明即可发现、声明替换而非合并兜底表、`sdkPrefix` 匹配、无 marker 不误判、无声明时表仍可用。
+### 扩展名映射收成一份：`langs/extensionIndex.ts`
+
+「这个文件是什么语言」原来有**五份**答案，而且互相矛盾：
+
+| 位置 | `.ts` 的答案 |
+|---|---|
+| `FsService.EXT_LANGUAGE` | `typescript` |
+| `ideaImport.EXT_LANGUAGE` | `javascript` |
+| `debugtool.languageOf` | 不认 |
+| 客户端 `EXT_LANG` | `typescript`（连接前兜底，catalog 会覆盖） |
+| `manifest.file.extensions` | 无插件认领 |
+
+`.ts` 的分歧是症状：**`typescript` 这个 id 在产品里不存在**——没有插件、没有 manifest、没有服务、没有运行时。资源管理器把它标成 `typescript`（什么都干不了），同一个文件的运行配置却叫 `javascript`。
+
+现在统一到 `src/langs/extensionIndex.ts`，三层优先级：
+
+1. **manifest 的 `file.extensions`**（注册表扫描后注入，最高）
+2. **`BUILTIN_EXTENSION_DEFAULTS`**——给没有注册表的进程用（`NDebug.exe` 独立运行），也是面板首次扫描前的值
+3. **`NO_PLUGIN`**——只高亮不运行的语言（json/yaml/shell/…）
+
+`.ts/.tsx` 归到 `javascript`：这是唯一存在的 JS 家族插件，它的语言服务（tsserver）本来就处理 TypeScript，所以 **`.ts` 现在反而有补全和诊断了**。
+
+门禁加一条（7 项）：**内置默认值必须与认领同一扩展名的 manifest 一致**——默认值本质是 manifest 的副本，所以要被校验而不是被信任。
+
+收掉的重复：`FsService` 11 处 → 0，`ideaImport` 9 处 → 0，新文件 13 处（唯一的表）。总预算 55 → **48**。
+
+`verify-explorer` 里 `['app.ts', 'typescript']` 的断言随之改成 `javascript`，并在注释里写明这是有意变更。
+
+`debugtool.languageOf` **保留**自己的三分支：它回答的不是「这是什么语言」，而是「我能不能观测它」（只支持 python/javascript/go），属于能力矩阵而非语言身份表。
+
 
 
 

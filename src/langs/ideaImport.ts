@@ -21,6 +21,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { child, children, findAll, options, parseXml, type XmlNode } from '../util/xml.js';
+import { languageForName } from './extensionIndex.js';
 
 export interface ImportedRunConfiguration {
   /** Configuration name shown in the run dropdown. */
@@ -57,18 +58,6 @@ export interface IdeaImport {
 
 /** Script-bearing options, in the order JetBrains writes them per type. */
 const SCRIPT_KEYS = ['SCRIPT_NAME', 'PATH_TO_JS_FILE', 'FILE_PATH', 'INPUT_FILE', 'SCRIPT'];
-
-const EXT_LANGUAGE: Record<string, string> = {
-  py: 'python',
-  pyw: 'python',
-  js: 'javascript',
-  mjs: 'javascript',
-  cjs: 'javascript',
-  ts: 'javascript',
-  tsx: 'javascript',
-  go: 'go',
-  md: 'markdown',
-};
 
 const MAX_FILES = 200;
 
@@ -127,7 +116,7 @@ function readConfiguration(node: XmlNode, root: string, source: string): Importe
     workdir,
     env,
     source,
-    ...(EXT_LANGUAGE[ext] ? { language: EXT_LANGUAGE[ext] } : {}),
+    ...(languageForName(`x.${ext}`) ? { language: languageForName(`x.${ext}`) } : {}),
   };
 }
 

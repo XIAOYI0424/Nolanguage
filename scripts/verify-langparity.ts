@@ -68,23 +68,21 @@ const BLOCK_FIELDS: Record<string, readonly string[]> = {
  * number goes **up**. Lowering a number here is the goal of every cleanup.
  *
  * The numbers are the measured baseline when this gate was written (49 in
- * total, now 55). Four sites were fixed on the way in — coverage no longer
+ * total, now 48). Five sites were fixed on the way in — coverage no longer
  * checks `language !== 'python'` (it reads `run.coverage`), the interpreter list
  * no longer prefixes labels with a language name, the bundled LSP fallback
  * moved from a Python-only helper into the manifest, and Python's server
  * discovery moved out of the generic client into `src/python/`.
  *
  * `src/langs` joined the scan with the interpreter work: the fallback table and
- * a third copy of the extension map were living there uncounted.
+ * a third copy of the extension map were living there uncounted. That copy and
+ * FsService's are both gone now — `langs/extensionIndex.ts` is the only
+ * extension table left, and the check above keeps its defaults aligned.
  */
 const LITERAL_BUDGET: Record<string, number> = {
   // Demo workspace content: one starter file per language. Data, not logic —
   // but it still belongs in the plugins eventually.
   'src/panel/samples.ts': 19,
-  // Extension -> language id. Should be derived from each manifest's
-  // `file.extensions`; the static table stays only for languages that have no
-  // plugin (json, yaml, shell, ...).
-  'src/panel/FsService.ts': 11,
   // One left, and it is not a language: `contentFormat: ['markdown',
   // 'plaintext']` is an LSP MIME type. `discoverPythonServer` and friends moved
   // to `src/python/serverDiscovery.ts`, where the language is allowed to live.
@@ -97,11 +95,11 @@ const LITERAL_BUDGET: Record<string, number> = {
   // The fallback table itself: three keys, kept so plugins written before
   // `run.interpreters` still get discovery. Built-ins no longer use it.
   'src/langs/interpreters.ts': 3,
-  // A *third* copy of the extension -> language map (FsService has one,
-  // `file.extensions` in the manifests is the source of truth). This one exists
-  // to turn a PyCharm run configuration's file into a language id; it should be
-  // derived from the registry like the other two.
-  'src/langs/ideaImport.ts': 9,
+  // The single extension -> language table now. It holds the no-plugin
+  // languages plus the defaults a registry-less process (NDebug.exe) needs;
+  // the panel replaces the plugin entries with the manifests at startup, and the
+  // check above keeps the defaults honest.
+  'src/langs/extensionIndex.ts': 13,
   // WorkspaceService dropped off this list: the Python fallback moved into the
   // manifest, taking `stubInterpreter()` (`process.env.PYTHON_BIN ?? 'python'`)
   // with it.
@@ -149,7 +147,7 @@ function walk(dir: string, out: string[] = []): string[] {
 
 const LANGUAGE_NAMES = ['python', 'go', 'javascript', 'markdown', 'typescript'] as const;
 
-function main(): void {
+async function main(): Promise<void> {
   const plugins = loadPlugins();
   check('every builtin plugin loads a manifest', plugins.length >= 4, `${plugins.length} plugin(s): ${plugins.map((p) => p.id).join(', ')}`);
 
@@ -225,6 +223,26 @@ function main(): void {
     undeclared.length ? `relying on the engine table: ${undeclared.join(', ')}` : `${runnable.length} plugin(s)`,
   );
 
+  // ---- 3c. the built-in defaults match the manifests they stand in for ----
+  // `extensionIndex` ships defaults so a process with no registry (the
+  // standalone debugger) can still answer "what language is this file". Those
+  // defaults are a copy of the manifests by necessity, so they get checked
+  // rather than trusted.
+  const { BUILTIN_EXTENSION_DEFAULTS } = await import('../src/langs/extensionIndex.js');
+  const drift: string[] = [];
+  for (const p of plugins) {
+    const exts = (p.manifest.file as { extensions?: string[] } | undefined)?.extensions ?? [];
+    for (const ext of exts) {
+      const claimed = BUILTIN_EXTENSION_DEFAULTS[ext];
+      if (claimed && claimed !== p.id) drift.push(`${ext}: default ${claimed}, ${p.id} claims it`);
+    }
+  }
+  check(
+    'built-in extension defaults agree with the manifests',
+    drift.length === 0,
+    drift.join('; ') || `${Object.keys(BUILTIN_EXTENSION_DEFAULTS).length} default(s)`,
+  );
+
   // ---- 4. literal ratchet ------------------------------------------------
   const counts = new Map<string, number>();
   for (const dir of ['src/panel', 'src/lsp', 'src/langs']) {
@@ -280,4 +298,4 @@ function main(): void {
   }
 }
 
-main();
+void main();

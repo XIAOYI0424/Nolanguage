@@ -69,7 +69,12 @@ async function testService(): Promise<void> {
     ['a.go', 'go'],
     ['notes.md', 'markdown'],
     ['go.mod', undefined],
-    ['app.ts', 'typescript'],
+    // `javascript`, not `typescript`: there is no TypeScript plugin, so
+    // `typescript` was an id nothing could act on (no manifest, no language
+    // server, no runtime) while a run configuration for the same file said
+    // `javascript`. Both resolve through `langs/extensionIndex.ts` now.
+    ['app.ts', 'javascript'],
+    ['app.tsx', 'javascript'],
     ['run.sh', 'shell'],
     ['.gitignore', 'text'],
     ['Makefile', undefined],

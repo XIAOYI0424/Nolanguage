@@ -38,6 +38,7 @@ import { RunnerFactory } from '../langs/RunnerFactory.js';
 import { defaultRuntimeRegistry } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
+import { setExtensionManifests } from '../langs/extensionIndex.js';
 import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
 import { ProfileManager, parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
@@ -282,6 +283,11 @@ export class WorkspaceService {
         `no language plugins found under ${this.registry.home} (looked for builtin/ and languages/)`,
       );
     }
+
+    // The registry is the source of truth for "which language is this file".
+    // Before this runs the index answers from its built-in defaults, which is
+    // what standalone processes (NDebug.exe) use all the time.
+    setExtensionManifests(manifests);
 
     for (const manifest of manifests) {
       const code = initial?.[manifest.id] ?? defaultSample(manifest.id).code;

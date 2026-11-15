@@ -26,6 +26,7 @@
  */
 import { readFile, writeFile, readdir, stat, mkdir, rename, rm, realpath } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { languageForName } from '../langs/extensionIndex.js';
 
 /** One row in the explorer tree. */
 export interface FsEntry {
@@ -100,50 +101,13 @@ const SKIP_DIRS = new Set([
   '.nolanguage',
 ]);
 
-/** Extension -> language id, for the highlighter and for opening a file in LSP. */
-const EXT_LANGUAGE: Record<string, string> = {
-  py: 'python',
-  pyi: 'python',
-  go: 'go',
-  md: 'markdown',
-  markdown: 'markdown',
-  json: 'json',
-  jsonc: 'json',
-  yml: 'yaml',
-  yaml: 'yaml',
-  toml: 'toml',
-  js: 'javascript',
-  mjs: 'javascript',
-  cjs: 'javascript',
-  ts: 'typescript',
-  tsx: 'typescript',
-  jsx: 'javascript',
-  sh: 'shell',
-  bash: 'shell',
-  bat: 'shell',
-  cmd: 'shell',
-  ps1: 'shell',
-  html: 'html',
-  htm: 'html',
-  css: 'css',
-  sql: 'sql',
-  txt: 'text',
-  log: 'text',
-  cfg: 'text',
-  ini: 'text',
-  env: 'text',
-  gitignore: 'text',
-};
-
-export function languageOf(name: string): string | undefined {
-  const lower = name.toLowerCase();
-  const dot = lower.lastIndexOf('.');
-  if (dot < 0) {
-    // Dotfiles like `.gitignore` still have a meaningful suffix.
-    return EXT_LANGUAGE[lower.replace(/^\./, '')];
-  }
-  return EXT_LANGUAGE[lower.slice(dot + 1)];
-}
+/**
+ * File name to language id.
+ *
+ * The mapping lives in `langs/extensionIndex.ts`, fed by the registry. This
+ * used to be its own table — one of five copies that disagreed about `.ts`.
+ */
+export const languageOf = languageForName;
 
 export class FsService {
   private rootDir: string;

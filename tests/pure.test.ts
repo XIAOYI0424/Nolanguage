@@ -23,6 +23,7 @@ import {
   welchT,
 } from '../src/perf/Attribution';
 import { discoverInterpreters, pickInterpreter, shortVersion } from '../src/langs/interpreters';
+import { buildExtensionIndex, languageForName } from '../src/langs/extensionIndex';
 import { decodeEntities, findAll, options, parseXml } from '../src/util/xml';
 import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
@@ -818,5 +819,47 @@ describe('interpreters · declared by the plugin, table only as fallback', () =>
     writeFileSync(join(dir, '.venv', 'Scripts', 'python.exe'), 'MZ');
     const found = await discoverInterpreters(dir, 'python', { pathEnv: '', probe: null, home: dir });
     expect(found.map((f) => f.source)).toEqual(['.venv']);
+  });
+});
+
+describe('extensions · one table answers "what language is this file"', () => {
+  it('resolves the built-in defaults', () => {
+    expect(languageForName('main.py')).toBe('python');
+    expect(languageForName('main.go')).toBe('go');
+    expect(languageForName('README.md')).toBe('markdown');
+    expect(languageForName('app.jsx')).toBe('javascript');
+  });
+
+  it('calls a .ts file javascript, because no TypeScript plugin exists', () => {
+    // This used to be `typescript` in the explorer and `javascript` in a run
+    // configuration — the same file, two answers, and `typescript` was an id
+    // nothing could act on (no manifest, no server, no runtime).
+    expect(languageForName('a.ts')).toBe('javascript');
+    expect(languageForName('a.tsx')).toBe('javascript');
+  });
+
+  it('still names languages that have no plugin', () => {
+    // Highlighted, never run — the editor needs an id for these too.
+    expect(languageForName('data.json')).toBe('json');
+    expect(languageForName('ci.yml')).toBe('yaml');
+    expect(languageForName('run.sh')).toBe('shell');
+  });
+
+  it('handles dotfiles, which have no dot-suffix to strip', () => {
+    expect(languageForName('.gitignore')).toBe('text');
+  });
+
+  it('returns undefined for an extension nobody claims', () => {
+    expect(languageForName('a.zzz')).toBeUndefined();
+  });
+
+  it('lets a manifest override a default without losing the rest', () => {
+    // The shape of the future: a typescript plugin would claim .ts and win,
+    // while every other default keeps working.
+    const index = buildExtensionIndex([{ id: 'typescript', file: { extensions: ['ts', 'tsx'] } }]);
+    expect(index.get('ts')).toBe('typescript');
+    expect(index.get('tsx')).toBe('typescript');
+    expect(index.get('py')).toBe('python');
+    expect(index.get('json')).toBe('json');
   });
 });
