@@ -19,6 +19,7 @@
     "verify:ide": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-ide.ts",
     "verify:ui": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-pycharm.ts",
     "verify:ui-dom": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-ui-dom.ts",
+    "verify:ui-live": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-ui-live.ts",
     "verify:go": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-go.ts",
     "verify:smoke": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/smoke-exe.ts",
     "verify:mcp-exe": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-mcp-exe.ts",

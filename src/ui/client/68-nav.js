@@ -22,7 +22,15 @@
 
   function navClose() {
     var old = $('navPick');
-    if (old && old.parentNode) old.parentNode.removeChild(old);
+    if (!old || !old.parentNode) return;
+    old.parentNode.removeChild(old);
+    // Removing a focused node drops focus to <body>, and then the next keystroke
+    // goes to the document instead of the editor - the user is stranded with a
+    // dead keyboard. Hand focus back to wherever the caret was.
+    try {
+      if (CMEDITOR) CMEDITOR.cm.focus();
+      else ta.focus();
+    } catch (e) { /* the editor may be gone */ }
   }
 
   /**
@@ -59,6 +67,7 @@
     var rows = [];
     items.forEach(function (it, i) {
       var row = document.createElement('div');
+      row.setAttribute('data-nav-row', '1');
       row.style.cssText = 'padding:3px 8px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
       var main = document.createElement('span');
       main.textContent = it.label;

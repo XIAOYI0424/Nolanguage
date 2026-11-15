@@ -137,7 +137,10 @@ npm run verify           # 49 套件（真进程，含打包 exe smoke + 打包 
 npm test                 # vitest 单测（2 个文件 38 用例；丢了文件会失败）
 npm run typecheck        # tsc --noEmit，0 错误
 npm run verify:sidecar   # 校验 dist 与 Tauri sidecar 的 sha256 一致
+npm run verify:ui-live   # 可选：真浏览器（headless Edge + CDP）跑编辑器与导航按键；缺 Edge 则 SKIP
 ```
+
+`verify:ui-live` **不在** `verify` 的 49 套里：它需要 Edge、一个空闲端口和打包好的 exe，把无头浏览器设为必过项在 CI runner 上只会带来抖动。改动编辑器、键位或导航分片之后手动跑一次——jsdom 看不到 CodeMirror 拥有文档、真实焦点、真实按键这些最容易悄悄坏掉的部分。
 
 CI（`.github/workflows/ci.yml`）把上述全部当作阻塞闸门，另外会构建 NSIS 安装包、静默安装并探测 `/health`。
 每个步骤都是一个 npm 脚本，所以 `npm run ci:pure` 在本机跑的就是 CI 快门；`npm run verify:ci` 检查 workflow 里每个命令都真实存在。
