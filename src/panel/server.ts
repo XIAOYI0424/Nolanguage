@@ -29,6 +29,7 @@ import { dirname, join, resolve } from 'node:path';
 import { Kernel } from '../kernel/Kernel.js';
 import { appDataPath } from '../util/appData.js';
 import { LogLevel, levelFromName } from '../log/LogLevel.js';
+import { bootLog } from '../util/bootLog.js';
 import { WebSocketServer, type WebSocketConnection } from '../net/websocket.js';
 import { PanelHub, type PanelFilter, type PanelSink } from './PanelHub.js';
 import { renderPanelHtml } from '../ui/ui.js';
@@ -148,6 +149,10 @@ export async function main(
     return raw;
   }
 
+  // Phase marks for the boot log. The packaged build inlines everything into one
+  // 1.6 MB file, so "which module is slow to load" is not answerable by lazy
+  // imports — only by measuring where the wall clock actually goes.
+  bootLog('server-module-loaded');
   const kernel = new Kernel({
     appVersion: APP_VERSION,
     slowThresholdMs: Number(process.env.PANEL_SLOW_MS ?? 60),
@@ -166,9 +171,11 @@ export async function main(
     sessionId: `panel-${Date.now().toString(36)}`,
   });
 
+  bootLog('kernel-constructed');
   // Order matters: `kernel.logger` is only populated by spine installation in
   // `start()`, and startDemo captures a logger — so start first.
   await kernel.start();
+  bootLog('kernel-started');
 
   // Best-effort install receipt: one place doctor/update can read "which build
   // is installed here".

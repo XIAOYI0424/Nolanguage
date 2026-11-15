@@ -305,6 +305,44 @@ npm run install:app -- -DryRun    # 只打印计划
 `verify-explorer` 里 `['app.ts', 'typescript']` 的断言随之改成 `javascript`，并在注释里写明这是有意变更。
 
 `debugtool.languageOf` **保留**自己的三分支：它回答的不是「这是什么语言」，而是「我能不能观测它」（只支持 python/javascript/go），属于能力矩阵而非语言身份表。
+### 启动优化：先量再改，三条里只有一条成立
+
+上一版报告给了三个优化目标。加打点实测后，**两个的前提是错的**：
+
+| 上一版说法 | 实测 | 处置 |
+|---|---|---|
+| 744 ms 模块图加载 | **16 ms** | 不做。打包是单个 1.6 MB CJS，动态 `import()` 不省解析 |
+| gitStatus 77 ms「每次都要等」 | 客户端只在开面板/提交后/手动刷新时请求；77 ms 是 **git 进程启动地板**（`git rev-parse` 空目录也要 134 ms） | 不做。加缓存只会引入状态过期风险 |
+| 扩展宿主 226 ms | 实测真实成本 **76 ms** | **已做** |
+
+`demo.hello` 从 `onStartup` 改为按命令激活（`onCommand:demo.hello.greet` / `demo.hello.fib`）。
+
+**冷启动 1022 ms → 946 ms（-7.4%）**，三次取中位；其余阶段完全持平，说明省下的就是这一项。
+
+打包冒烟 27/27 通过——`extension host is ready` 仍然成立，因为冒烟先跑了 `fib` 再断言状态，恰好验证了懒激活路径。
+
+### 顺带加了启动阶段打点
+
+`boot.log` 现在有 `server-module-loaded` / `kernel-constructed` / `kernel-started` 三个点，配合原有的 `server-starting` / `server-ready` 可以拆出四段：
+
+| 阶段 | 中位 | 归因 |
+|---|---|---|
+| SEA 引导 | 33 ms | — |
+| 模块图 | **16 ms** | 单 bundle，已内联 |
+| `kernel.start()` | **320 ms** | `correlation.prime()`（spawn git）+ SQLite 打开 + 三条 spine |
+| workspace 初始化 | **575 ms** | LSP eager 277 ms + 扩展（已省）+ slots/demo/baseline |
+
+没有这三个点，「744 ms 是模块加载」这个错误结论会一直留在报告里。
+
+### 重新排序：性能代价越小越该先做
+
+按「实现后增加多少运行时开销」重排，结论和「按体验收益」并不一致：
+
+- **打包四种语言服务**：体验收益第一，性能代价也第一（+630 MB、gopls 冷诊断 20 s）。
+- **五个导航能力**：体验收益同样靠前，性能代价**几乎为零**（复用已有 LSP 连接，只有全库符号索引有一次性成本）。
+
+所以理性顺序是**先做五个导航能力**——高收益、零常驻代价；打包语言服务则应该按语言按需启动，而不是全量常驻。
+
 
 
 
