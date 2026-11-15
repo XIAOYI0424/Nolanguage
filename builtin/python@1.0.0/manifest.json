@@ -82,12 +82,21 @@
     "memoryHint": "380MB",
     "diagnosticsTimeoutMs": 2500,
     "coldDiagnosticsTimeoutMs": 2500,
-    "bundledFallback": "stub",
     "degradedNote": "pyright not found — Check and completion fall back to the bundled stub server",
     "args": [
       "--stdio"
     ],
-    "eager": true
+    "eager": true,
+    "bundledFallback": {
+      "languageId": "python",
+      "serverName": "nolanguage-py",
+      "command": [
+        "{toolchain}",
+        "-u",
+        "{embedded:pyrightServer.py}"
+      ],
+      "sourceDir": "python"
+    }
   },
   "run": {
     "mode": "repl-session",

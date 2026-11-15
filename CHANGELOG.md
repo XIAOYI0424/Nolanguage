@@ -209,6 +209,34 @@ npm run install:app -- -DryRun    # 只打印计划
 ` 分行会留下 ``，而 `$` 不能匹配 `` 之前，导致注释剥离静默失效、文档注释被当成代码报错。
 
 **能力覆盖矩阵**（报告，不强制——这是产品决策）：`lsp` 4/5（zh-cn 是本地化包）、`run` 3/5（markdown 无运行时）、`debug` 2/5、`profiler` 2/5（仅 python/go）。
+### 内置兜底服务通用化：插件声明命令，引擎不再认识语言
+
+`bundledFallback` 原来是字面量 `"stub"`，引擎用 `fallbackServerSpec()` 解析——那个函数写死了 Python 的解释器、语言 id 和脚本路径。注释写着「命名能力，不是语言判断」，实现却是一个绕了弯的语言判断：**任何语言声明 `"stub"` 都会拿到 Python 的服务**。
+
+现在插件自己声明命令：
+
+```jsonc
+"bundledFallback": {
+  "languageId": "python",
+  "serverName": "nolanguage-py",
+  "command": ["{toolchain}", "-u", "{embedded:pyrightServer.py}"],
+  "sourceDir": "python"
+}
+```
+
+新模块 `src/lsp/bundledFallback.ts` 只做两件事：展开 `{toolchain}` 与 `{embedded:<key>}`（打包读内嵌资源，源码读 `src/<sourceDir>/<key>`），以及解析不出来时返回 `undefined` 让上层落到 `degradedNote`。**它不知道调用方是哪个语言。**
+
+连带清掉的：
+
+- `WorkspaceService` 里的 `stubInterpreter()`（`process.env.PYTHON_BIN ?? 'python'`）—— 该文件的语言字面量从 1 降到 **0**，总预算 49 → **48**。
+- manifest 校验拒绝旧的字符串形式，并要求 `command` 是非空字符串数组。
+
+同时修了 ratchet 的一个反向惩罚：原来连**注释里**的语言名也计数（新文件在 JSDoc 里举例 `"python"` 就被判超预算）。注释不构成耦合，现在先剥离注释再数。
+
+测试 +6 组（共 **78**）：`{toolchain}`/`{embedded:}` 展开、缺 toolchain 拒绝、资源不存在拒绝、id 默认值、纯命令透传、畸形声明不抛。
+
+**踩到一个坑**：`verify:smoke` 用 `dist/` 里现成的 exe，**不会自动重建**。改完 `src/` 或 `builtin/` 直接跑冒烟会得到「Python LSP 起不来」的假回归——重建后即 PASS（`nolanguage-py`）。
+
 
 ### 语言一致性门禁：`verify:langparity`
 

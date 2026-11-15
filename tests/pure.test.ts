@@ -31,6 +31,7 @@ import { isCmdScript, planMcpSpawn, quoteCmdArg } from '../src/mcp/spawn-command
 import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../src/mcp/McpManager';
 import { FileTransport } from '../src/log/transports/FileTransport';
 import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
+import { resolveBundledFallback } from '../src/lsp/bundledFallback';
 import { sliceDigest } from '../src/panel/log-digest';
 import { LogLevel } from '../src/log/LogLevel';
 import type { LogRecord } from '../src/log/types';
@@ -680,5 +681,65 @@ describe('log · the boot sink that exists before the kernel', () => {
       bootLog('first');
       bootLog('second');
     }).not.toThrow();
+  });
+});
+
+describe('lsp · the bundled fallback is declared, not guessed', () => {
+  it('expands the toolchain and the embedded asset', () => {
+    // The real Python declaration: `{toolchain} -u {embedded:pyrightServer.py}`.
+    const spec = resolveBundledFallback(
+      {
+        languageId: 'python',
+        serverName: 'nolanguage-py',
+        command: ['{toolchain}', '-u', '{embedded:pyrightServer.py}'],
+        sourceDir: 'python',
+      },
+      { languageId: 'python', toolchain: 'C:/Python313/python.exe' },
+    );
+    expect(spec).toBeDefined();
+    expect(spec!.command).toBe('C:/Python313/python.exe');
+    expect(spec!.args[0]).toBe('-u');
+    // Source run: the asset resolves under src/python, not from the exe.
+    expect(spec!.args[1]).toMatch(/pyrightServer\.py$/);
+    expect(spec!.languageId).toBe('python');
+    expect(spec!.serverName).toBe('nolanguage-py');
+  });
+
+  it('refuses to launch without a toolchain', () => {
+    // A literal `{toolchain}` left in the command would surface as a confusing
+    // ENOENT much later; undefined here becomes the manifest's degradedNote.
+    const spec = resolveBundledFallback(
+      { command: ['{toolchain}', '-u', '{embedded:pyrightServer.py}'], sourceDir: 'python' },
+      { languageId: 'python' },
+    );
+    expect(spec).toBeUndefined();
+  });
+
+  it('refuses an asset that does not exist', () => {
+    const spec = resolveBundledFallback(
+      { command: ['{toolchain}', '{embedded:no_such_asset.py}'], sourceDir: 'python' },
+      { languageId: 'python', toolchain: 'python' },
+    );
+    expect(spec).toBeUndefined();
+  });
+
+  it('defaults the ids to the asking language', () => {
+    const spec = resolveBundledFallback({ command: ['my-server', '--stdio'] }, { languageId: 'cobol' });
+    expect(spec!.languageId).toBe('cobol');
+    expect(spec!.serverName).toBe('cobol');
+    expect(spec!.args).toEqual(['--stdio']);
+  });
+
+  it('passes a plain command through untouched', () => {
+    const spec = resolveBundledFallback({ command: ['/opt/x/server'] }, { languageId: 'go', toolchain: '/usr/bin/go' });
+    expect(spec!.command).toBe('/opt/x/server');
+    expect(spec!.args).toEqual([]);
+  });
+
+  it('returns undefined for a malformed declaration instead of throwing', () => {
+    expect(resolveBundledFallback(undefined, { languageId: 'go' })).toBeUndefined();
+    expect(resolveBundledFallback({ command: [] }, { languageId: 'go' })).toBeUndefined();
+    // A broken manifest must degrade to "no server", never crash the slot.
+    expect(resolveBundledFallback({ command: [''] }, { languageId: 'go' })).toBeUndefined();
   });
 });

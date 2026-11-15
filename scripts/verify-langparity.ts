@@ -68,9 +68,10 @@ const BLOCK_FIELDS: Record<string, readonly string[]> = {
  * number goes **up**. Lowering a number here is the goal of every cleanup.
  *
  * The numbers are the measured baseline when this gate was written (49 in
- * total). Two comparison sites were fixed on the way in — coverage no longer
- * checks `language !== 'python'` (it reads `run.coverage`), and the interpreter
- * list no longer prefixes labels with a language name.
+ * total, now 48). Three sites were fixed on the way in — coverage no longer
+ * checks `language !== 'python'` (it reads `run.coverage`), the interpreter list
+ * no longer prefixes labels with a language name, and the bundled LSP fallback
+ * moved from a Python-only helper into the manifest.
  */
 const LITERAL_BUDGET: Record<string, number> = {
   // Demo workspace content: one starter file per language. Data, not logic —
@@ -88,7 +89,9 @@ const LITERAL_BUDGET: Record<string, number> = {
   'src/panel/handlers/migration.ts': 4,
   'src/panel/pythonTraffic.ts': 1,
   'src/panel/coverage.ts': 1,
-  'src/panel/WorkspaceService.ts': 1,
+  // WorkspaceService dropped off this list: the Python fallback moved into the
+  // manifest, taking `stubInterpreter()` (`process.env.PYTHON_BIN ?? 'python'`)
+  // with it.
 };
 
 interface Plugin {
@@ -205,7 +208,12 @@ function main(): void {
     }
     for (const file of files) {
       const rel = file.slice(ROOT.length + 1).replace(/\\/g, '/');
-      const text = readFileSync(file, 'utf8');
+      // Strip comments before counting: a doc comment that mentions a language
+      // ("e.g. \"python\" for src/python/...") couples nothing. Counting it
+      // makes the ratchet punish documentation, which is backwards.
+      const text = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
       let n = 0;
       for (const lang of LANGUAGE_NAMES) {
         // A bare literal (data or comparison) — the ratchet counts both.

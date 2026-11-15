@@ -17,6 +17,9 @@
  *    in `if/else` fields here.
  */
 import type { RunConfig, ScaffoldSpec } from '../runtimes/types.js';
+import type { BundledFallbackSpec } from '../lsp/bundledFallback.js';
+
+export type { BundledFallbackSpec };
 
 export type TrustSandbox = 'none' | 'subprocess' | 'wasm';
 
@@ -77,10 +80,16 @@ export interface LspSpec {
   eager?: boolean;
   /**
    * A server the *platform* ships for this language when discovery fails.
-   * `"stub"` = the bundled minimal Python server in `src/python/pyrightServer.py`.
-   * Named capability, not a language check.
+   *
+   * The plugin declares the command, so the engine never has to know which
+   * language a fallback belongs to. Placeholders: `{toolchain}` (the resolved
+   * interpreter/compiler) and `{embedded:<key>}` (a file inside the executable,
+   * or `src/<sourceDir>/<key>` in a source run).
+   *
+   * It used to be the literal `"stub"`, resolved by a Python-only function in
+   * the engine — a named capability that was a language check underneath.
    */
-  bundledFallback?: 'stub';
+  bundledFallback?: BundledFallbackSpec;
 }
 
 export interface DapSpec {
@@ -361,7 +370,24 @@ export function validateManifest(raw: unknown): ManifestValidation {
   }
 
   const lsp = m.lsp as Record<string, unknown> | undefined;
-  if (lsp) validateDiscovery(lsp.discovery, 'lsp.discovery', add);
+  if (lsp) {
+    validateDiscovery(lsp.discovery, 'lsp.discovery', add);
+    const fb = lsp.bundledFallback;
+    if (fb !== undefined) {
+      if (!fb || typeof fb !== 'object' || Array.isArray(fb)) {
+        add('lsp.bundledFallback', 'must be an object with a `command` array (the old "stub" string is gone)');
+      } else {
+        const cmd = (fb as Record<string, unknown>).command;
+        if (!Array.isArray(cmd) || !cmd.length || cmd.some((x) => typeof x !== 'string' || !x)) {
+          add('lsp.bundledFallback.command', 'must be a non-empty array of strings');
+        }
+        const dir = (fb as Record<string, unknown>).sourceDir;
+        if (dir !== undefined && (typeof dir !== 'string' || !dir)) {
+          add('lsp.bundledFallback.sourceDir', 'must be a non-empty string when present');
+        }
+      }
+    }
+  }
 
   const debug = m.debug as Record<string, unknown> | undefined;
   if (debug !== undefined) {

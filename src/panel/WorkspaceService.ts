@@ -26,7 +26,6 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   LspClient,
-  fallbackServerSpec,
   fileUri,
   type CompletionItem,
   type Hover,
@@ -38,6 +37,7 @@ import { LanguageRegistry, type RegistryChange, type RegistryRoot } from '../lan
 import { RunnerFactory } from '../langs/RunnerFactory.js';
 import { defaultRuntimeRegistry } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
+import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
 import { ProfileManager, parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
@@ -183,10 +183,6 @@ export interface PreviewResult {
  * fact about the language being edited. It is consulted only when a manifest
  * declared `bundledFallback: "stub"` **and** its own toolchain was not found.
  */
-function stubInterpreter(): string {
-  return process.env.PYTHON_BIN ?? 'python';
-}
-
 /** LSP severity numbers, as the editor renders them. */
 const SEVERITY_NAMES: Record<number, string> = {
   1: 'error',
@@ -593,9 +589,20 @@ export class WorkspaceService {
           args: spec.args ?? [],
         };
         note = `${launch.serverName} (${found.source})`;
-      } else if (spec.bundledFallback === 'stub') {
-        launch = fallbackServerSpec(slot.toolchain ?? stubInterpreter());
-        note = 'bundled stub server';
+      } else if (spec.bundledFallback) {
+        // The plugin declares the command; this layer only expands placeholders.
+        // It used to call a Python-only `fallbackServerSpec()` here, so any
+        // language that declared a fallback silently got Python's server.
+        const toolchain = slot.toolchain ?? slot.manifest.run?.discovery?.commands?.[0];
+        const fallback = resolveBundledFallback(spec.bundledFallback, { languageId: slot.id, toolchain });
+        if (fallback) {
+          launch = fallback;
+          note = `bundled ${fallback.serverName}`;
+        } else {
+          slot.lspError = spec.degradedNote ?? `bundled fallback for "${slot.id}" could not be resolved`;
+          log.warn('Bundled language server unavailable', { language: slot.id });
+          return;
+        }
       } else {
         slot.lspError = spec.degradedNote ?? `${spec.serverName ?? 'language server'} not found`;
         log.warn('Language server unavailable — Check/completion disabled', {
