@@ -743,3 +743,80 @@ describe('lsp · the bundled fallback is declared, not guessed', () => {
     expect(resolveBundledFallback({ command: [''] }, { languageId: 'go' })).toBeUndefined();
   });
 });
+
+describe('interpreters · declared by the plugin, table only as fallback', () => {
+  let dir = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nlg-interp-'));
+    // A Kotlin-flavoured environment: the engine has no row for this language.
+    mkdirSync(join(dir, '.kvenv', 'bin'), { recursive: true });
+    writeFileSync(join(dir, '.kvenv', 'kvenv.cfg'), 'x\n');
+    writeFileSync(join(dir, '.kvenv', 'bin', 'kotlinc'), 'bin');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('lets a language the engine has never heard of discover its SDK', async () => {
+    const found = await discoverInterpreters(dir, 'kotlin', {
+      pathEnv: '',
+      probe: null,
+      home: dir,
+      spec: { envDirs: ['.kvenv'], marker: 'kvenv.cfg', envBins: ['bin/kotlinc'] },
+    });
+    expect(found.map((f) => f.source)).toEqual(['.kvenv']);
+    expect(found[0].kind).toBe('venv');
+  });
+
+  it('replaces the fallback table instead of merging with it', async () => {
+    // python has a table row that would find `.venv`; an explicit spec that
+    // declares nothing must win, otherwise "declared" is not authoritative.
+    mkdirSync(join(dir, '.venv', 'Scripts'), { recursive: true });
+    writeFileSync(join(dir, '.venv', 'pyvenv.cfg'), 'x\n');
+    writeFileSync(join(dir, '.venv', 'Scripts', 'python.exe'), 'MZ');
+    const found = await discoverInterpreters(dir, 'python', {
+      pathEnv: '',
+      probe: null,
+      home: dir,
+      spec: { envDirs: [], exeNames: [] },
+    });
+    expect(found).toEqual([]);
+  });
+
+  it('matches a recorded SDK name through the declared prefix', async () => {
+    const found = await discoverInterpreters(dir, 'kotlin', {
+      pathEnv: '',
+      home: dir,
+      probe: async () => '1.9.0',
+      sdkName: 'Kotlin 1.9.0',
+      spec: {
+        envDirs: ['.kvenv'],
+        marker: 'kvenv.cfg',
+        envBins: ['bin/kotlinc'],
+        sdkPrefix: 'Kotlin',
+      },
+    });
+    expect(found).toHaveLength(1);
+    // Only the prefix rule can match here: the directory is `.kvenv` and the
+    // binary is `kotlinc`, neither of which appears in "Kotlin 1.9.0".
+    expect(found[0].sdkMatch).toBe(true);
+  });
+
+  it('will not treat a directory as an environment without a marker', async () => {
+    // An empty marker would make `join(envDir, '')` the directory itself, which
+    // always exists — every listed dir would look like an environment.
+    const found = await discoverInterpreters(dir, 'kotlin', {
+      pathEnv: '',
+      probe: null,
+      home: dir,
+      spec: { envDirs: ['.kvenv'], envBins: ['bin/kotlinc'] },
+    });
+    expect(found).toEqual([]);
+  });
+
+  it('keeps the table working for plugins that declare nothing', async () => {
+    mkdirSync(join(dir, '.venv', 'Scripts'), { recursive: true });
+    writeFileSync(join(dir, '.venv', 'pyvenv.cfg'), 'x\n');
+    writeFileSync(join(dir, '.venv', 'Scripts', 'python.exe'), 'MZ');
+    const found = await discoverInterpreters(dir, 'python', { pathEnv: '', probe: null, home: dir });
+    expect(found.map((f) => f.source)).toEqual(['.venv']);
+  });
+});

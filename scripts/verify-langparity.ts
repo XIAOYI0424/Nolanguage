@@ -68,11 +68,14 @@ const BLOCK_FIELDS: Record<string, readonly string[]> = {
  * number goes **up**. Lowering a number here is the goal of every cleanup.
  *
  * The numbers are the measured baseline when this gate was written (49 in
- * total, now 43). Four sites were fixed on the way in — coverage no longer
+ * total, now 55). Four sites were fixed on the way in — coverage no longer
  * checks `language !== 'python'` (it reads `run.coverage`), the interpreter list
  * no longer prefixes labels with a language name, the bundled LSP fallback
  * moved from a Python-only helper into the manifest, and Python's server
  * discovery moved out of the generic client into `src/python/`.
+ *
+ * `src/langs` joined the scan with the interpreter work: the fallback table and
+ * a third copy of the extension map were living there uncounted.
  */
 const LITERAL_BUDGET: Record<string, number> = {
   // Demo workspace content: one starter file per language. Data, not logic —
@@ -91,6 +94,14 @@ const LITERAL_BUDGET: Record<string, number> = {
   'src/panel/handlers/migration.ts': 4,
   'src/panel/pythonTraffic.ts': 1,
   'src/panel/coverage.ts': 1,
+  // The fallback table itself: three keys, kept so plugins written before
+  // `run.interpreters` still get discovery. Built-ins no longer use it.
+  'src/langs/interpreters.ts': 3,
+  // A *third* copy of the extension -> language map (FsService has one,
+  // `file.extensions` in the manifests is the source of truth). This one exists
+  // to turn a PyCharm run configuration's file into a language id; it should be
+  // derived from the registry like the other two.
+  'src/langs/ideaImport.ts': 9,
   // WorkspaceService dropped off this list: the Python fallback moved into the
   // manifest, taking `stubInterpreter()` (`process.env.PYTHON_BIN ?? 'python'`)
   // with it.
@@ -199,9 +210,24 @@ function main(): void {
   }
   check('no core layer compares a language by name', comparisons.length === 0, comparisons.slice(0, 5).join(', ') || `${coreDirs.length} directories scanned`);
 
+  // ---- 3b. interpreter rules are declared, not inherited ------------------
+  // The engine keeps a fallback table for plugins written before
+  // `run.interpreters` existed. A built-in plugin has no such excuse: if it
+  // runs, it must say where its SDKs live, otherwise adding a language still
+  // means editing `src/langs/interpreters.ts`.
+  const runnable = plugins.filter((p) => p.manifest.run !== undefined);
+  const undeclared = runnable
+    .filter((p) => (p.manifest.run as Record<string, unknown>).interpreters === undefined)
+    .map((p) => p.id);
+  check(
+    'every runnable plugin declares run.interpreters',
+    undeclared.length === 0,
+    undeclared.length ? `relying on the engine table: ${undeclared.join(', ')}` : `${runnable.length} plugin(s)`,
+  );
+
   // ---- 4. literal ratchet ------------------------------------------------
   const counts = new Map<string, number>();
-  for (const dir of ['src/panel', 'src/lsp']) {
+  for (const dir of ['src/panel', 'src/lsp', 'src/langs']) {
     let files: string[] = [];
     try {
       files = walk(join(ROOT, dir));

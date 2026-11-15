@@ -51,7 +51,11 @@ export async function handleInterpreters(
   const language = asLanguage(msg.language, workspace);
   const pinned = workspace.toolchains()[language];
   try {
+    // The plugin's own rules win; the engine's table is only a fallback for
+    // plugins written before `run.interpreters` existed.
+    const declared = workspace.manifests().find((m) => m.id === language)?.run?.interpreters;
     const candidates = await discoverInterpreters(workspace.root, language, {
+      spec: declared,
       sdkName: typeof msg.sdkName === 'string' && msg.sdkName ? msg.sdkName : undefined,
     });
     const picked = pickInterpreter(candidates, { pinned });

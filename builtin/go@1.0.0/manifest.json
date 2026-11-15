@@ -139,7 +139,28 @@
     ],
     "command": [
       "{toolchain}"
-    ]
+    ],
+    "interpreters": {
+      "envDirs": [],
+      "envBins": [],
+      "marker": "go.mod",
+      "exeNames": [
+        "go.exe",
+        "go"
+      ],
+      "versionDirs": [
+        "go/bin",
+        "scoop/apps/go/current/bin"
+      ],
+      "versionBins": [
+        "go.exe",
+        "go"
+      ],
+      "versionArgs": [
+        "version"
+      ],
+      "sdkPrefix": "Go"
+    }
   },
   "profiler": {
     "adapter": "pprof",

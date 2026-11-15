@@ -254,6 +254,29 @@ npm run install:app -- -DryRun    # 只打印计划
 效果：`src/lsp/LspClient.ts` 的语言字面量 **6 → 1**，剩下的那一个是 `contentFormat: ['markdown', 'plaintext']`——LSP 的 MIME 类型，不是语言判断。ratchet 总预算 48 → **43**。
 
 验证覆盖：`verify:stage3`（源码模式跑真 LSP）与打包冒烟（`python LSP is ready — nolanguage-py`）都通过，说明搬移在两种模式下都成立。
+### 解释器发现：插件声明 `run.interpreters`，引擎表只作兜底
+
+`INTERPRETER_SPECS` 是引擎里的硬编码表（8 个字段 × 3 种语言）。它和 manifest 的 `run.discovery` **不是**重复——一个答「该跑哪个二进制」，一个答「机器上装了哪些 SDK/环境」（venv、conda、pyenv/nvm/volta + 版本探测）。但它是唯一还留在代码里的能力块，后果是**第三方语言插件的 SDK 选择器永远是空的**。
+
+按「声明 + 兜底」改造（沿用 `bundledFallback` 的范式）：
+
+- manifest 新增 `run.interpreters`，**每个字段都可选**——只做 PATH 发现的插件写个 `exeNames` 就够了；`normalizeInterpreterSpec()` 负责补默认值，循环永远拿到完整 spec。
+- `discoverInterpreters()` 取 `opts.spec ?? INTERPRETER_SPECS[languageId]`：**声明优先、表兜底**。测试锁定了「声明是权威的，不与表合并」——给 python 声明一个空 spec，`.venv` 就不再被发现。
+- 三个内置插件（python/js/go）把数据搬进各自 manifest。
+
+顺手修掉的三处问题：
+
+1. **循环里最后一处硬编码**：`sdk.includes(\`python ${c.version}\`)`（PyCharm 把 SDK 命名成 "Python 3.11.9"）。改成 spec 的 `sdkPrefix` 字段。
+2. **大小写 bug**：`sdk` 先 `toLowerCase()`，而前缀原样拼进去——`"Kotlin 1.9.0"` 永远匹配不上 `"kotlin 1.9.0"`。旧代码能跑是因为 `python` 恰好是小写。新测试一上来就抓到了。
+3. **空 marker 的隐患**：`join(envDir, '')` 就是目录本身，`existsSync` 恒真——插件只写 `envDirs` 不写 `marker`，会把任意列出的目录当成环境。现在没有 marker 就跳过整步。
+
+门禁 `verify:langparity` 补两条（6 项检查）：
+
+- **每个可运行插件必须声明 `run.interpreters`**——内置插件没有资格依赖兜底表，否则加语言仍要改 TS。
+- **`src/langs` 纳入字面量统计**。之前只统计 `src/panel` + `src/lsp`，而解释器表和**第三份**扩展名映射（`ideaImport.ts`，9 处）正好住在 `src/langs` 里，属于规则空档。预算 43 → **55**（新增 `interpreters.ts` 3 处兜底表键 + `ideaImport.ts` 9 处扩展名映射，都记了成因）。
+
+测试 +5 组（共 **83**）：未知语言靠声明即可发现、声明替换而非合并兜底表、`sdkPrefix` 匹配、无 marker 不误判、无声明时表仍可用。
+
 
 
 

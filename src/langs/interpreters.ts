@@ -18,6 +18,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, delimiter, join } from 'node:path';
 import { homedir } from 'node:os';
 import { probeVersion } from './discover.js';
+import type { InterpretersSpec } from '../runtimes/types.js';
 
 export type InterpreterKind = 'venv' | 'conda' | 'version-manager' | 'path' | 'sdk';
 
@@ -38,12 +39,19 @@ export interface InterpreterSpec {
   envListFile?: string;
   /** Arguments that print a version. */
   versionArgs: string[];
+  /** How an IDE prefixes this SDK's name (`Python 3.11.9`, `Go 1.21`). */
+  sdkPrefix?: string;
 }
 
 /**
- * Per-language discovery data.
+ * The engine's fallback table, for plugins that do not declare
+ * `run.interpreters`.
  *
- * Adding a language means adding a row here, not editing the loop below.
+ * New languages should declare the block in their manifest — that is what lets
+ * a third-party plugin offer the SDK picker at all. These three rows exist so
+ * the built-ins keep working if a manifest is missing the block, and so a
+ * hand-written plugin written before the field existed does not silently lose
+ * discovery.
  */
 export const INTERPRETER_SPECS: Record<string, InterpreterSpec> = {
   python: {
@@ -76,6 +84,27 @@ export const INTERPRETER_SPECS: Record<string, InterpreterSpec> = {
   },
 };
 
+/**
+ * Fill in the defaults for a declared `run.interpreters` block.
+ *
+ * Every field is optional in the manifest so a plugin can declare only what it
+ * needs; the loop below always sees a complete spec.
+ */
+export function normalizeInterpreterSpec(partial: InterpretersSpec | undefined): InterpreterSpec | undefined {
+  if (!partial) return undefined;
+  return {
+    envDirs: partial.envDirs ?? [],
+    envBins: partial.envBins ?? [],
+    marker: partial.marker ?? '',
+    exeNames: partial.exeNames ?? [],
+    versionDirs: partial.versionDirs ?? [],
+    versionBins: partial.versionBins ?? [],
+    envListFile: partial.envListFile,
+    versionArgs: partial.versionArgs ?? ['--version'],
+    sdkPrefix: partial.sdkPrefix,
+  };
+}
+
 export interface InterpreterCandidate {
   /** Absolute executable path — the identity used for pinning. */
   path: string;
@@ -102,6 +131,11 @@ export interface DiscoverInterpretersOptions {
   maxProbe?: number;
   /** Whether a path is a file. Injected so tests need no real binaries. */
   isFile?: (p: string) => boolean;
+  /**
+   * The plugin's declared `run.interpreters`. Wins over the engine's fallback
+   * table; absent means "use the table" (built-ins written before the field).
+   */
+  spec?: InterpretersSpec;
 }
 
 const KIND_ORDER: Record<InterpreterKind, number> = {
@@ -154,7 +188,8 @@ export async function discoverInterpreters(
   languageId: string,
   opts: DiscoverInterpretersOptions = {},
 ): Promise<InterpreterCandidate[]> {
-  const spec = INTERPRETER_SPECS[languageId];
+  // Declared beats fallback: a plugin that ships its own rules is authoritative.
+  const spec = normalizeInterpreterSpec(opts.spec) ?? INTERPRETER_SPECS[languageId];
   if (!spec) return [];
   const home = opts.home ?? homedir();
   const isFile = opts.isFile ?? ((p: string) => existsSync(p) && fileSize(p) > 0);
@@ -168,8 +203,10 @@ export async function discoverInterpreters(
     found.push({ path, label: '', kind, source });
   };
 
-  // 1. Project-local environments (`.venv`, `venv`, …).
-  for (const dir of spec.envDirs) {
+  // 1. Project-local environments (`.venv`, `venv`, …). Without a marker file
+  // there is no way to tell an environment from an ordinary directory, so the
+  // whole step is skipped rather than treating every entry as one.
+  for (const dir of spec.marker ? spec.envDirs : []) {
     const envDir = join(rootDir, dir);
     if (!existsSync(join(envDir, spec.marker))) continue;
     for (const bin of spec.envBins) {
@@ -253,9 +290,16 @@ export async function discoverInterpreters(
   for (const c of found) {
     const dirName = basename(join(c.path, '..', '..'));
     if (sdk) {
+      // The prefix comes from the spec: PyCharm records "Python 3.11.9",
+      // "Go 1.21", "Node.js 20" — the engine has no business knowing which.
+      // `sdk` is lower-cased above; the prefix must be too, or "Kotlin 1.9.0"
+      // never matches "kotlin 1.9.0". The old literal was `python`, which
+      // happened to already be lower case.
+      const named =
+        spec.sdkPrefix && c.version ? `${spec.sdkPrefix} ${c.version}`.toLowerCase() : undefined;
       c.sdkMatch =
         sdk.includes(dirName.toLowerCase()) ||
-        sdk.includes(c.version ? `python ${c.version}` : '\u0000') ||
+        (named ? sdk.includes(named) : false) ||
         sdk.includes(basename(c.path).replace(/\.exe$/i, '').toLowerCase());
     }
     // The list is already scoped to one language, so the label carries only the

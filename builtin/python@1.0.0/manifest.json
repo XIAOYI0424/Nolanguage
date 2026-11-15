@@ -128,7 +128,41 @@
     "versionArgs": [
       "-V"
     ],
-    "coverage": true
+    "coverage": true,
+    "interpreters": {
+      "envDirs": [
+        ".venv",
+        "venv",
+        "env",
+        ".env"
+      ],
+      "envBins": [
+        "Scripts/python.exe",
+        "bin/python3",
+        "bin/python"
+      ],
+      "marker": "pyvenv.cfg",
+      "exeNames": [
+        "python.exe",
+        "python3.exe",
+        "python",
+        "python3"
+      ],
+      "versionDirs": [
+        ".pyenv/pyenv-win/versions",
+        ".pyenv/versions"
+      ],
+      "versionBins": [
+        "python.exe",
+        "bin/python3",
+        "bin/python"
+      ],
+      "envListFile": ".conda/environments.txt",
+      "versionArgs": [
+        "--version"
+      ],
+      "sdkPrefix": "Python"
+    }
   },
   "profiler": {
     "adapter": "cProfile",

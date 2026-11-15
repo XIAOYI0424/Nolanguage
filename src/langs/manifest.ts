@@ -285,6 +285,28 @@ function validateDiscovery(
  * no third-party runtime dependencies, and the rule set is small enough that a
  * precise, human-readable message per field is cheaper than a generic one.
  */
+/** `run.interpreters`: every field optional, but the type has to be right. */
+function validateInterpreters(value: unknown, field: string, add: (f: string, m: string) => void): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    add(field, 'must be an object');
+    return;
+  }
+  const spec = value as Record<string, unknown>;
+  for (const key of ['envDirs', 'envBins', 'exeNames', 'versionDirs', 'versionBins', 'versionArgs']) {
+    const v = spec[key];
+    if (v !== undefined && (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || !x))) {
+      add(`${field}.${key}`, 'must be an array of non-empty strings');
+    }
+  }
+  for (const key of ['marker', 'envListFile', 'sdkPrefix']) {
+    const v = spec[key];
+    if (v !== undefined && (typeof v !== 'string' || !v)) {
+      add(`${field}.${key}`, 'must be a non-empty string when present');
+    }
+  }
+}
+
 export function validateManifest(raw: unknown): ManifestValidation {
   const issues: ValidationIssue[] = [];
   const add = (field: string, message: string): void => {
@@ -367,6 +389,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
       add('run.timeoutMs', 'must be a positive number');
     }
     validateDiscovery(run.discovery, 'run.discovery', add);
+    validateInterpreters(run.interpreters, 'run.interpreters', add);
   }
 
   const lsp = m.lsp as Record<string, unknown> | undefined;

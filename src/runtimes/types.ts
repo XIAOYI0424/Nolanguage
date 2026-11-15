@@ -81,6 +81,41 @@ export interface BinaryDiscoverySpec {
 }
 
 /** A plugin's `manifest.run` block, validated and ready to drive a runtime. */
+/**
+ * How to find SDKs and environments for one language.
+ *
+ * Declared by the plugin (`run.interpreters`) so a third-party language can
+ * offer the SDK picker without an engine change. Every field is optional: a
+ * plugin that only wants PATH discovery declares `exeNames` and nothing else.
+ *
+ * This is *not* `run.discovery`. That one answers "which binary do I run";
+ * this one answers "which environments exist on this machine" — venv, conda,
+ * pyenv/nvm/volta installs, each with a version probe.
+ */
+export interface InterpretersSpec {
+  /** Project-relative directory names that hold a self-contained environment. */
+  envDirs?: string[];
+  /** Executable paths inside an environment directory (first that exists wins). */
+  envBins?: string[];
+  /** File whose presence proves the directory really is an environment. */
+  marker?: string;
+  /** Executable names to look for on PATH. */
+  exeNames?: string[];
+  /** Version-manager roots, relative to the user's home. */
+  versionDirs?: string[];
+  /** Executable paths inside a version-manager install. */
+  versionBins?: string[];
+  /** File listing environments (conda), relative to the user's home. */
+  envListFile?: string;
+  /** Arguments that print a version. */
+  versionArgs?: string[];
+  /**
+   * Prefix an IDE uses when naming the SDK (`"Python 3.11.9"`, `"Go 1.21"`).
+   * Used to match a project's recorded SDK name against a discovered candidate.
+   */
+  sdkPrefix?: string;
+}
+
 export interface RunConfig {
   /** Runtime id — `template` | `repl-session` | `directory-session` | `inline-vm` | `script-host`. */
   mode: string;
@@ -117,6 +152,8 @@ export interface RunConfig {
   vmTimeoutMs?: number;
   /** `script-host`: plugin-relative entry point. */
   script?: string;
+  /** Where to look for SDKs/environments. Falls back to the engine's table. */
+  interpreters?: InterpretersSpec;
   /**
    * `script-host`: optional OS-level memory cap as a human string
    * (`"256MB"`, `"1GB"`). Overridden by `NOLANGUAGE_SCRIPT_HOST_MEM_LIMIT`.

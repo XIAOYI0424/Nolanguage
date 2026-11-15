@@ -87,6 +87,27 @@
     ],
     "sourceExt": ".js",
     "timeoutMs": 5000,
-    "vmTimeoutMs": 5000
+    "vmTimeoutMs": 5000,
+    "interpreters": {
+      "envDirs": [],
+      "envBins": [],
+      "marker": "package.json",
+      "exeNames": [
+        "node.exe",
+        "node"
+      ],
+      "versionDirs": [
+        ".nvm/versions/node",
+        ".volta/tools/image/node"
+      ],
+      "versionBins": [
+        "node.exe",
+        "bin/node"
+      ],
+      "versionArgs": [
+        "--version"
+      ],
+      "sdkPrefix": "Node.js"
+    }
   }
 }
