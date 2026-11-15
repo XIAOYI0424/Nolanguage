@@ -70,6 +70,7 @@ const DATED = [
   'docs/评估_20261107.md',
   'docs/评估_20261110.md',
   'docs/LSP能力测试清单_20261114.md',
+  'docs/评估_20261115.md',
 ];
 
 const live = new Set(LIVE);
