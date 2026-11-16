@@ -495,10 +495,59 @@ async function main(): Promise<void> {
       const diag = await entry.waitForDiagnostics(uri, 30_000);
       check('jdtls: publishDiagnostics reaches the buffer', diag.source === 'lsp', `${diag.items.length} item(s), source=${diag.source}`);
 
+      // ---- the degradation path, for real ----
+      // A *second* root with no warm server: the first keystroke arrives while
+      // jdtls is still handshaking, so the 500 ms budget must answer from the
+      // lexical fallback instead of blocking on the JVM.
+      const coldRoot = join(SANDBOX, 'jproject-cold');
+      mkdirSync(join(coldRoot, 'src', 'main', 'java', 'demo'), { recursive: true });
+      writeFileSync(join(coldRoot, 'pom.xml'), '<project><modelVersion>4.0.0</modelVersion><groupId>d</groupId><artifactId>d</artifactId><version>1.0.0</version></project>\n');
+      const coldFile = join(coldRoot, 'src', 'main', 'java', 'demo', 'App.java');
+      writeFileSync(coldFile, code);
+      const coldEntry = manager.acquire('java', coldRoot)!;
+      const coldUri = pathToFileURL(coldFile).href;
+      await coldEntry.openDocument(coldUri, code, 'java');
+
+      const coldT = Date.now();
+      const coldItems = await coldEntry.completion(coldUri, { line, character });
+      const coldMs = Date.now() - coldT;
+      const coldLabels = coldItems.map((i) => i.label);
+      check('jdtls: the first keystroke on a cold root does not block', coldMs < 1500, `${coldMs} ms, ${coldItems.length} item(s)`);
+      check(
+        'jdtls: it is answered by the fallback, not by jdtls',
+        coldItems.length > 0 && !coldLabels.some((l) => /^add\(/.test(l)),
+        coldLabels.slice(0, 6).join(', ') || 'nothing',
+      );
+      // `initialize` completing is not the same as "usable": jdtls still has to
+      // import the project, and until it can answer inside the budget every
+      // request keeps getting the fallback. Poll until the real members arrive
+      // and report when that happens — that number is what the budget is for.
+      const coldReady = await coldEntry.waitUntilReady(240_000);
+      let warmLabels: string[] = [];
+      const warmDeadline = Date.now() + 120_000;
+      while (coldReady && Date.now() < warmDeadline) {
+        warmLabels = (await coldEntry.completion(coldUri, { line, character })).map((i) => i.label);
+        if (warmLabels.some((l) => /^add\(/.test(l))) break;
+        await sleep(1000);
+      }
+      check(
+        'jdtls: once the server is up the real members take over',
+        warmLabels.some((l) => /^add\(/.test(l)),
+        `${warmLabels.length} item(s) ${Date.now() - coldT} ms after the first keystroke`,
+      );
+
       const same = manager.acquire('java', join(jProject, 'src'))!;
       check('jdtls: a nested root reuses the reactor server', same === entry);
-      const stats = manager.stats();
-      check('jdtls: one server for one root', stats.live === 1, JSON.stringify(stats));
+      // One server *per root*: the cold root added a second project, so a global
+      // `live === 1` would be wrong — what matters is that each root has exactly
+      // one entry, which is the pooling rule.
+      const perRoot = new Map<string, number>();
+      for (const e of manager.entries()) perRoot.set(e.root, (perRoot.get(e.root) ?? 0) + 1);
+      check(
+        'jdtls: one server per project root',
+        [...perRoot.values()].every((n) => n === 1) && perRoot.size === 2,
+        JSON.stringify([...perRoot.entries()].map(([root, n]) => `${root.split(/[\\/]/).pop()}=${n}`)),
+      );
 
       console.log(
         `\n  timings: initialize ${readyMs} ms · first completion ${firstMs} ms · import ${importMs} ms · warm ${warmMs} ms`,

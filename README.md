@@ -133,7 +133,7 @@ Nolanguage.exe --dump-plugins
 
 ```bash
 npm run ci:pure          # CI 快门：typecheck + 单测 + 纯逻辑套件（约 15 秒）
-npm run verify           # 50 套件（真进程，含打包 exe smoke + 打包 exe 的 MCP 面板 + 语言一致性门禁 + 池化语言服务管理器）；断言总数以本次输出为准
+npm run verify           # 52 套件（真进程，含打包 exe smoke + 打包 exe 的 MCP 面板 + 语言一致性门禁 + 池化语言服务管理器）；断言总数以本次输出为准
 npm test                 # vitest 单测（2 个文件 38 用例；丢了文件会失败）
 npm run typecheck        # tsc --noEmit，0 错误
 npm run verify:sidecar   # 校验 dist 与 Tauri sidecar 的 sha256 一致

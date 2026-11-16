@@ -140,10 +140,13 @@ export class ManagedLsp extends EventEmitter implements LspLike {
     this.budgetMs = deps.plugin.lspConfig(deps.root)?.firstRequestBudgetMs ?? 500;
     this.navBudgetMs = deps.plugin.lspConfig(deps.root)?.navBudgetMs ?? 5000;
     // A dead server must not be reported as a live one by the status bar.
-    this.on('serverExit', () => {
+    this.on('serverExit', (code: number | null) => {
       this.client = undefined;
-      this.info.started = false;
-      this.startError = 'language server exited';
+      // `info` is what `describe()` returns, and the status bar reads it: a
+      // server that died would otherwise report "not running" with no reason,
+      // which is indistinguishable from "never configured".
+      this.startError = `language server exited (code ${String(code)})`;
+      this.info = { ...this.info, started: false, error: this.startError };
       this.retryAt = Date.now() + RETRY_BACKOFF_MS;
     });
   }

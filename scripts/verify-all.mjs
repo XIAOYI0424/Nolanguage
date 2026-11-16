@@ -116,6 +116,12 @@ const stages = [
   // latest-only cancellation, signature invalidation, dirty-file sync, and the
   // lexical fallback — against a fake server, plus real jdtls when installed.
   { name: 'LSP · manager (pool, scheduler, cache, fallback, jdtls)', script: 'scripts/verify-lsp-manager.ts' },
+  // Protocol behaviour against a server that can hang, crash and log every
+  // method: burst/cancel, dedupe, timeout, crash, capability contract.
+  { name: 'LSP · protocol (burst, dedupe, timeout, crash, caps)', script: 'scripts/verify-lsp-protocol.ts' },
+  // One fixed fixture per language: completion must contain a member that has to
+  // be there, hover a type signature, diagnostics the server's own wording.
+  { name: 'LSP · semantics baseline (completion, hover, diagnostics)', script: 'scripts/verify-lsp-semantics.ts' },
   // Phase 6: the DAP runtime — a real framed-JSON-RPC session against a mock
   // adapter, degradation when no adapter is installed, and the debug contract.
   { name: 'Phase 6 · DAP runtime (mock adapter + degradation)', script: 'scripts/verify-dap.ts' },

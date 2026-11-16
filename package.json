@@ -79,7 +79,9 @@
     "verify:langs-real": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-langs-real.ts",
     "verify:lang-plugin": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lang-plugin.ts",
     "verify:server-install": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-server-install.ts",
-    "verify:lsp-manager": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-manager.ts"
+    "verify:lsp-manager": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-manager.ts",
+    "verify:lsp-protocol": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-protocol.ts",
+    "verify:lsp-semantics": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-semantics.ts"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.3",

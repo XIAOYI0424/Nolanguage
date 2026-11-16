@@ -30,6 +30,17 @@ const COMPLETION_DELAY = Number(arg('completion-delay', '0'));
 const ITEMS = arg('items', 'alpha,beta,gamma').split(',').filter(Boolean);
 const DIAGNOSTICS = flag('diagnostics');
 const FAIL_START = flag('fail-start');
+/** Never answer these methods: the client must time out and degrade. */
+const argsOf = (name) => {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) if (argv[i] === `--${name}` && i + 1 < argv.length) out.push(argv[i + 1]);
+  return out;
+};
+const HANG = new Set(argsOf('hang'));
+/** Exit the moment this method arrives: simulates a server dying mid-request. */
+const DIE_ON = arg('die-on', '');
+/** Record the initialize params, so a test can prove options were forwarded. */
+const LOG_INIT = flag('log-init');
 
 if (LOG) writeFileSync(LOG, '');
 const log = (method) => {
@@ -57,8 +68,14 @@ const fail = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, me
 
 function handle(msg) {
   log(msg.method ?? `response:${msg.id}`);
+  if (DIE_ON && msg.method === DIE_ON) {
+    // Exit without answering: the client is left holding a promise whose pipe is
+    // gone, which is exactly the crash shape that used to take the editor down.
+    process.exit(7);
+  }
   switch (msg.method) {
     case 'initialize': {
+      if (LOG_INIT) log(`initialize-options:${JSON.stringify(msg.params?.initializationOptions ?? null)}`);
       const capabilities = {
         completionProvider: { triggerCharacters: ['.'] },
         hoverProvider: true,
@@ -118,6 +135,11 @@ function handle(msg) {
     case 'textDocument/didChange':
       return;
     case 'textDocument/completion': {
+      if (HANG.has('textDocument/completion')) {
+        // Deliberately never answers and never clears: the request stays in
+        // flight until the caller's budget expires.
+        return;
+      }
       const timer = setTimeout(() => {
         pending.delete(msg.id);
         reply(
@@ -132,6 +154,7 @@ function handle(msg) {
       reply(msg.id, { contents: { value: `hover from fake-lsp (initialized=${initialized})` } });
       return;
     case 'textDocument/definition':
+      if (HANG.has('textDocument/definition')) return;
       reply(msg.id, [
         { uri: msg.params?.textDocument?.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } },
       ]);

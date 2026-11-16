@@ -108,6 +108,11 @@ export async function startSlotLsp(deps: LaunchDeps, slot: LaunchSlot): Promise<
         command: found.bin,
         args: spec.args ?? [],
         ...(env ? { env } : {}),
+        // The manifest field existed but nothing read it, so a plugin could
+        // declare `initializationOptions` and have them silently dropped. That
+        // is how a server's tuning (rust-analyzer's `cachePriming`, a formatter
+        // profile) becomes unreachable from a manifest.
+        ...(spec.initializationOptions ? { initializationOptions: spec.initializationOptions } : {}),
       };
       note = `${launch.serverName} (${found.source})`;
     } else if (spec.bundledFallback) {

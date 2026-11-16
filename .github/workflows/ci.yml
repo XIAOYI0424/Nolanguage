@@ -116,6 +116,16 @@ jobs:
       - name: Verify the pooled LSP manager
         run: npm run verify:lsp-manager
 
+      # Deterministic and server-independent: the fake server can hang, crash and
+      # log every method, so these run on a runner with nothing installed.
+      - name: Verify LSP protocol behaviour
+        run: npm run verify:lsp-protocol
+
+      # SKIPs any language whose server is absent; on a bare runner that is all
+      # of them, which is still a useful signal (the suite must not fail).
+      - name: Verify LSP semantics baseline
+        run: npm run verify:lsp-semantics
+
       # The whole regression: kernel, panel, Python/Go loops, baseline,
       # extension host, explorer, WebView host, PyCharm shell, Dev Panel DOM,
       # packaged-exe smoke. The pure suites run again here on purpose — they are

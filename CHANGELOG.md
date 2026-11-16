@@ -75,6 +75,46 @@ PASS  the reply names the command it ran  — node.exe -e console.log(...) reque
 
 顺带印证了一个设计选择：日志里 javascript 的工具链被解析成 `Nolanguage.exe` 自己（exe 就是 Node 运行时），所以 JS 的安装命令必须是 `npm install` 而不是 `{toolchain} install` —— 后者会变成 `Nolanguage.exe install <pkg>`。
 
+### LSP 协议与语义基线：把「能跑」拆成「行为对」和「结果对」
+
+启动耗时测完只说明服务器答应了，没说明它答得对。这一轮补三组测试，并把过程中发现的两处漏接修掉。
+
+**`verify:lsp-protocol`（20 项，不依赖任何真实服务器）。** 假服务器现在可以对指定方法**永不回答**（`--hang`）、在收到指定方法时**直接退出**（`--die-on`）、把 `initialize` 的 options 写进日志（`--log-init`）。于是每条断言都是关于管理器的决策，而不是某个服务器的脾气：
+
+| 场景 | 实测 |
+|---|---|
+| 连击 5 次补全 | 5 个请求全部到达、4 个被 `$/cancelRequest` 取消、1 个带结果 |
+| 3 次相同定义 | 1 次往返 |
+| 补全永不回答 | **407 ms** 返回兜底（预算 400），不挂起 |
+| 显式动作永不回答 | `unsupported: timed out`，**309 ms** |
+| 请求途中服务器退出 | 请求 **12 ms** 落定、进程存活、条目报 `exited (code 7)`、后续走兜底、**不按请求重启** |
+| 能力契约 | 声明了就能答；`documentFormattingProvider: false` → `does not advertise format` 而不是空列表 |
+
+其中一条是**记录现状而不是断言好**：产品**没有发送侧 debounce**。每次触发都发请求，客户端先用本地 L1 列表顶上，管理器取消上一个。「5 请求 / 4 取消」就是这个设计的成本，写成断言让将来的改动可见——真要加 debounce 是产品决策（每次补全多 50 ms），不是修 bug。
+
+**Java 冷启动的降级，第一次被证明真的生效。** 之前那次「首次补全 506 ms / 90 项」其实是 jdtls 抢在预算内答完了，兜底没被触发。现在用**第二个根**（没有热服务器）测：第一次击键 **504 ms** 拿到 90 项**词法兜底**结果（`App` / `String` / `System`…），jdtls 导入完成后 **4849 ms** 起真成员（`add(String)`…）接管。`initialize` 完成 ≠ 能用——这中间的 4 秒正是预算存在的理由。
+
+**`verify:lsp-semantics`（15 项，五种语言各三条）。** 每语言一份固定 fixture，三条断言都带具体期望值：补全必须含某个成员、hover 必须含类型签名、诊断必须含服务器自己的措辞。
+
+| 语言 | 补全 | hover | 诊断 |
+|---|---|---|---|
+| python（stub） | `print`（30 项） | `builtin` | `SyntaxError` |
+| go（gopls） | `Println`（`fmt.` → 29 项） | `func fmt.Println` | `undefined` |
+| javascript | `filter`（23 项） | `number[]` | `Expression expected` |
+| rust | `as_bytes`（138 项） | `let s: String` | `mismatched types` |
+| java | `add(`（58 项） | `List<String> names` | `cannot be resolved` |
+
+**两个数字的来历，因为容易被误读。** Go 的「3 项」不是质量问题：早期探针把光标放在 `fmt.Println` 内部，得到前缀过滤后的 3 项；放在 `fmt.` 之后是 **29 项**（完整导出面）。Python 的「30 项」是 stub 的天花板：`json.` / `str.` / `x.` 返回**完全相同的 30 个名字**，它不看点号左边——这是「内置兜底」的定义，装上 pyright 才有成员解析。
+
+**试过但没采用的调优：`cachePriming.enable = false`。** 交替采样（4 轮，每次新项目 + 新服务器）：默认 818–1057 ms，关闭 820–1056 ms，区间完全重叠。**没改 manifest。** 第一轮不交替时看到过「1.9–4.9 s」，那是首跑冷盘的采样偏差——顺序会污染结果。
+
+**顺带修掉两处漏接：**
+
+| 问题 | 现象 |
+|---|---|
+| `lsp.initializationOptions` 在旧路径上被丢弃 | 只有池化路径读它；`rust@1.0.0` 这类非 manager 插件声明了也不生效。现在两条路径都传 |
+| 服务器崩溃后 `describe()` 不说原因 | 状态栏只能显示「未运行」，与「从未配置」无法区分。现在记 `language server exited (code N)` |
+
 ### 池化语言服务管理器（Java 为第一个真实插件）
 
 一份方案要求用 **Rust** 写一个 `LspManager`（`inventory` 编译期注册、`trait LanguagePlugin`、`Arc<Mutex>`）。产品是 TypeScript 内核 + SEA 单文件，`src-tauri/` 只有 457 行外壳且不随包分发，`LspClient` / `check` / Problems 面板全在 TS 里。所以按**接口等价**实现，并把理由写进 `docs/lsp-manager.md` 第一节：`trait` → `interface`、`&'static str` → 冻结字段、`inventory` → 静态表 + 注册表扫描、`Arc<Mutex>` → 单线程事件循环。

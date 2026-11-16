@@ -40,6 +40,7 @@
 | `src/lsp/manager/DiagnosticsBuffer.ts` | 6 | 去重 + 每文件 2000 / 全局 12000 上限 |
 | `src/langs/managerPlugins.ts` | 7 | manifest → `LanguagePlugin`；项目根、启动模板、签名 |
 | `src/langs/lspLaunch.ts` | 7 | 启动策略（池化 / 旧路径），从 `WorkspaceService` 拆出 |
+| `src/langs/toolchainEnv.ts` | 7 | 把语言工具链目录前插到服务器 PATH（gopls 需要 `go`） |
 | `src/lsp/lspLike.ts` | 6 | 面板实际用到的那部分 LSP 表面 |
 
 `langs` 在第 7 层、`lsp` 在第 6 层，所以「同时认识 manifest 和 LSP」的代码只能待在 `langs`。`lspLaunch.ts` 因此用结构化的 `LaunchSlot` 而不是导入 `Slot`——反向 import 会让层序变成环。
@@ -90,14 +91,51 @@
 
 ## 五、测试
 
-`npm run verify:lsp-manager`（见 `scripts/verify-lsp-manager.ts`）。断言总数会随每次改动变化，这里只列覆盖面：
+三个套件，按「确定性 → 真实性」排列。断言总数会随每次改动变化，这里只列覆盖面。
 
-- **纯逻辑**：路由（含优先级与 id 平局）、项目根（module → reactor、两个仓库两个根）、模板展开（`{glob:}` / `{platform}` / 缺 `{toolchain}` 时拒绝启动）、签名变更、git 与内容戳脏文件、阈值、诊断缓冲、词法扫描（字符串里的 `}` 不算失衡）、词法补全。
-- **假服务器**（`scripts/fixtures/fake-lsp.mjs`，可配置延迟/诊断/拒绝启动，并记录收到的每个方法）：懒启动、根收敛、第二个根、空闲回收、latest-only（旧请求返回空、新请求有结果、`$/cancelRequest` 确实到达、丢弃计数）、去重（一次往返）。
-- **真 jdtls**（缺失时 SKIP）：`initializationOptions` 三项、`initialize`、首次补全不超预算、导入完成后拿到 58 项 ArrayList 成员、热补全、hover、`publishDiagnostics`、嵌套根复用、一个根一个服务器。
-- **stdio 测试服务**（`scripts/lsp-manager-service.ts`）：`open` / `completion` / `stats` / `shutdown` 四个往返，证明服务本身可用。
+**1. `npm run verify:lsp-protocol`**（`scripts/verify-lsp-protocol.ts`）——不依赖任何真实服务器。
 
-`npm test` 也增加了一组管理器单测，全部通过。注入验证：去掉 `$/cancelRequest` 转发 → latest-only 的取消断言失败；把 `versionSignature` 里的 `serverVersion` 固定 → 缓存失效断言失败。
+假服务器 `scripts/fixtures/fake-lsp.mjs` 可以延迟、拒绝启动、**对指定方法永不回答**（`--hang <method>`）、**在收到指定方法时直接退出**（`--die-on <method>`）、把 `initialize` 的 options 写进日志（`--log-init`），并记录收到的每个方法。于是每条断言都是关于管理器的决策：
+
+| 场景 | 断言 |
+|---|---|
+| 连击（5 次补全） | 5 个请求都到达服务器、4 个被 `$/cancelRequest` 取消、只有 1 个带结果、丢弃计数 = 4 |
+| 去重（3 次相同定义） | 1 次往返 |
+| 超时（补全永不回答） | 407 ms 内返回兜底结果（预算 400），不挂起 |
+| 超时（显式动作） | `unsupported` 且原因含 "timed out"，309 ms 返回 |
+| 崩溃（请求途中退出） | 请求 12 ms 内落定（reject，不挂）、进程存活、条目报 `exited (code 7)`、后续请求走兜底、**不按请求重启**（initialize 次数不变） |
+| 能力契约 | 声明了 `completionProvider` 就能答；`documentFormattingProvider: false` 时返回 `does not advertise format`，不是空列表 |
+| `initializationOptions` | 真的到达服务器（日志里能看到 JSON） |
+
+**这里有一条是「记录现状」而不是「断言好」**：产品**没有发送侧 debounce**。每次触发都发一个请求，客户端先用本地 L1 列表顶上，管理器负责取消上一个。上面那条「5 次请求、4 次取消」就是这个设计的成本，写成断言是为了让将来的改动可见——真要加 debounce 是产品决策（每次补全多 50 ms 延迟），不是补一个 bug。
+
+**2. `npm run verify:lsp-manager`**（`scripts/verify-lsp-manager.ts`）——管理器本体 + 真 jdtls。
+
+- 纯逻辑：路由（含优先级与 id 平局）、项目根（module → reactor、两个仓库两个根）、模板展开（`{glob:}` / `{platform}` / 缺 `{toolchain}` 时拒绝启动）、签名变更、git 与内容戳脏文件、阈值、诊断缓冲、词法扫描。
+- 假服务器：懒启动、根收敛、第二个根、空闲回收、latest-only、去重。
+- 真 jdtls（缺失时 SKIP）：`initializationOptions` 三项、`initialize`、hover、`publishDiagnostics`、嵌套根复用、一个根一个服务器。
+- **冷启动降级**：第二个根没有热服务器，第一次击键 504 ms 返回 90 项**兜底**结果（`App` / `String` / `System`…），jdtls 导入完成后 4849 ms 起真成员（`add(String)`…）接管。这条证明了 500 ms 预算真的在起作用——而不是「jdtls 恰好答得快」。
+- **stdio 测试服务**（`scripts/lsp-manager-service.ts`）：`open` / `completion` / `stats` / `shutdown` 四个往返。
+
+**3. `npm run verify:lsp-semantics`**（`scripts/verify-lsp-semantics.ts`）——语义基线，每种语言一份固定 fixture，三条断言都带具体期望值：
+
+| 语言 | 补全必须含 | hover 必须含 | 诊断必须含 |
+|---|---|---|---|
+| python（stub） | `print`（30 项） | `builtin` | `SyntaxError` |
+| go（gopls） | `Println`（`fmt.` → 29 项） | `func fmt.Println` | `undefined` |
+| javascript（tsserver） | `filter`（23 项） | `number[]` | `Expression expected` |
+| rust（rust-analyzer） | `as_bytes`（138 项） | `let s: String` | `mismatched types` |
+| java（jdtls） | `add(`（58 项） | `List<String> names` | `cannot be resolved` |
+
+服务器没装的 SKIP，所以这组基线会随安装的服务变厚，而不是在某台机器上永远红。
+
+`npm test` 另有管理器单测（路由、签名、缓冲、词法、调度、EPIPE、PATH 注入）。注入验证：去掉 `$/cancelRequest` 转发 → latest-only 断言失败；把 `versionSignature` 的 `serverVersion` 固定 → 缓存失效断言失败。
+
+### 两个数字的来历（容易被误读）
+
+**Go 的「3 项」不是质量问题。** 早期测启动时间时在 `fmt.Println("hi")` 的第 6 列补全，光标落在 `Println` **内部**，于是得到前缀过滤后的 3 项（`Print` / `Printf` / `Println`）。在 `fmt.` 之后（第 5 列）是 **29 项**：`Append` / `Appendf` / `Errorf` / `Fprint` / `Sprint`… 完整导出面。数字差 10 倍，原因只是光标位置。
+
+**Python 的「30 项」是 stub 的天花板。** 对 `json.`、`str.`、`x.` 三个接收者补全，返回的是**完全相同的 30 个名字**（`Exception` / `False` / `None` / `True` / `TypeError` / `ValueError`…，即 `COMMON_ITEMS` + 内建名）。也就是说 stub **没有成员解析**——它不看点号左边是什么。这不是 bug，是「内置兜底服务器」的定义；装上 pyright 后同一位置会给出真正的成员。语义基线里 python 那条断言写的是 `print`，正是为了不假装它有成员解析。
 
 ## 六、性能基线（本机，jdtls snapshot + JDK 25）
 
@@ -112,6 +150,30 @@
 | 第二根同项目复用 | 0 次 spawn |
 
 冷启动的一次性成本几乎全在 jdtls 自己的导入上，管理器没有可测量的开销——`stats()` 里 `starts` 与实际 spawn 次数一致。
+
+### 八种语言的启动耗时（同一口径：spawn + initialize + initialized）
+
+| 语言 | 服务 | `initialize` | 首次有结果的补全 |
+|---|---|---|---|
+| rust | rust-analyzer | **77–93 ms** | 1032–1036 ms（索引期间会 1 ms 回空） |
+| javascript | tsserver | 246–279 ms | 450–460 ms |
+| python | 内置 stub | 298–363 ms | 1 ms |
+| go | gopls | 340–374 ms | 420–453 ms |
+| java | jdtls | **2017–3392 ms** | 1535–1610 ms（小 pom；大 reactor 4–5 s） |
+| markdown / c / cpp | 未安装 | 不启动（fallback） | — |
+
+**「启动快」和「可用早」是两件事。** rust-analyzer 的 `initialize` 最快（77 ms），但第一次真正有内容的补全要等 1.0 s——期间它 1 ms 就回一个空列表。所以「首次补全」这一列量的是**等到有 items** 为止，否则会把「还在加载」记成「很快」。
+
+### 试过但没采用的调优：`cachePriming.enable = false`
+
+假设：关掉 rust-analyzer 的依赖缓存预热能缩短首次补全。**交替采样**（每次跑两个变体，共 4 轮，每次新项目 + 新服务器）的结果：
+
+| 变体 | `initialize` | 首次补全（范围） | 中位数 |
+|---|---|---|---|
+| 默认 | 56–98 ms | 818–1057 ms | 1053 ms |
+| `cachePriming.enable=false` | 55–68 ms | 820–1056 ms | 868 ms |
+
+区间几乎完全重叠，差异落在噪声里。**没有改 manifest。** 第一轮不交替采样时看到过「1.9–4.9 s」，那是首跑冷盘的采样偏差——顺序会污染结果，所以结论来自交替采样。
 
 ## 七、本轮不做（边界）
 
