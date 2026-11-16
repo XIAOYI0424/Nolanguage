@@ -29,6 +29,7 @@ import { discoverBinary, probeVersion } from './discover.js';
 import type { LanguageManifest } from './manifest.js';
 import type { LanguageRegistry } from './Registry.js';
 import { resolveServer } from './serverInstall.js';
+import { toolchainEnv } from './toolchainEnv.js';
 import { LexicalFallback } from '../lsp/manager/fallback.js';
 import { versionSignature } from '../lsp/manager/signature.js';
 import { ContentHashStrategy, GitDiffStrategy } from '../lsp/manager/strategies.js';
@@ -253,12 +254,14 @@ export async function buildManagerPlugin(
       launchNote = `${spec.serverName ?? manifest.id}: an argument template did not resolve`;
       return undefined;
     }
+    const env = toolchainEnv(toolchain);
     return {
       serverName: spec.serverName ?? manifest.id,
       languageId: spec.languageId ?? manifest.id,
       command: expanded[0],
       args: [...expanded.slice(1), ...extra],
       cwd: root,
+      ...(env ? { env } : {}),
       ...(spec.initializationOptions ? { initializationOptions: spec.initializationOptions } : {}),
       ...(spec.startTimeoutMs !== undefined ? { startTimeoutMs: spec.startTimeoutMs } : {}),
       ...(spec.firstRequestBudgetMs !== undefined ? { firstRequestBudgetMs: spec.firstRequestBudgetMs } : {}),

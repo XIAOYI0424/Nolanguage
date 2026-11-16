@@ -50,6 +50,9 @@ import { FileTransport } from '../src/log/transports/FileTransport';
 import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
 import { resolveBundledFallback } from '../src/lsp/bundledFallback';
 import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/serverInstall';
+import { toolchainEnv } from '../src/langs/toolchainEnv';
+import { JsonRpcConnection } from '../src/lsp/jsonrpc';
+import { PassThrough } from 'node:stream';
 import { CacheValidator } from '../src/lsp/manager/CacheValidator';
 import { DiagnosticsBuffer } from '../src/lsp/manager/DiagnosticsBuffer';
 import { LexicalFallback, scanText } from '../src/lsp/manager/fallback';
@@ -785,6 +788,62 @@ describe('language server providers', () => {
     expect(st.serverName).toBe('gopls');
     expect(st.memoryHint).toBe('80MB');
     expect(st.found).toBe(false);
+  });
+});
+
+describe('lsp transport · a dead pipe is a close, not a crash', () => {
+  it('closes the connection when the input stream errors', async () => {
+    // A server that exits mid-request makes `input.write()` emit EPIPE. An
+    // unhandled 'error' event on a stream kills the process, so the editor would
+    // disappear because a language server crashed.
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const rpc = new JsonRpcConnection(input, output);
+    const pending = rpc.request('textDocument/completion', {});
+    input.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+    await expect(pending).rejects.toThrow(/closed/);
+    expect(rpc.isClosed).toBe(true);
+  });
+
+  it('cancels by id only while the request is pending', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const rpc = new JsonRpcConnection(input, output);
+    let sent = '';
+    input.on('data', (chunk: Buffer) => {
+      sent += chunk.toString('utf8');
+    });
+    let id = -1;
+    const pending = rpc.request('textDocument/hover', {}, (assigned) => {
+      id = assigned;
+    });
+    expect(rpc.cancel(id)).toBe(true);
+    expect(sent).toContain('$/cancelRequest');
+    // The answer arrives, so a second cancel has nothing to aim at.
+    const body = JSON.stringify({ jsonrpc: '2.0', id, result: null });
+    output.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    await pending;
+    expect(rpc.cancel(id)).toBe(false);
+  });
+});
+
+describe('lsp manager · the toolchain goes on the server PATH', () => {
+  const base = { PATH: ['C:\\Windows', 'C:\\other'].join(';') };
+
+  it('prepends the toolchain directory when it is missing', () => {
+    const env = toolchainEnv('D:\\Go lang\\bin\\go.exe', base as NodeJS.ProcessEnv);
+    expect(env?.PATH.split(';')[0]).toBe('D:\\Go lang\\bin');
+  });
+
+  it('adds nothing when the directory is already on PATH', () => {
+    // Case-insensitively: Windows has one directory however it is spelled, and
+    // prepending a duplicate would grow PATH on every launch.
+    expect(toolchainEnv('C:\\Windows\\python.exe', base as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(toolchainEnv('c:\\windows\\python.exe', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it('adds nothing when there is no toolchain', () => {
+    expect(toolchainEnv(undefined, base as NodeJS.ProcessEnv)).toBeUndefined();
   });
 });
 

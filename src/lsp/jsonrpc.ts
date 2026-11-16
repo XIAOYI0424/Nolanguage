@@ -79,6 +79,14 @@ export class JsonRpcConnection extends EventEmitter {
     this.output.on('data', (chunk: Buffer) => this.onData(chunk));
     this.output.on('end', () => this.handleClose());
     this.output.on('error', () => this.handleClose());
+    // The *input* side matters just as much: a server that dies while a request
+    // is in flight makes `input.write()` emit `EPIPE` asynchronously, and an
+    // unhandled 'error' event on a stream takes the whole process down — the
+    // editor would disappear because a language server crashed. Treating it as a
+    // close is the honest reading: the pipe is gone, the request will never be
+    // answered, and `handleClose` already rejects everything pending.
+    this.input.on('error', () => this.handleClose());
+    this.input.on('close', () => this.handleClose());
   }
 
   get isClosed(): boolean {

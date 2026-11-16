@@ -22,6 +22,7 @@ import { LspClient, fileUri, type LspLaunchSpec } from '../lsp/LspClient.js';
 import type { LspManager } from '../lsp/manager/LspManager.js';
 import type { LanguageRegistry } from '../langs/Registry.js';
 import { resolveServer } from './serverInstall.js';
+import { toolchainEnv } from './toolchainEnv.js';
 import type { LanguageManifest } from './manifest.js';
 import type { LspLike } from '../lsp/lspLike.js';
 
@@ -100,11 +101,13 @@ export async function startSlotLsp(deps: LaunchDeps, slot: LaunchSlot): Promise<
     // wins — a user who pointed us at their own server means it.
     const found = resolveServer(slot.manifest, deps.registry.home, { root: deps.rootDir || process.cwd() });
     if (found.source !== 'missing' && found.bin) {
+      const env = toolchainEnv(slot.toolchain);
       launch = {
         languageId: spec.languageId ?? slot.id,
         serverName: spec.serverName ?? slot.id,
         command: found.bin,
         args: spec.args ?? [],
+        ...(env ? { env } : {}),
       };
       note = `${launch.serverName} (${found.source})`;
     } else if (spec.bundledFallback) {
