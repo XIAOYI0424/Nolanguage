@@ -90,9 +90,17 @@ export class JsonRpcConnection extends EventEmitter {
     return this.pending.size;
   }
 
-  request<T = unknown>(method: string, params?: unknown): Promise<T> {
+  /**
+   * Send a request, optionally learning its id before the answer arrives.
+   *
+   * `onId` is what makes `$/cancelRequest` possible: the caller needs the id
+   * *while* the request is in flight, which a promise alone cannot provide. It
+   * is called synchronously, before the bytes are written.
+   */
+  request<T = unknown>(method: string, params?: unknown, onId?: (id: number) => void): Promise<T> {
     if (this.closed) return Promise.reject(new Error(`RPC connection closed (method=${method})`));
     const id = this.nextId++;
+    onId?.(id);
     const t0 = performance.now();
     const traceId = this.opts.hooks?.resolveTraceId?.();
     const msg: JsonRpcMessage = { jsonrpc: '2.0', id, method, params };
@@ -114,6 +122,20 @@ export class JsonRpcConnection extends EventEmitter {
       });
       this.write(msg);
     });
+  }
+
+  /**
+   * Ask the server to stop working on `id` (`$/cancelRequest`).
+   *
+   * The pending entry is deliberately kept: LSP requires the server to answer a
+   * cancelled request with error `-32800`, and dropping it here would turn a
+   * clean cancellation into a timeout on the caller's side. Returns false when
+   * the id is already answered, so a scheduler can skip a pointless frame.
+   */
+  cancel(id: number): boolean {
+    if (this.closed || !this.pending.has(id)) return false;
+    this.write({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id } });
+    return true;
   }
 
   notify(method: string, params?: unknown): void {

@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import builtins
 import json
+import keyword
 import sys
 import time
 import traceback
@@ -125,13 +126,14 @@ class Server:
                 {
                     "capabilities": {
                         "textDocumentSync": {"openClose": True, "change": 1},
-                        "completionProvider": {"triggerCharacters": [".", "("]},
+                        "completionProvider": {"triggerCharacters": [".", "("], "resolveProvider": True},
                         "hoverProvider": True,
                         "definitionProvider": True,
                         "referencesProvider": True,
                         "renameProvider": True,
                         "codeActionProvider": True,
                         "workspaceSymbolProvider": True,
+                        "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
                         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
                     },
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
@@ -199,6 +201,14 @@ class Server:
 
         if method == "textDocument/codeAction":
             self.respond(msg_id, self.code_actions(params))
+            return True
+
+        if method == "completionItem/resolve":
+            self.respond(msg_id, self.resolve_completion(params))
+            return True
+
+        if method == "textDocument/signatureHelp":
+            self.respond(msg_id, self.signature_help(params))
             return True
 
         if method == "workspace/symbol":
@@ -357,7 +367,7 @@ class Server:
         if line < 0 or line >= len(rows):
             return None
         row = rows[line]
-        character = max(0, min(character, len(row)))
+        character = self._u16_to_cp(row, max(0, character))
         start = character
         while start > 0 and (row[start - 1].isalnum() or row[start - 1] == "_"):
             start -= 1
@@ -373,17 +383,49 @@ class Server:
         rows = text.splitlines()
         line = getattr(node, "lineno", 1) - 1
         row = rows[line] if 0 <= line < len(rows) else ""
-        start = row.find(name, getattr(node, "col_offset", 0))
+        start = row.find(name, self._u8_to_cp(row, getattr(node, "col_offset", 0)))
         if start < 0:
-            start = getattr(node, "col_offset", 0)
+            start = self._u8_to_cp(row, getattr(node, "col_offset", 0))
         return line, start, start + len(name)
 
-    def _loc(self, uri: str, line: int, start: int, end: int) -> dict[str, Any]:
+    @staticmethod
+    def _u16_to_cp(row: str, col: int) -> int:
+        """LSP counts UTF-16 code units; Python counts code points.
+
+        An astral character (an emoji) is one code point but two units, so every
+        column after it drifts by one per character. Positions from the client
+        are converted in, positions to the client are converted out.
+        """
+        if col <= 0:
+            return 0
+        units = 0
+        for i, ch in enumerate(row):
+            w = 2 if ord(ch) > 0xFFFF else 1
+            if units + w > col:
+                return i
+            units += w
+        return len(row)
+
+    @staticmethod
+    def _u8_to_cp(row: str, byte_col: int) -> int:
+        """`ast` reports UTF-8 byte offsets; every other layer here counts code points."""
+        if byte_col <= 0:
+            return 0
+        return len(row.encode("utf-8")[:byte_col].decode("utf-8", "ignore"))
+
+    @staticmethod
+    def _cp_to_u16(row: str, col: int) -> int:
+        if col <= 0:
+            return 0
+        return len(row[:col].encode("utf-16-le")) // 2
+
+    def _loc(self, uri: str, row: str, line: int, start: int, end: int) -> dict[str, Any]:
+        """Build a Location from code-point columns, emitting UTF-16 units."""
         return {
             "uri": uri,
             "range": {
-                "start": {"line": line, "character": start},
-                "end": {"line": line, "character": end},
+                "start": {"line": line, "character": self._cp_to_u16(row, start)},
+                "end": {"line": line, "character": self._cp_to_u16(row, end)},
             },
         }
 
@@ -394,12 +436,18 @@ class Server:
             return None
 
     def _occurrences(self, text: str, tree: ast.AST, name: str) -> list[tuple[int, int, int]]:
+        rows = text.splitlines()
         spans = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
                 spans.append(self._name_span(text, node, name))
             elif isinstance(node, ast.Name) and node.id == name:
-                spans.append((node.lineno - 1, node.col_offset, node.col_offset + len(name)))
+                line = node.lineno - 1
+                row = rows[line] if 0 <= line < len(rows) else ""
+                # `ast` col_offset is a UTF-8 byte offset; convert before it meets
+                # anything that counts code points.
+                start = self._u8_to_cp(row, node.col_offset)
+                spans.append((line, start, start + len(name)))
         return sorted(set(spans))
 
     def definition(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -412,14 +460,133 @@ class Server:
         if hit is None or tree is None:
             return []
         name = hit[0]
+        rows = doc.text.splitlines()
         out = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
                 line, start, end = self._name_span(doc.text, node, name)
-                out.append(self._loc(uri, line, start, end))
+                out.append(self._loc(uri, rows[line], line, start, end))
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name:
-                out.append(self._loc(uri, node.lineno - 1, node.col_offset, node.col_offset + len(name)))
+                line = node.lineno - 1
+                row = rows[line]
+                start = self._u8_to_cp(row, node.col_offset)
+                out.append(self._loc(uri, row, line, start, start + len(name)))
         return out
+
+    def resolve_completion(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Fill in the documentation for one completion item.
+
+        The list frame carries labels only; this is what the client asks for when
+        the user pauses on a row. Builtins get their docstring, everything else
+        says where it comes from.
+        """
+        label = params.get("label", "")
+        out = dict(params)
+        obj = getattr(builtins, label, None)
+        if obj is not None and getattr(obj, "__doc__", None):
+            first = (obj.__doc__ or "").strip().split("\n")[0]
+            out["documentation"] = {"kind": "markdown", "value": f"**builtin** `{label}`\n\n{first}"}
+            out["detail"] = "builtin"
+            return out
+        doc = self.docs.get(params.get("uri", "")) if params.get("uri") else None
+        if doc:
+            tree = self._parse(doc.text)
+            if tree is not None:
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == label:
+                        first = (ast.get_docstring(node) or "").strip().split("\n")[0]
+                        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+                        out["documentation"] = {"kind": "markdown", "value": f"**{kind}** `{label}`\n\n{first}" if first else f"**{kind}** `{label}`"}
+                        out["detail"] = f"{kind} in this module"
+                        return out
+        out["detail"] = "name in this module"
+        return out
+
+    def signature_help(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Parameter hints for the call under the caret.
+
+        Same-file and call-site only: the signature comes from a `def` in this
+        module, or from the builtin table. No library introspection - that is what
+        a real server is for.
+        """
+        uri, doc = self._doc(params)
+        if doc is None:
+            return None
+        pos = params.get("position", {})
+        line = pos.get("line", 0)
+        character = self._u16_to_cp(doc.text.splitlines()[line] if line < len(doc.text.splitlines()) else "", pos.get("character", 0))
+        tree = self._parse(doc.text)
+        if tree is None:
+            return None
+
+        # Innermost Call whose span contains the caret.
+        best = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            start = (node.lineno - 1, node.col_offset)
+            end = (getattr(node, "end_lineno", node.lineno) - 1, getattr(node, "end_col_offset", 0))
+            if start <= (line, character) <= end:
+                if best is None or start >= (best.lineno - 1, best.col_offset):
+                    best = node
+        if best is None:
+            return None
+
+        func = best.func
+        name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
+        if not name:
+            return None
+
+        args: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                args = [a.arg for a in node.args.args]
+                break
+        else:
+            obj = getattr(builtins, name, None)
+            if obj is None or not callable(obj):
+                return None
+            try:
+                import inspect
+
+                args = [p for p in inspect.signature(obj).parameters]
+            except (TypeError, ValueError):
+                args = []
+
+        # Active parameter: count top-level commas between the opening paren and
+        # the caret, ignoring anything inside nested brackets or strings.
+        rows = doc.text.splitlines()
+        start_line = best.lineno - 1
+        open_col = rows[start_line].find("(", max(0, best.col_offset)) if start_line < len(rows) else -1
+        if open_col < 0:
+            open_col = best.col_offset
+        active = 0
+        depth = 0
+        quote = ""
+        for ln in range(start_line, line + 1):
+            row = rows[ln] if ln < len(rows) else ""
+            lo = open_col + 1 if ln == start_line else 0
+            hi = character if ln == line else len(row)
+            for ch in row[lo:hi]:
+                if quote:
+                    if ch == quote:
+                        quote = ""
+                    continue
+                if ch in "\"'":
+                    quote = ch
+                elif ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    active += 1
+
+        label = f"{name}({', '.join(args)})"
+        return {
+            "signatures": [{"label": label, "documentation": f"defined in this module: {name}" if args else name}],
+            "activeSignature": 0,
+            "activeParameter": min(active, max(0, len(args) - 1)),
+        }
 
     def references(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         uri, doc = self._doc(params)
@@ -435,31 +602,27 @@ class Server:
         if not include_decl:
             here = (pos.get("line", 0), hit[1])
             spans = [sp for sp in spans if (sp[0], sp[1]) != here]
-        return [self._loc(uri, line, start, end) for line, start, end in spans]
+        rows = doc.text.splitlines()
+        return [self._loc(uri, rows[line], line, start, end) for line, start, end in spans]
 
     def rename(self, params: dict[str, Any]) -> dict[str, Any] | None:
         uri, doc = self._doc(params)
         new_name = params.get("newName", "")
         # An invalid identifier would leave a file that no longer parses; refusing
         # here is the difference between a warning and a broken edit.
-        if doc is None or not new_name.isidentifier():
+        # str.isidentifier() is True for keywords ("class", "def", "None"), and
+        # renaming to one produces a file that no longer parses.
+        if doc is None or not new_name.isidentifier() or keyword.iskeyword(new_name):
             return None
         pos = params.get("position", {})
         hit = self._ident_at(doc.text, pos.get("line", 0), pos.get("character", 0))
         tree = self._parse(doc.text)
         if hit is None or tree is None:
             return None
+        rows = doc.text.splitlines()
         edits = []
         for line, start, end in self._occurrences(doc.text, tree, hit[0]):
-            edits.append(
-                {
-                    "range": {
-                        "start": {"line": line, "character": start},
-                        "end": {"line": line, "character": end},
-                    },
-                    "newText": new_name,
-                }
-            )
+            edits.append({"range": self._loc(uri, rows[line], line, start, end)["range"], "newText": new_name})
         if not edits:
             return None
         return {"changes": {uri: edits}}
@@ -471,6 +634,7 @@ class Server:
         tree = self._parse(doc.text)
         if tree is None:
             return []
+        rows = doc.text.splitlines()
         used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         used |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
         actions: list[dict[str, Any]] = []
@@ -482,23 +646,23 @@ class Server:
                 if bound in used:
                     continue
                 line = node.lineno - 1
+                # A line with a trailing newline is removed as (line,0)-(line+1,0).
+                # The last line has no such newline, so the range would end past the
+                # document; consume the *preceding* newline instead.
+                if line + 1 < len(rows):
+                    start = {"line": line, "character": 0}
+                    end = {"line": line + 1, "character": 0}
+                elif line > 0:
+                    start = {"line": line - 1, "character": len(rows[line - 1])}
+                    end = {"line": line, "character": len(rows[line])}
+                else:
+                    start = {"line": 0, "character": 0}
+                    end = {"line": 0, "character": len(rows[0])}
                 actions.append(
                     {
                         "title": f"Remove unused import '{alias.name}'",
                         "kind": "quickfix",
-                        "edit": {
-                            "changes": {
-                                uri: [
-                                    {
-                                        "range": {
-                                            "start": {"line": line, "character": 0},
-                                            "end": {"line": line + 1, "character": 0},
-                                        },
-                                        "newText": "",
-                                    }
-                                ]
-                            }
-                        },
+                        "edit": {"changes": {uri: [{"range": {"start": start, "end": end}, "newText": ""}]}},
                     }
                 )
         return actions
@@ -523,19 +687,8 @@ class Server:
                 if not name or (query and query not in name.lower()):
                     continue
                 line, start, end = self._name_span(doc.text, node, name)
-                out.append(
-                    {
-                        "name": name,
-                        "kind": kind,
-                        "location": {
-                            "uri": uri,
-                            "range": {
-                                "start": {"line": line, "character": start},
-                                "end": {"line": line, "character": end},
-                            },
-                        },
-                    }
-                )
+                rows = doc.text.splitlines()
+                out.append({"name": name, "kind": kind, "location": self._loc(uri, rows[line], line, start, end)})
         return out
 
 def _range(line: int, char: int, length: int = 1) -> dict[str, Any]:

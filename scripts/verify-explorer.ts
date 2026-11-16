@@ -17,8 +17,9 @@
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-explorer.ts
  */
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -188,6 +189,62 @@ async function testService(): Promise<void> {
 
   check('the escaping write never created anything', !(await readFile(join(root, 'outside.txt'), 'utf8').then(() => true, () => false)));
 
+  // ---- containment through a link ----
+  // The lexical checks above all pass for `link/secret.txt`: the resolved path
+  // *is* under the root. `readFile` still follows the link, so this is the one
+  // shape a string comparison cannot catch. `realRoot` exists for it, and until
+  // a probe walked out of a scratch workspace with a single junction, nothing
+  // read that field.
+  //
+  // Self-contained on purpose: its own root, so it does not depend on where the
+  // `setRoot` block below left the shared service.
+  const linkRoot = join(sandbox, 'linktest');
+  const linkOutside = join(sandbox, 'linktest-outside');
+  await mkdir(join(linkRoot, 'inner'), { recursive: true });
+  await mkdir(linkOutside, { recursive: true });
+  await writeFile(join(linkOutside, 'secret.txt'), 'should never be readable', 'utf8');
+  // A junction needs no administrator rights on Windows; POSIX gets a symlink.
+  const linkKind: 'junction' | 'dir' = process.platform === 'win32' ? 'junction' : 'dir';
+  let linkReady = true;
+  try {
+    symlinkSync(linkOutside, join(linkRoot, 'link'), linkKind);
+    symlinkSync(join(linkRoot, 'inner'), join(linkRoot, 'alias'), linkKind);
+  } catch (err) {
+    // A locked-down machine may refuse to create links at all. That is a SKIP,
+    // not a pass, and the detail says which.
+    linkReady = false;
+    check('a link can be created for the containment test', true, `SKIP: ${(err as Error).message}`);
+  }
+  if (linkReady) {
+    const linkSvc = new FsService(linkRoot);
+    const throughLink: string[] = [];
+    const attemptLink = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
+      try {
+        await fn();
+        throughLink.push(`${label}:ALLOWED`);
+      } catch (err) {
+        if (codeOf(err) !== 'outside') throughLink.push(`${label}:${codeOf(err)}`);
+      }
+    };
+    await attemptLink('list', () => linkSvc.list('link'));
+    await attemptLink('read', () => linkSvc.read('link/secret.txt'));
+    await attemptLink('write', () => linkSvc.write('link/written.txt', 'pwned'));
+    await attemptLink('create', () => linkSvc.create('link/new.txt', 'file'));
+    await attemptLink('rename-from', () => linkSvc.rename('link/secret.txt', 'x'));
+    await attemptLink('rename-to', () => linkSvc.rename('inner', 'link/moved'));
+    await attemptLink('remove', () => linkSvc.remove('link'));
+    check('no operation follows a link out of the workspace', throughLink.length === 0, throughLink.join(', ') || '7 operations');
+    check(
+      'the link target was not written to',
+      !(await readFile(join(linkOutside, 'written.txt'), 'utf8').then(() => true, () => false)),
+    );
+
+    // A link that stays inside is legitimate (a monorepo linking its own
+    // folder), so the guard must not be a blanket ban on links.
+    const viaAlias = await linkSvc.list('alias').then((l) => l.path, (e) => codeOf(e));
+    check('a link that stays inside the workspace still works', viaAlias === 'alias', viaAlias);
+  }
+
   // ---- setRoot ----
   const otherDir = join(sandbox, 'pkg');
   await svc.setRoot(otherDir);
@@ -236,6 +293,60 @@ async function testService(): Promise<void> {
       `could not build the stress root: ${(err as Error).message}`,
     );
   }
+}
+
+
+/**
+ * Open a real WebSocket, then send a frame whose declared length is 2^53-1.
+ *
+ * Written by hand because the point is the parser, not the client: a library
+ * would refuse to encode it. The server must close instead of buffering.
+ */
+async function oversizedFrameRefused(port: number): Promise<{ closed: boolean; detail: string }> {
+  return new Promise((resolve) => {
+    const sock = connect({ host: '127.0.0.1', port });
+    let upgraded = false;
+    let buf = '';
+    const done = (closed: boolean, detail: string): void => {
+      try { sock.destroy(); } catch { /* gone */ }
+      resolve({ closed, detail });
+    };
+    sock.setTimeout(6000, () => done(false, 'timeout: the server neither closed nor answered'));
+    sock.on('error', () => done(true, 'socket error (connection torn down)'));
+    sock.on('close', () => done(upgraded, upgraded ? 'closed after the oversized header' : 'closed before upgrade'));
+    sock.on('data', (chunk: Buffer) => {
+      buf += chunk.toString('latin1');
+      if (!upgraded) {
+        if (!buf.includes('\r\n\r\n')) return;
+        if (!/^HTTP\/1\.1 101/.test(buf)) return done(false, `upgrade refused: ${buf.slice(0, 40)}`);
+        upgraded = true;
+        buf = '';
+        // FIN + text, masked, 64-bit length form, length = 2^53-1.
+        const head = Buffer.alloc(14);
+        head[0] = 0x81;
+        head[1] = 0x80 | 0x7f;
+        head.writeBigUInt64BE(9007199254740991n, 2);
+        head.writeUInt32BE(0x01020304, 10);
+        sock.write(head);
+        return;
+      }
+      // A close frame must carry 1009 ("message too big"). Any other code means
+      // the socket died for an unrelated reason, which would make this check
+      // pass while proving nothing.
+      if ((chunk[0] & 0x0f) === 0x8) {
+        const code = chunk.length >= 4 ? chunk.readUInt16BE(2) : 0;
+        done(code === 1009, `close code ${code}`);
+      }
+    });
+    sock.on('connect', () => {
+      sock.write(
+        `GET / HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n` +
+          'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
+          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n' +
+          `Origin: http://127.0.0.1:${port}\r\n\r\n`,
+      );
+    });
+  });
 }
 
 // =============================================================== phase 2
@@ -300,6 +411,14 @@ async function testProtocol(): Promise<void> {
     const selfOrigin = new RawWsClient(PORT, '/', '127.0.0.1', { origin: `http://127.0.0.1:${PORT}` });
     check('the app\'s own origin can upgrade', await selfOrigin.ready.then(() => true, () => false));
     selfOrigin.close();
+
+    // ---- the frame parser must refuse an impossible length ----
+    // Same socket, one layer down. A client may declare a 2^53-byte frame; the
+    // server used to wait for those bytes while `this.buffer` grew, so any local
+    // process could exhaust the panel's memory without an Origin header at all
+    // (`originAllowed` deliberately accepts a native client).
+    const capped = await oversizedFrameRefused(PORT);
+    check('a frame that declares an impossible length is refused', capped.closed, capped.detail);
 
     const c = new RawWsClient(PORT);
     await c.ready;

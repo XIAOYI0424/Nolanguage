@@ -1,5 +1,10 @@
 /**
- * Turn an `mcp.json` `command` into something `spawn()` can actually launch.
+ * Turn a configured `command` into something `spawn()` can actually launch.
+ *
+ * Used by the MCP client and by the language-server launcher: both take a
+ * command name from configuration, and on Windows every npm-installed tool
+ * (`npx`, `pyright-langserver`, `typescript-language-server`, `vscode-*-server`)
+ * is a `.cmd` shim that `spawn` cannot start.
  *
  * # Why this exists
  *
@@ -70,7 +75,7 @@ export function quoteCmdArg(arg: string): string {
  * @param args    the raw `args`.
  * @param env     overrides for tests; defaults to the real process.
  */
-export function planMcpSpawn(
+export function planSpawn(
   command: string,
   args: string[],
   env: { platform?: NodeJS.Platform; PATH?: string; PATHEXT?: string } = {},

@@ -244,13 +244,16 @@ async function main(): Promise<void> {
 
     // Completion after `fmt.` should offer exported stdlib symbols.
     const compSrc = ['package main', '', 'import "fmt"', '', 'func main() {', '\tfmt.', '}', ''].join('\n');
-    const items = await ws.complete('go', compSrc, 5, 5);
+    const comp = await ws.complete('go', compSrc, 5, 5);
+    const items = comp.items;
     check('gopls returns completion items', items.length > 0, `${items.length} items`);
     check(
       'completion includes Println',
       items.some((i) => i.label === 'Println' || /Println/.test(i.label)),
       items.slice(0, 5).map((i) => i.label).join(', '),
     );
+    // "No server" and "no suggestions" must stay distinguishable in the frame.
+    check('completion names the reason when there is no server', !comp.unsupported, comp.unsupported ?? 'a server answered');
 
     // Python must be unaffected by any of the above.
     const pyStatus = ws.status().languages.find((l) => l.id === 'python');

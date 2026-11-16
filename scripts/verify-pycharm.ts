@@ -340,10 +340,68 @@ async function testBoot(): Promise<void> {
   check('boot: editor gutter renders line numbers', qa(w, '#glines .gline').length > 5, `${qa(w, '#glines .gline').length} rows`);
   check('boot: editor loads the main.py sample', (q(w, '#ta')?.value ?? '').indexOf('def fib') !== -1);
   check('boot: three document tabs render', qa(w, '#etabs .etab').length === 3, `${qa(w, '#etabs .etab').length} tabs`);
-  check('boot: bottom dock renders 7 tool windows', qa(w, '#dockTabs .dtab').length === 7, `${qa(w, '#dockTabs .dtab').length} tabs`);
+  check('boot: bottom dock renders 8 tool windows', qa(w, '#dockTabs .dtab').length === 8, `${qa(w, '#dockTabs .dtab').length} tabs`);
   check('boot: status bar shows file + caret + perf cells',
     !!q(w, '#stFile') && !!q(w, '#stPos') && !!q(w, '#stPerf'));
   check('boot: terminal input is present', !!q(w, '#termIn') && !!q(w, '#termOut'));
+
+  // ---- Packages window (Alt+6): a projection of the dependency frames ----
+  // The pane never parses a dependency file itself: it asks, then renders. So
+  // these check the two halves that can break independently — the request the
+  // tab sends, and what each frame turns into on screen.
+  const pkgTab = qa(w, '#dockTabs .dtab').find((b) => /Packages/.test(b.textContent ?? ''));
+  check('packages: the dock has a Packages tab', !!pkgTab);
+  pkgTab?.click();
+  await settle(w);
+  const depReq = socket.lastSentOf('dependencyReport');
+  check('packages: opening the tab asks for the declaration', !!depReq, JSON.stringify(depReq && { language: depReq.language }));
+  check('packages: the request carries the open buffer', typeof depReq?.code === 'string' && depReq.code.length > 0);
+  check('packages: the request names the current language', depReq?.language === 'python', String(depReq?.language ?? ''));
+
+  socket.deliver({
+    kind: 'dependencies', language: 'python', supported: true, format: 'requirements',
+    file: 'requirements.txt', searched: ['requirements.txt'],
+    packages: [{ name: 'requests', version: '==2.31.0' }],
+    undeclared: ['flask'], installable: true, installTemplate: ['{toolchain}', '-m', 'pip', 'install'],
+  });
+  await settle(w);
+  check('packages: the file it read is shown', (q(w, '#pkgFile')?.textContent ?? '') === 'requirements.txt', q(w, '#pkgFile')?.textContent ?? '');
+  check('packages: a declared package renders with its version', /requests/.test(q(w, '#pkgList')?.textContent ?? '') && /2\.31\.0/.test(q(w, '#pkgList')?.textContent ?? ''));
+  check('packages: an undeclared import is labelled', /not declared/.test(q(w, '#pkgList')?.textContent ?? ''));
+
+  // "Use" fills the installer input instead of installing straight away: the
+  // engine would otherwise run a command the user never saw.
+  const useBtn = q(w, '#pkgList button[data-pkg="use"]');
+  useBtn?.click();
+  await settle(w);
+  check('packages: Use puts the name in the install box', (q(w, '#pkgName')?.value ?? '') === 'flask', q(w, '#pkgName')?.value ?? '');
+
+  q(w, '#pkgGo')?.click();
+  await settle(w);
+  const install = socket.lastSentOf('dependencyInstall');
+  check('packages: Install sends the package it was given', install?.package === 'flask', String(install?.package ?? ''));
+  check('packages: the install carries the language', install?.language === 'python', String(install?.language ?? ''));
+  check('packages: the Stop button is live while installing', q(w, '#pkgStop')?.disabled === false);
+
+  socket.deliver({ kind: 'dependencyOut', language: 'python', stream: 'stdout', text: 'Collecting flask\n' });
+  await settle(w);
+  check('packages: installer output streams into the console', /Collecting flask/.test(q(w, '#pkgOut')?.textContent ?? ''));
+
+  socket.deliver({ kind: 'dependencyResult', language: 'python', package: 'flask', ok: true, code: 0, ms: 1200, command: 'pip install flask', truncated: false, refresh: { ok: true } });
+  await settle(w);
+  check('packages: a finished install reports the restart', /language server restarted/.test(q(w, '#pkgOut')?.textContent ?? ''));
+  check('packages: the buttons come back after the install', q(w, '#pkgGo')?.disabled === false && q(w, '#pkgStop')?.disabled === true);
+  check('packages: a successful install re-reads the declaration', socket.sent.filter((m) => m.kind === 'dependencyReport').length >= 2);
+
+  // A frame for another language must not paint over the current one.
+  const before = q(w, '#pkgFile')?.textContent ?? '';
+  socket.deliver({ kind: 'dependencies', language: 'go', supported: true, format: 'gomod', file: 'go.mod', searched: ['go.mod'], packages: [], undeclared: [], installable: true });
+  await settle(w);
+  check('packages: a stale frame from another language is dropped', (q(w, '#pkgFile')?.textContent ?? '') === before, q(w, '#pkgFile')?.textContent ?? '');
+
+  // Put the dock back where the rest of the suite expects it.
+  qa(w, '#dockTabs .dtab').find((b) => (b.textContent ?? '').trim() === 'Run')?.click();
+  await settle(w);
 
   // ---- Run is wired to the execution plane ----
   q(w, '#runBtn').click();

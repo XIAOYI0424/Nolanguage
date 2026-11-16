@@ -69,6 +69,11 @@
     ]
   },
   "lsp": {
+    "provider": {
+      "kind": "go-install",
+      "package": "golang.org/x/tools/gopls",
+      "version": "v0.24.0"
+    },
     "discovery": {
       "commands": [
         "gopls"
@@ -190,5 +195,15 @@
     "degradedNote": "delve not installed - debugging is unavailable for Go",
     "install": "go install github.com/go-delve/delve/cmd/dlv@latest",
     "supportsAttach": true
+  },
+  "dependencies": {
+    "format": "gomod",
+    "files": [
+      "go.mod"
+    ],
+    "install": [
+      "{toolchain}",
+      "get"
+    ]
   }
 }

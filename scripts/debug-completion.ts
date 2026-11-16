@@ -19,8 +19,8 @@ const d2 = await ws.diagnose('python', 'def broken(:\n    pass');
 console.log('  →', d2.items.length, 'items', d2.items.map((i) => i.severity).join(','));
 
 t('complete');
-const items = await ws.complete('python', 'def greet():\n    pass\n\ngr', 3, 2);
-console.log('  →', items.length, 'items', items.slice(0, 5).map((i) => i.label).join(','));
+const comp = await ws.complete('python', 'def greet():\n    pass\n\ngr', 3, 2);
+console.log('  →', comp.items.length, 'items', comp.items.slice(0, 5).map((i) => i.label).join(','), comp.unsupported ? `(unsupported: ${comp.unsupported})` : '');
 
 t('hover');
 const h = await ws.hover('python', 'print("hi")', 0, 2);

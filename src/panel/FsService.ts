@@ -25,6 +25,7 @@
  *    syscall failure is reported as a per-entry status rather than thrown.
  */
 import { readFile, writeFile, readdir, stat, mkdir, rename, rm, realpath } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { languageForName } from '../langs/extensionIndex.js';
 
@@ -164,7 +165,50 @@ export class FsService {
     if (relToRoot.startsWith('..') || (relToRoot && resolve(this.rootDir, relToRoot) !== abs)) {
       throw new FsError(`path escapes the workspace: ${rel}`, 'outside');
     }
+    this.assertInsideRealRoot(abs, rel);
     return abs;
+  }
+
+  /**
+   * A path that is inside the root *lexically* can still be outside it in fact.
+   *
+   * A symlink or an NTFS junction inside the tree resolves to wherever it
+   * points, and `readFile` follows it — so `link/secret.txt` passed every check
+   * above and read a file the workspace never contained. That is the whole
+   * reason `realRoot` exists (`setRoot` calls `realpath` to keep it
+   * symlink-free), and it went unused until a probe walked out of a scratch
+   * workspace with one junction.
+   *
+   * `realpath` is applied to the deepest ancestor that exists rather than to the
+   * path itself, because the leaf frequently does not exist yet (`create`,
+   * `write` of a new file) and `realpath` on a missing path throws. Walking up
+   * is sound: the missing tail cannot contain a link.
+   *
+   * Windows compares case-insensitively — `GetFinalPathNameByHandle` may return
+   * a different case than the root was created with, and a false "outside" here
+   * would make a legitimate folder unopenable.
+   */
+  private assertInsideRealRoot(abs: string, rel: string): void {
+    const fold = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p);
+    const root = fold(this.realRoot);
+    const prefix = root.endsWith(sep) ? root : root + sep;
+    let probe = abs;
+    for (;;) {
+      let real: string;
+      try {
+        real = fold(realpathSync(probe));
+      } catch {
+        const parent = dirname(probe);
+        if (parent === probe) {
+          // Nothing on this path resolves — the drive itself is gone.
+          throw new FsError(`cannot resolve the path for: ${rel}`, 'io');
+        }
+        probe = parent;
+        continue;
+      }
+      if (real === root || real.startsWith(prefix)) return;
+      throw new FsError(`path escapes the workspace through a link: ${rel}`, 'outside');
+    }
   }
 
   /** `rel` in the wire format (`/`-separated, no leading slash). */

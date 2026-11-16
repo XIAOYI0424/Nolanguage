@@ -39,9 +39,13 @@ import { defaultRuntimeRegistry } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { setExtensionManifests } from '../langs/extensionIndex.js';
-import { unsupported, type CodeAction, type Location, type NavResult, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
+import { unsupported, type CodeAction, type Location, type NavResult, type SignatureHelp, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
 import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
-import { ProfileManager, parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
+import { resolveServer } from '../langs/serverInstall.js';
+import { buildManagerPlugins } from '../langs/managerPlugins.js';
+import { LspManager } from '../lsp/manager/LspManager.js';
+import { startSlotLsp } from '../langs/lspLaunch.js';
+import { ProfileManager, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
   bufferName,
   primaryExtension,
@@ -52,17 +56,27 @@ import {
 import type { Kernel } from '../kernel/Kernel.js';
 import {
   languageList as projectLanguageList,
+  resourceProfilesOf,
   languageStatus as projectLanguageStatus,
   statusOf as projectStatus,
+  type CompletionResult,
+  type DiagnoseResult,
   type LanguageDescriptorWire,
   type LanguageStatus,
+  type WorkspaceRunResult,
   type Slot,
   type WorkspaceView,
 } from './workspace-wire.js';
 
 // The shapes moved to `workspace-wire.ts` with the functions that build them;
 // re-exported so existing importers keep their import path.
-export type { LanguageDescriptorWire, LanguageStatus } from './workspace-wire.js';
+export type {
+  CompletionResult,
+  DiagnoseResult,
+  LanguageDescriptorWire,
+  LanguageStatus,
+  WorkspaceRunResult,
+} from './workspace-wire.js';
 import type { ExecService } from '../exec/ExecService.js';
 
 export interface WorkspaceServiceOptions {
@@ -103,55 +117,6 @@ export interface WorkspaceServiceOptions {
   projectDir?: string;
   /** Inject a prepared registry (tests, and hosts that own the scan). */
   registry?: LanguageRegistry;
-}
-
-export interface DiagnoseResult {
-  uri: string;
-  items: Array<{
-    line: number;
-    character: number;
-    endLine: number;
-    endCharacter: number;
-    severity: number;
-    severityName: string;
-    message: string;
-    code?: string | number;
-    source?: string;
-  }>;
-  errors: number;
-  warnings: number;
-  /** True when the language server answered; false when it is unavailable. */
-  fromLsp: boolean;
-  /** Populated when the server could not be reached, to explain why. */
-  note?: string;
-}
-
-/** Uniform run result across languages (the IDE consumes only this). */
-export interface WorkspaceRunResult {
-  languageId: LanguageId;
-  sessionId: string;
-  runId: string;
-  exitCode: number | null;
-  signal: string | null;
-  /** The host stopped this run (Stop button), not the program exiting. */
-  cancelled?: boolean;
-  durationMs: number;
-  stdout: string;
-  stderr: string;
-  stdoutTruncated?: boolean;
-  stderrTruncated?: boolean;
-  logLinesTruncated?: boolean;
-  timedOut: boolean;
-  logLines: number;
-  mode: RunMode;
-  /** Which binary produced the output (interpreter / toolchain). */
-  binary: string;
-  /** Set when a multi-step run failed part-way (compiled languages). */
-  phase?: 'build' | 'run' | 'test';
-  /** The compiler rejected the source. */
-  compileError?: boolean;
-  /** Wall time spent in the build step. */
-  buildMs?: number;
 }
 
 /** One rendered Markdown preview. `html` is sanitized by MdRenderer. */
@@ -210,6 +175,15 @@ export class WorkspaceService {
   private syncChain: Promise<unknown> = Promise.resolve();
   /** Live runs per session id, so the Stop button aborts the right process. */
   private activeRuns = new Map<string, AbortController>();
+  /**
+   * The pooled language-server manager.
+   *
+   * It exists for every workspace, but only plugins whose manifest says
+   * `lsp.manager` route through it. That is deliberate: the other languages keep
+   * the per-language client they have always had, so this migration is one
+   * manifest line at a time instead of a flag day.
+   */
+  readonly lspManager: LspManager;
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
@@ -221,6 +195,11 @@ export class WorkspaceService {
       extraRoots: opts.pluginRoots ?? defaultPluginRoots(),
     });
     this.factory = new RunnerFactory(defaultRuntimeRegistry());
+    this.lspManager = new LspManager({
+      kernel,
+      home: this.registry.home,
+      log: (message, meta) => kernel.logger.forComponent('ide.lsp.manager').debug(message, meta),
+    });
     this.resources = new ProfileManager({
       budgetBytes: opts.memoryBudgetBytes,
       lspBudgetBytes: opts.lspMemoryBudgetBytes,
@@ -289,6 +268,7 @@ export class WorkspaceService {
     // Before this runs the index answers from its built-in defaults, which is
     // what standalone processes (NDebug.exe) use all the time.
     setExtensionManifests(manifests);
+    await this.syncManagerPlugins();
 
     for (const manifest of manifests) {
       const code = initial?.[manifest.id] ?? defaultSample(manifest.id).code;
@@ -424,6 +404,54 @@ export class WorkspaceService {
     return { ...(this.opts.toolchain ?? {}) };
   }
 
+  /**
+   * The resolved toolchain for one language, for hosts that shell out to it
+   * (the package installer expands `{toolchain}` with this).
+   */
+  toolchainFor(id: string): string | undefined {
+    return this.slots.get(id)?.toolchain;
+  }
+
+  /**
+   * Stop this language's server and start it again.
+   *
+   * Called after a package install: the server cached the import graph, and a
+   * newly installed module is invisible to it until it re-reads the project.
+   * `releaseLsp` + `ensureLsp` is exactly that restart — no second code path,
+   * and a server that is already down simply comes up.
+   */
+  async restartLanguageServer(id: string): Promise<{ ok: boolean; error?: string }> {
+    const slot = this.slots.get(id);
+    if (!slot) return { ok: false, error: `unknown language: ${id}` };
+    if (!slot.manifest.lsp || slot.manifest.lsp.disabled) {
+      return { ok: false, error: `"${id}" declares no language server` };
+    }
+    await this.releaseLsp(id, 'package installed');
+    await this.ensureLsp(id);
+    const after = this.slots.get(id);
+    return after?.lsp ? { ok: true } : { ok: false, error: after?.lspError ?? 'the language server did not start' };
+  }
+
+  /**
+   * Build the manager's plugins from the registry.
+   *
+   * Called after every scan and every registry change, because "which languages
+   * are installed" is exactly what the manager's routing table is. A plugin that
+   * stopped opting in is unregistered too, so disabling a language really does
+   * remove it from the pool.
+   */
+  private async syncManagerPlugins(): Promise<void> {
+    const plugins = await buildManagerPlugins(this.registry, {
+      home: this.registry.home,
+      workspaceRoot: this.rootDir || undefined,
+    });
+    for (const plugin of plugins) this.lspManager.register(plugin);
+    const wanted = new Set(plugins.map((p) => p.id));
+    for (const existing of this.lspManager.plugins()) {
+      if (!wanted.has(existing.id)) this.lspManager.unregister(existing.id);
+    }
+  }
+
   /** Resolves once every queued plugin sync has finished. */
   pluginsSynced(): Promise<void> {
     return this.syncChain.then(
@@ -466,6 +494,9 @@ export class WorkspaceService {
    *     so there is nothing to do anyway.
    */
   async applyRegistryChange(change: RegistryChange): Promise<{ added: string[]; removed: string[] }> {
+    // The manager's routing table is built from the registry, so it has to see
+    // the same change the slots are about to see.
+    await this.syncManagerPlugins().catch(() => undefined);
     if (change.type === 'rescan') return { added: [], removed: [] };
     if (this.syncing) return { added: [], removed: [] };
     this.syncing = true;
@@ -565,84 +596,23 @@ export class WorkspaceService {
   }
 
   /**
-   * Generic language-server launch.
+   * Bring this slot's language server up.
    *
-   * The four language branches this used to contain were *policy* — which
-   * binary to look for, what to call it, and whether the platform ships a
-   * fallback — so they now live in `manifest.lsp`. The only substrate-owned
-   * capability left is `bundledFallback: "stub"`, which names a server the
-   * binary carries rather than a language.
+   * The rules live in `lsp-launch.ts`: pooled manager or one client per
+   * language, which binary, and what to say when there is none.
    */
   private async startLsp(slot: Slot): Promise<void> {
-    const log = this.kernel.logger.forComponent(`ide.workspace.${slot.id}`);
-    const spec = slot.manifest.lsp;
-
-    let launch: LspLaunchSpec | undefined = this.opts.launch?.[slot.id];
-    let note: string | undefined;
-
-    if (!launch) {
-      if (!spec || spec.disabled) {
-        slot.lspError = spec?.degradedNote ?? `"${slot.id}" declares no language server`;
-        log.warn('No language server declared', { language: slot.id });
-        return;
-      }
-
-      const found = discoverBinary(spec.discovery, { root: this.rootDir || process.cwd() });
-      if (found.source !== 'missing' && found.bin) {
-        launch = {
-          languageId: spec.languageId ?? slot.id,
-          serverName: spec.serverName ?? slot.id,
-          command: found.bin,
-          args: spec.args ?? [],
-        };
-        note = `${launch.serverName} (${found.source})`;
-      } else if (spec.bundledFallback) {
-        // The plugin declares the command; this layer only expands placeholders.
-        // It used to call a Python-only `fallbackServerSpec()` here, so any
-        // language that declared a fallback silently got Python's server.
-        const toolchain = slot.toolchain ?? slot.manifest.run?.discovery?.commands?.[0];
-        const fallback = resolveBundledFallback(spec.bundledFallback, { languageId: slot.id, toolchain });
-        if (fallback) {
-          launch = fallback;
-          note = `bundled ${fallback.serverName}`;
-        } else {
-          slot.lspError = spec.degradedNote ?? `bundled fallback for "${slot.id}" could not be resolved`;
-          log.warn('Bundled language server unavailable', { language: slot.id });
-          return;
-        }
-      } else {
-        slot.lspError = spec.degradedNote ?? `${spec.serverName ?? 'language server'} not found`;
-        log.warn('Language server unavailable — Check/completion disabled', {
-          language: slot.id,
-          searched: [
-            ...(spec.discovery?.envVars ?? []),
-            ...(spec.discovery?.knownPaths ?? []),
-            ...(spec.discovery?.commands ?? []),
-          ].join(', ') || '(none)',
-        });
-        return;
-      }
-    }
-    if (!launch) return;
-
-    const client = new LspClient({ launch });
-    try {
-      const caps = await client.start(this.kernel, fileUri(join(this.rootDir, slot.id)));
-      await client.openDocument(slot.docUri, await readText(slot.docPath), slot.id);
-      slot.lsp = client;
-      slot.lspNote = note;
-      this.resources.noteUse(slot.id);
-      log.info('Language server ready', {
-        language: slot.id,
-        server: launch.serverName,
-        capabilities: Object.keys(caps).length,
-      });
-    } catch (err) {
-      // Diagnostics degrade gracefully: the editor still runs code.
-      slot.lspError = (err as Error).message;
-      await client.stop().catch(() => undefined);
-      log.error('Language server unavailable — Check/completion disabled', { language: slot.id }, err as Error);
-    }
+    await startSlotLsp(
+      {
+        kernel: this.kernel,
+        registry: this.registry,
+        manager: this.lspManager,
+        rootDir: this.rootDir,
+        ...(this.opts.launch ? { launchOverride: this.opts.launch } : {}),
+        noteUse: (id) => this.resources.noteUse(id),
+      },
+      slot,
+    );
   }
 
   // ---------------- public API ----------------
@@ -865,22 +835,36 @@ export class WorkspaceService {
         items: mapped,
         errors: mapped.filter((m) => m.severity === 1).length,
         warnings: mapped.filter((m) => m.severity === 2).length,
-        fromLsp: true,
+        // A lexical fallback answering is not the language server answering, and
+        // the Problems panel labels the two differently.
+        fromLsp: wait.source !== 'fallback',
+        ...(wait.source === 'fallback' ? { note: slot.lspError ?? 'fallback: lexical analysis only' } : {}),
       };
     });
   }
 
-  async complete(id: LanguageId, code: string, line: number, character: number): Promise<CompletionItem[]> {
+  async complete(
+    id: LanguageId,
+    code: string,
+    line: number,
+    character: number,
+  ): Promise<CompletionResult> {
     const slot = this.requireSlot(id);
     this.touch(id);
     await this.ensureLsp(id);
     return this.serialize(slot, async () => {
-      if (!slot.lsp) return [];
+      // "No server" used to be reported as an empty list, which is
+      // indistinguishable from "the server had no suggestions" — the same lie
+      // the nav methods were fixed to stop telling. The client still falls back
+      // to its own word list, so nothing is lost by naming the reason.
+      if (!slot.lsp) {
+        return { items: [], unsupported: slot.lspError ?? `${id} has no language server` };
+      }
       slot.lsp.changeDocument(slot.docUri, code, id);
       try {
-        return await slot.lsp.completion(slot.docUri, { line, character });
-      } catch {
-        return [];
+        return { items: await slot.lsp.completion(slot.docUri, { line, character }) };
+      } catch (err) {
+        return { items: [], unsupported: `completion failed: ${(err as Error).message}` };
       }
     });
   }
@@ -893,6 +877,25 @@ export class WorkspaceService {
    * result: "no server" and "nothing found" must stay distinguishable, which is
    * what `NavResult` carries.
    */
+  /**
+   * Whole-document formatting, as edits the client applies.
+   *
+   * The client keeps its own indenter as a fallback; this is the path that lets
+   * `gofmt`/`rustfmt`/`prettier` (through the server) do the real job. Same
+   * shape as the navigation requests so "no server" stays distinguishable from
+   * "nothing to change".
+   */
+  async format(id: LanguageId, code: string): Promise<NavResult<TextEdit[]>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<TextEdit[]>(slot.lspError ?? `${id} has no language server`);
+      slot.lsp.changeDocument(slot.docUri, code, id);
+      return slot.lsp.formatting(slot.docUri);
+    });
+  }
+
   async definition(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<Location[]>> {
     const slot = this.requireSlot(id);
     this.touch(id);
@@ -952,6 +955,27 @@ export class WorkspaceService {
       slot.lsp.changeDocument(slot.docUri, code, id);
       const position = { line, character };
       return slot.lsp.codeActions(slot.docUri, { start: position, end: position }, []);
+    });
+  }
+
+  async resolveCompletion(id: LanguageId, label: string): Promise<NavResult<{ documentation?: string; detail?: string }>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<{ documentation?: string; detail?: string }>(slot.lspError ?? `${id} has no language server`);
+      return slot.lsp.resolveCompletionItem({ label });
+    });
+  }
+
+  async signatureHelp(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<SignatureHelp>> {
+    const slot = this.requireSlot(id);
+    this.touch(id);
+    await this.ensureLsp(id);
+    return this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<SignatureHelp>(slot.lspError ?? `${id} has no language server`);
+      slot.lsp.changeDocument(slot.docUri, code, id);
+      return slot.lsp.signatureHelp(slot.docUri, { line, character });
     });
   }
 
@@ -1049,47 +1073,40 @@ export class WorkspaceService {
   /**
    * What every language currently costs, straight from its manifest.
    *
-   * The manifest's `memoryHint` is the only number we have without shelling out
-   * to the OS, and it is a *hint*: it keeps the accounting honest about the
-   * difference between a pyright and a markdown server, which is what the
-   * budget needs. Real RSS would be better where the platform allows it.
+   * The projection lives in `workspace-wire.ts` with the other views over slot
+   * state; this method only supplies the two things it cannot see — the slots
+   * and the LRU clock.
    */
   private resourceProfiles(): ResourceProfile[] {
-    const now = Date.now();
-    return [...this.slots.values()].map((slot) => {
-      const m = slot.manifest;
-      // memoryHint is an estimate, not RSS. Only count the reclaimable LSP
-      // estimate while that process is alive; otherwise an idle, never-started
-      // server can make the total budget look exceeded and evict other servers.
-      const lspBytes = slot.lsp ? parseMemoryHint(m.lsp?.memoryHint) : 0;
-      return {
-        languageId: slot.id,
-        memoryBytes: lspBytes + parseMemoryHint(m.profiler?.memoryHint) + (slot.runner ? runtimeMemoryBytes(m.run?.mode) : 0),
-        lspMemoryBytes: lspBytes,
-        lspRunning: !!slot.lsp,
-        eager: m.lsp?.eager === true,
-        lastUsedAt: this.resources.lastUsedAt(slot.id, now),
-      };
-    });
+    return resourceProfilesOf(this.slots.values(), (id, now) => this.resources.lastUsedAt(id, now));
   }
 
   /**
    * Stop a language server and leave a note to restart it on next use.
    *
-   * Called by `ProfileManager` only — a user never sees a server disappear,
-   * because `lspPending` brings it back on the next Check/Complete.
+   * Called by `ProfileManager` (budget) and by `restartLanguageServer` (after an
+   * install). A user never sees a server disappear for budget reasons, because
+   * `lspPending` brings it back on the next Check/Complete.
+   *
+   * `lspPending` is set even when nothing was running: a server that *failed* to
+   * start left it false, and a restart must still retry instead of concluding
+   * there is nothing to do.
    */
-  private async releaseLsp(id: string): Promise<void> {
+  private async releaseLsp(id: string, reason = 'resource manager'): Promise<void> {
     const slot = this.slots.get(id);
     if (!slot) return;
+    const wasUp = !!slot.lsp;
+    // A pooled entry outlives the slot, so stopping the client is not enough:
+    // the manager has to forget it or the next acquire hands back a dead one.
+    if (slot.manifest.lsp?.manager) await this.lspManager.release(id).catch(() => undefined);
     await slot.lsp?.stop().catch(() => undefined);
-    if (!slot.lsp) return; // Nothing to do (already stopped).
     slot.lsp = undefined;
     slot.lspStarting = undefined;
     slot.lspPending = true;
+    if (!wasUp) return; // Already down; nothing to announce.
     this.kernel.logger
       .forComponent(`ide.workspace.${id}`)
-      .info('Language server released by the resource manager — restarts on next use', { language: id });
+      .info('Language server released — restarts on next use', { language: id, reason });
   }
 
   /** Memory accounting for `/health`, the status bar and the Plugins page. */
@@ -1113,6 +1130,7 @@ export class WorkspaceService {
       await slot.lsp?.stop().catch(() => undefined);
       await slot.runner?.close().catch(() => undefined);
     }
+    await this.lspManager.close().catch(() => undefined);
   }
 
   // ---------------- internals ----------------

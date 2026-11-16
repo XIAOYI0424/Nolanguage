@@ -11,7 +11,7 @@
  * When the sources are run directly from `src/` nothing is embedded, so the
  * loader falls back to the real file on disk.
  */
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -73,9 +73,37 @@ export function embeddedAssetPath(name: string): string | undefined {
   return target;
 }
 
+/**
+ * True when `target` already holds `text`.
+ *
+ * Embedded assets are build constants, so a second launch has nothing to write.
+ * Skipping the write is not just an optimisation: on Windows an existing file
+ * can be locked (a running extension host, a scanner) and `writeFileSync` then
+ * fails with EPERM — which used to abort the whole launch even though the cache
+ * was perfectly good.
+ */
+function alreadyThere(target: string, text: string): boolean {
+  try {
+    return readFileSync(target, 'utf8') === text;
+  } catch {
+    return false;
+  }
+}
+
 /** True when this process is running from a packaged executable. */
 export function isPackaged(): boolean {
   return embeddedStore() !== undefined;
+}
+
+export interface MaterializeOptions {
+  /** Primary root. Defaults to `<tmp>/nolanguage-embedded`; tests override it. */
+  root?: string;
+  /**
+   * Where to write when the primary refuses. Supplied by the caller because the
+   * app-data root lives in `util`, and `assets` sits at the same layer as it —
+   * an import would be an upward edge the architecture gate rejects.
+   */
+  fallbackRoot?: string;
 }
 
 /**
@@ -87,23 +115,31 @@ export function isPackaged(): boolean {
  * demo extensions inside the executable: the extension host child process
  * imports them by path, and a path is the only thing `import()` accepts.
  */
-export function materializeAssets(prefix: string): string | undefined {
+export function materializeAssets(prefix: string, opts: MaterializeOptions = {}): string | undefined {
   const store = embeddedStore();
   if (!store) return undefined;
   const keys = Object.keys(store).filter((k) => k.startsWith(prefix));
   if (!keys.length) return undefined;
-  const root = join(tmpdir(), 'nolanguage-embedded');
-  for (const key of keys) {
-    const target = join(root, key);
+
+  // `%TEMP%` is the natural home, but it is not always writable: a scanner can
+  // hold a file, a roaming profile can arrive read-only, and the directory may
+  // belong to a different account after an update. Falling back to the app data
+  // root keeps the app starting; failing outright does not.
+  const roots = [opts.root ?? join(tmpdir(), 'nolanguage-embedded'), opts.fallbackRoot].filter((r): r is string => !!r);
+  let last: unknown;
+  for (const root of roots) {
     try {
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, store[key], 'utf8');
+      for (const key of keys) {
+        const target = join(root, key);
+        mkdirSync(dirname(target), { recursive: true });
+        if (!alreadyThere(target, store[key])) writeFileSync(target, store[key], 'utf8');
+      }
+      return join(root, ...prefix.split('/').filter(Boolean));
     } catch (err) {
-      const e = err as EmbeddedAssetError;
-      e.asset = key;
-      e.assetRoot = root;
-      throw e;
+      last = err;
     }
   }
-  return join(root, ...prefix.split('/').filter(Boolean));
+  const e = last as EmbeddedAssetError;
+  e.assetRoot = roots[roots.length - 1];
+  throw e;
 }

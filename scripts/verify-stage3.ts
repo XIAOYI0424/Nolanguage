@@ -234,6 +234,48 @@ async function main(): Promise<void> {
   check('execution timed into perf', !!execSummary && execSummary.count === 3,
     execSummary ? `${execSummary.p50.toFixed(1)}ms p50, n=${execSummary.count}` : 'missing');
 
+  // ---------- navigation, against the bundled server ----------
+  // The positions are UTF-16 code units, as LSP requires. The sample puts an
+  // astral character (an emoji, 2 units, 1 code point) before the identifier on
+  // purpose: a server that counts code points answers one column short, and the
+  // rename would then rewrite the wrong characters.
+  const navCode = ['def add(a, b):', '    return a + b', '', 'x = "🎉" + add(1, 2)', ''].join('\n');
+  const navLine = navCode.split('\n')[3];
+  const u16 = [...navLine.slice(0, navLine.indexOf('add'))].reduce(
+    (n, ch) => n + ((ch.codePointAt(0) ?? 0) > 0xffff ? 2 : 1),
+    0,
+  );
+  lsp.changeDocument(fileUri(workspace), navCode, 'python');
+  await new Promise((r) => setTimeout(r, 150));
+
+  const navDef = await lsp.definition(fileUri(workspace), { line: 3, character: u16 + 1 });
+  check(
+    'navigation: definition finds the declaration',
+    navDef.ok && navDef.value.length === 1 && navDef.value[0].range.start.line === 0,
+    navDef.ok ? `${navDef.value.length} location(s)` : navDef.reason,
+  );
+
+  const navRefs = await lsp.references(fileUri(workspace), { line: 3, character: u16 + 1 }, true);
+  check(
+    'navigation: references answer in UTF-16 columns',
+    navRefs.ok && navRefs.value.length === 2 && navRefs.value.every((l) => l.range.start.character === u16 || l.range.start.line === 0),
+    navRefs.ok ? navRefs.value.map((l) => `${l.range.start.line}:${l.range.start.character}`).join(',') : navRefs.reason,
+  );
+
+  const navBad = await lsp.renameSymbol(fileUri(workspace), { line: 3, character: u16 + 1 }, 'class');
+  check(
+    'navigation: renaming to a keyword is refused',
+    !navBad.ok,
+    navBad.ok ? `produced ${navBad.value.length} edit(s)` : navBad.reason,
+  );
+
+  const navRename = await lsp.renameSymbol(fileUri(workspace), { line: 3, character: u16 + 1 }, 'sum2');
+  check(
+    'navigation: rename edits every occurrence',
+    navRename.ok && navRename.value.length === 2,
+    navRename.ok ? `${navRename.value.length} edit(s)` : navRename.reason,
+  );
+
   // ---------- cleanup ----------
   await lsp.stop();
   await runner.close();

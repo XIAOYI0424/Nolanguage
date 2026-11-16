@@ -77,6 +77,10 @@
     if (e.key === 'Tab') { e.preventDefault(); insertText('    '); scheduleComplete(); return; }
     if (e.key === 'Enter') { e.preventDefault(); autoIndentEnter(); scheduleComplete(); return; }
     if (e.key === 'Escape') { CMP.dismissed = true; cmpClose(); return; }
+    // Parameter hints fire on the two characters that change the argument the
+    // caret is on. ')' and Escape close the popup; anything else leaves it.
+    if (e.key === '(' || e.key === ',') { sigTrigger(); }
+    else if (e.key === ')' || e.key === 'Escape') { sigClose(); }
     var close = CLOSERS[e.key];
     if (close) { e.preventDefault(); autoPair(e.key, close); scheduleComplete(); return; }
   }
@@ -212,6 +216,12 @@
     var seen = Object.create(null), merged = [];
     lsp.forEach(function (it) { if (!seen[it.label]) { seen[it.label] = 1; merged.push(it); } });
     (CMP.lex || []).forEach(function (it) { if (!seen[it.label]) { seen[it.label] = 1; merged.push(it); } });
+    // The server's ranking beats alphabetical order: 'sortText' is how pyright
+    // puts the likely match first. Falls back to the label when absent.
+    merged.sort(function (a, b) {
+      var ka = a.sortText || a.label, kb = b.sortText || b.label;
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
     var keep = (CMP.open && CMP.items[CMP.sel]) ? CMP.items[CMP.sel].label : '';
     CMP.items = merged.slice(0, 50);
     CMP.sel = 0;
@@ -227,9 +237,21 @@
       var k = it.kind == null ? '' : (KIND_TEXT[it.kind] || String(it.kind).slice(0, 2));
       return '<div class="row' + (i === CMP.sel ? ' sel' : '') + '" data-i="' + i + '"><span class="k">' + esc(k) + '</span><span>' + esc(it.label) + '</span><span class="d">' + esc(it.detail || '') + '</span></div>';
     }).join('');
+    var selIt = CMP.items[CMP.sel];
+    var doc = selIt ? CMP.docs[selIt.label] : undefined;
+    if (doc) {
+      el.innerHTML += '<div class="cmp-doc" data-cmpdoc="1">' + esc(String(doc).slice(0, 160)) + '</div>';
+    }
     el.querySelectorAll('.row').forEach(function (row) {
       row.addEventListener('mousedown', function (ev) { ev.preventDefault(); CMP.sel = +row.getAttribute('data-i'); cmpAccept(); });
     });
+    // Ask for the highlighted row's documentation once; the list frame carries
+    // labels only, because full docstrings for a hundred items is tens of KB per
+    // keystroke and the user reads one.
+    if (selIt && CMP.docs[selIt.label] === undefined && lspLang()) {
+      CMP.docs[selIt.label] = null;
+      BRIDGE.send({ kind: 'completionResolve', language: currentLang, label: selIt.label, requestId: navNextId() });
+    }
     var host = el.parentNode ? el.parentNode : document.body;
     var left, top;
     if (CMEDITOR) {
@@ -250,13 +272,45 @@
     el.classList.add('open');
   }
   function cmpMove(d) { if (!CMP.open || !CMP.items.length) return; CMP.sel = (CMP.sel + d + CMP.items.length) % CMP.items.length; renderCmp(); }
+  /**
+   * Expand the subset of the snippet syntax a language server actually sends:
+   * a placeholder like $ followed by a number and an optional :default becomes
+   * the default text (or nothing), and placeholder zero marks where the caret
+   * should land. Anything else is kept verbatim.
+   *
+   * Full LSP snippets (choices, transforms, nesting) are not attempted - a
+   * half-implemented grammar is worse than the common cases plus a caret.
+   */
+  function expandSnippet(text) {
+    if (text == null) return { text: '', caret: 0 };
+    var src = String(text);
+    if (src.indexOf('$') < 0) return { text: src, caret: src.length };
+    var out = '', caret = -1, i = 0;
+    while (i < src.length) {
+      var ch = src.charAt(i);
+      if (ch !== '$') { out += ch; i++; continue; }
+      var rest = src.slice(i);
+      var m = /^\$\{(\d+):([^}]*)\}/.exec(rest) || /^\$\{(\d+)\}/.exec(rest) || /^\$(\d+)/.exec(rest);
+      if (!m) { out += ch; i++; continue; }
+      var num = Number(m[1]);
+      var body = m[2] == null ? '' : m[2];
+      if (num === 0) caret = out.length;
+      out += body;
+      i += m[0].length;
+    }
+    return { text: out, caret: caret >= 0 ? caret : out.length };
+  }
+
   function cmpAccept() {
     if (!CMP.open) return;
     var it = CMP.items[CMP.sel]; CMP.dismissed = true; cmpClose();
     if (!it) return;
+    // 'insertText' is the server's preferred insertion (often 'get(url, timeout)');
+    // 'label' is only the display text.
+    var ins = expandSnippet(it.insertText != null ? it.insertText : it.label);
     var pos = ta.selectionStart, pref = wordPrefix(), start = pos - pref.length;
-    ta.value = ta.value.slice(0, start) + it.label + ta.value.slice(pos);
-    ta.selectionStart = ta.selectionEnd = start + it.label.length;
+    ta.value = ta.value.slice(0, start) + ins.text + ta.value.slice(pos);
+    ta.selectionStart = ta.selectionEnd = start + ins.caret;
     renderEditor(); updateCaret();
   }
   function cmpClose() { CMP.open = false; var el = $('cmp'); if (el) el.classList.remove('open'); }
@@ -430,6 +484,7 @@
     if (!isOpen(name)) TABS.push(name);
     if (currentFile !== name) clearCoverage();
     currentFile = name; currentLang = buf.languageId || 'python';
+    pkgSync();
     ta.value = buf.content;
     ta.readOnly = !buf.editable;
     $('stFile').textContent = name;
@@ -571,6 +626,10 @@
     // while frames / variables / watches only make sense while stopped.
     { id: 'debug', title: 'Debug', icon: 'debug', key: '' },
     { id: 'terminal', title: 'Terminal', icon: 'terminal', key: 'Alt+F12' },
+    // Packages is PyCharm's Python Packages window, generalized: the list and
+    // the installer both come from the language manifest, so it shows the
+    // project's real dependency file for whichever language is open.
+    { id: 'packages', title: 'Packages', icon: 'database', key: 'Alt+6' },
     { id: 'perf', title: 'Performance', icon: 'perf', key: 'Alt+8' },
     { id: 'logs', title: 'Logs', icon: 'logs', key: 'Alt+0' },
     { id: 'find', title: 'Find', icon: 'search', key: 'Ctrl+Shift+F' }
@@ -588,7 +647,7 @@
     for (var i = 0; i < all.length; i++) if (all[i].id === id) return all[i];
     return null;
   }
-  function isBottom(id) { return id === 'run' || id === 'debug' || id === 'terminal' || id === 'perf' || id === 'logs' || id === 'problems' || id === 'find'; }
+  function isBottom(id) { return id === 'run' || id === 'debug' || id === 'terminal' || id === 'packages' || id === 'perf' || id === 'logs' || id === 'problems' || id === 'find'; }
 
   function renderStrip() {
     var el = $('strip'); el.innerHTML = '';

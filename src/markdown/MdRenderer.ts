@@ -548,7 +548,12 @@ function renderInline(ctx: Ctx, text: string): string {
     ctx.stats.links++;
     return `<a href="${escapeHtml(safe)}"${ref.title ? ` title="${escapeHtml(ref.title)}"` : ''}>${label}</a>`;
   });
-  s = s.replace(/<(https?:\/\/[^>\s]+)>/g, (_m, url: string) => {
+  // Autolinks arrive already escaped: pass 1 ran `escapeHtml` over the whole
+  // string, so `<https://…>` is `&lt;https://…&gt;` by the time we get here.
+  // The pattern used to look for a literal `<`, which never matched — every
+  // autolink rendered as inert text. Matching the escaped form is the fix, and
+  // the `[^&\s]+` body keeps a URL from swallowing the `&gt;` that closes it.
+  s = s.replace(/&lt;(https?:\/\/[^&\s]+)&gt;/g, (_m, url: string) => {
     ctx.stats.links++;
     return `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`;
   });

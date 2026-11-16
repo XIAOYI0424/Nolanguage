@@ -122,7 +122,11 @@ export type PanelServerMessage =
       warnings: number;
       fromLsp: boolean;
     }
-  | { kind: 'completion'; requestId: number; items: Array<{ label: string; kind?: number; detail?: string }> }
+  | {
+      kind: 'completion';
+      requestId: number;
+      items: Array<{ label: string; kind?: number; detail?: string; insertText?: string; sortText?: string; filterText?: string }>;
+    }
   | { kind: 'hover'; requestId: number; hover: unknown }
   // ---- navigation (the five LSP requests) ----
   // `unsupported` is carried on every result: "no results" and "this server
@@ -132,6 +136,15 @@ export type PanelServerMessage =
   | { kind: 'renameResult'; requestId: number; edits: NavEdit[]; unsupported?: string }
   | { kind: 'codeActionResult'; requestId: number; actions: NavAction[]; unsupported?: string }
   | { kind: 'workspaceSymbolResult'; requestId: number; symbols: NavSymbol[]; truncated?: boolean; unsupported?: string }
+  | { kind: 'completionItemDetail'; requestId: number; label: string; documentation?: string; detail?: string; unsupported?: string }
+  | {
+      kind: 'signatureResult';
+      requestId: number;
+      signatures: Array<{ label: string; documentation?: string; activeParameter?: number }>;
+      activeSignature?: number;
+      activeParameter?: number;
+      unsupported?: string;
+    }
   | { kind: 'session'; sessionId: string; reset: boolean }
   | { kind: 'error'; message: string }
   // ---- Project explorer (file system) ----

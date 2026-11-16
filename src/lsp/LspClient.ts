@@ -13,6 +13,7 @@
  *    become structured `language-server` log records.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { planSpawn } from '../util/spawnPlan.js';
 import { performance } from 'node:perf_hooks';
 import { existsSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -25,6 +26,7 @@ import {
   normalizeCodeActions,
   normalizeLocations,
   normalizeSymbols,
+  normalizeSignatureHelp,
   normalizeWorkspaceEdit,
   supported,
   unsupported,
@@ -32,6 +34,7 @@ import {
   type Location,
   type NavFeature,
   type NavResult,
+  type SignatureHelp,
   type SymbolInformation,
   type TextEdit,
 } from './navigation.js';
@@ -60,12 +63,23 @@ export interface Diagnostic {
 export interface DiagnosticsWait {
   items: Diagnostic[];
   published: boolean;
+  /**
+   * Who produced the items. `fallback` means no language server answered and a
+   * lexical provider did — the panel must not label those "from the server".
+   */
+  source?: 'lsp' | 'fallback';
 }
 export interface CompletionItem {
   label: string;
   kind?: number;
   detail?: string;
   documentation?: string | { value: string };
+  /** What accepting the item inserts. Often differs from `label` (`get(url, x)`). */
+  insertText?: string;
+  /** Server's ranking key; alphabetically sorting `label` throws it away. */
+  sortText?: string;
+  /** Key the fuzzy filter should match against, when it differs from `label`. */
+  filterText?: string;
 }
 export interface Hover {
   contents: string | { value: string } | Array<string | { value: string }>;
@@ -94,6 +108,15 @@ export interface LspLaunchSpec {
    * every request with "no active builds contain <file>".
    */
   env?: Record<string, string>;
+  /**
+   * `initialize.initializationOptions`, passed through verbatim.
+   *
+   * Servers that need configuration before they will do anything useful take it
+   * here — jdtls decides whether to import a whole Maven workspace from
+   * `settings.java.import.mode`. The engine used to hardcode `{}`, which made
+   * every such server run with defaults no plugin could change.
+   */
+  initializationOptions?: Record<string, unknown>;
 }
 
 export interface LspClientOptions {
@@ -171,7 +194,7 @@ export class LspClient extends EventEmitter {
   }
 
   diagnostics(uri: string): Diagnostic[] {
-    return this.diagnosticsByUri.get(uri) ?? [];
+    return this.diagnosticsByUri.get(diagnosticKey(uri)) ?? [];
   }
 
   /**
@@ -198,11 +221,19 @@ export class LspClient extends EventEmitter {
     });
 
     const t0 = performance.now();
-    this.child = spawn(launch.command, launch.args, {
+    // Resolve the command the way a shell would before spawning it. Every
+    // npm-installed language server on Windows — `typescript-language-server`,
+    // `pyright-langserver`, `vscode-json-languageserver` — is a `.cmd` shim, and
+    // `spawn` cannot start one: a bare name gives ENOENT (CreateProcess ignores
+    // PATHEXT) and the `.cmd` itself gives EINVAL (it is a script for cmd.exe,
+    // not an image). The MCP client already learned this; the plan is shared.
+    const plan = planSpawn(launch.command, launch.args, { PATH: launch.env?.PATH ?? process.env.PATH });
+    this.child = spawn(plan.command, plan.args, {
       cwd: launch.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONUNBUFFERED: '1', ...(launch.env ?? {}) },
       windowsHide: true,
+      shell: plan.shell,
     }) as ChildProcessWithoutNullStreams;
 
     this.child.on('error', (err) => {
@@ -278,7 +309,7 @@ export class LspClient extends EventEmitter {
             didChangeWatchedFiles: { dynamicRegistration: true },
           },
         },
-        initializationOptions: {},
+        initializationOptions: launch.initializationOptions ?? {},
       },
     );
     this._capabilities = initResult.capabilities ?? {};
@@ -347,19 +378,19 @@ export class LspClient extends EventEmitter {
         clearTimeout(timer);
         this.off('diagnostics', handler);
         resolve({
-          items: this.diagnosticsByUri.get(uri) ?? [],
+          items: this.diagnosticsByUri.get(diagnosticKey(uri)) ?? [],
           published: this.publishCount > before,
         });
       };
       const handler = (p: { uri: string; diagnostics: Diagnostic[] }): void => {
-        if (p.uri === uri && this.publishCount > before) finish();
+        if (diagnosticKey(p.uri) === diagnosticKey(uri) && this.publishCount > before) finish();
       };
       const timer = setTimeout(finish, timeoutMs);
       this.on('diagnostics', handler);
     });
   }
 
-  async completion(uri: string, position: Position): Promise<CompletionItem[]> {
+  async completion(uri: string, position: Position, onId?: (id: number) => void): Promise<CompletionItem[]> {
     const span = this.kernel?.tracer.startSpan('lsp.completion', {
       attributes: { fileUri: uri, line: position.line },
     });
@@ -373,7 +404,7 @@ export class LspClient extends EventEmitter {
         textDocument: { uri },
         position,
         context: { triggerKind: 1 },
-      });
+      }, onId);
       const ms = performance.now() - t0;
       const items = Array.isArray(res) ? res : (res?.items ?? []);
       this.kernel?.perfMetrics().record('lsp.completion', ms);
@@ -393,12 +424,12 @@ export class LspClient extends EventEmitter {
     }
   }
 
-  async hover(uri: string, position: Position): Promise<Hover | null> {
+  async hover(uri: string, position: Position, onId?: (id: number) => void): Promise<Hover | null> {
     const t0 = performance.now();
     const res = await this.requireRpc().request<Hover | null>('textDocument/hover', {
       textDocument: { uri },
       position,
-    });
+    }, onId);
     this.kernel?.perfMetrics().record('lsp.hover', performance.now() - t0);
     return res;
   }
@@ -418,13 +449,14 @@ export class LspClient extends EventEmitter {
     method: string,
     params: unknown,
     normalize: (raw: unknown) => T,
+    onId?: (id: number) => void,
   ): Promise<NavResult<T>> {
     if (!declaresFeature(this._capabilities as Record<string, unknown>, feature)) {
       return unsupported<T>(`${this.serverName} does not advertise ${feature}`);
     }
     const t0 = performance.now();
     try {
-      const raw = await this.requireRpc().request<unknown>(method, params);
+      const raw = await this.requireRpc().request<unknown>(method, params, onId);
       this.kernel?.perfMetrics().record(`lsp.${feature}`, performance.now() - t0);
       return supported(normalize(raw));
     } catch (err) {
@@ -434,16 +466,22 @@ export class LspClient extends EventEmitter {
     }
   }
 
-  definition(uri: string, position: Position): Promise<NavResult<Location[]>> {
-    return this.nav('definition', 'textDocument/definition', { textDocument: { uri }, position }, normalizeLocations);
+  definition(uri: string, position: Position, onId?: (id: number) => void): Promise<NavResult<Location[]>> {
+    return this.nav('definition', 'textDocument/definition', { textDocument: { uri }, position }, normalizeLocations, onId);
   }
 
-  references(uri: string, position: Position, includeDeclaration = true): Promise<NavResult<Location[]>> {
+  references(
+    uri: string,
+    position: Position,
+    includeDeclaration = true,
+    onId?: (id: number) => void,
+  ): Promise<NavResult<Location[]>> {
     return this.nav(
       'references',
       'textDocument/references',
       { textDocument: { uri }, position, context: { includeDeclaration } },
       normalizeLocations,
+      onId,
     );
   }
 
@@ -454,6 +492,27 @@ export class LspClient extends EventEmitter {
     // and must not render as an empty result the user cannot explain.
     if (r.ok && r.value.length === 0) return unsupported('the server cannot rename this symbol');
     return r;
+  }
+
+  /**
+   * `textDocument/formatting` — the whole document, as edits to apply.
+   *
+   * Deliberately a `NavResult`: a server that does not implement formatting and
+   * a server that returns "no changes needed" must stay distinguishable, or the
+   * client cannot tell whether to fall back to its own indenter.
+   */
+  formatting(
+    uri: string,
+    options: { tabSize: number; insertSpaces: boolean } = { tabSize: 4, insertSpaces: true },
+    onId?: (id: number) => void,
+  ): Promise<NavResult<TextEdit[]>> {
+    return this.nav(
+      'format',
+      'textDocument/formatting',
+      { textDocument: { uri }, options },
+      (raw) => (Array.isArray(raw) ? (raw as TextEdit[]) : []),
+      onId,
+    );
   }
 
   codeActions(uri: string, range: Range, diagnostics: unknown[] = []): Promise<NavResult<CodeAction[]>> {
@@ -467,6 +526,44 @@ export class LspClient extends EventEmitter {
 
   workspaceSymbols(query: string): Promise<NavResult<SymbolInformation[]>> {
     return this.nav('workspaceSymbol', 'workspace/symbol', { query }, normalizeSymbols);
+  }
+
+  /**
+   * Ask the server for one completion item's details.
+   *
+   * Inline `documentation` in the list frame would be tens of kilobytes per
+   * keystroke; this costs one round trip, and only for the row the user is
+   * looking at.
+   */
+  async resolveCompletionItem(item: { label: string }): Promise<NavResult<{ documentation?: string; detail?: string }>> {
+    const caps = this._capabilities as Record<string, unknown>;
+    const provider = caps.completionProvider as { resolveProvider?: boolean } | undefined;
+    if (!provider?.resolveProvider) {
+      return unsupported(`${this.serverName} does not resolve completion items`);
+    }
+    try {
+      const raw = await this.requireRpc().request<Record<string, unknown>>('completionItem/resolve', item);
+      const doc = raw?.documentation;
+      const text =
+        typeof doc === 'string' ? doc : doc && typeof doc === 'object' ? String((doc as { value?: string }).value ?? '') : undefined;
+      return supported({
+        ...(text ? { documentation: text } : {}),
+        ...(typeof raw?.detail === 'string' ? { detail: raw.detail } : {}),
+      });
+    } catch (err) {
+      if ((err as { rpcCode?: number }).rpcCode === -32601) return unsupported(`${this.serverName} does not resolve completion items`);
+      throw err;
+    }
+  }
+
+  /**
+   * Parameter hints for the call under the caret.
+   *
+   * Sent on `(` and `,` only - never per keystroke - so the extra round trip is
+   * paid a few times per line rather than on every character.
+   */
+  signatureHelp(uri: string, position: Position): Promise<NavResult<SignatureHelp>> {
+    return this.nav('signatureHelp', 'textDocument/signatureHelp', { textDocument: { uri }, position }, normalizeSignatureHelp);
   }
 
   /** Ask for diagnostics explicitly (pull) when the server supports it. */
@@ -483,12 +580,23 @@ export class LspClient extends EventEmitter {
       if (ms > (this.opts.slowDiagnosticMs ?? 300)) {
         this.logger?.warn('Slow diagnostics pass', { durationMs: Math.round(ms), file: uri });
       }
-      this.diagnosticsByUri.set(uri, items);
+      this.diagnosticsByUri.set(diagnosticKey(uri), items);
       return items;
     } catch {
       // Many servers are push-only; fall back to whatever was published.
       return this.diagnostics(uri);
     }
+  }
+
+  /**
+   * Forward `$/cancelRequest` for an in-flight request.
+   *
+   * A cancelled request still answers (LSP requires error `-32800`), so the
+   * promise resolves or rejects as usual; the caller decides whether the answer
+   * is still wanted. That is the scheduler's job, not the transport's.
+   */
+  cancelRequest(id: number): boolean {
+    return this.rpc?.cancel(id) ?? false;
   }
 
   async stop(): Promise<void> {
@@ -556,7 +664,7 @@ export class LspClient extends EventEmitter {
   private handleInbound(msg: JsonRpcMessage): void {
     if (msg.method === 'textDocument/publishDiagnostics') {
       const p = msg.params as { uri: string; diagnostics: Diagnostic[] };
-      this.diagnosticsByUri.set(p.uri, p.diagnostics ?? []);
+      this.diagnosticsByUri.set(diagnosticKey(p.uri), p.diagnostics ?? []);
       this.publishCount++;
       const errors = (p.diagnostics ?? []).filter((d) => d.severity === 1).length;
       const warns = (p.diagnostics ?? []).filter((d) => d.severity === 2).length;
@@ -616,6 +724,30 @@ export function commandExists(cmd: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Canonical key for the diagnostics map.
+ *
+ * A server may echo a URI back in a different spelling than the one it was
+ * given: tsserver answers `file:///d%3A/...` for a document opened as
+ * `file:///D:/...`. Comparing raw strings then never matches, so the published
+ * diagnostics are stored under a key nobody looks up — and Check reports "no
+ * problems" while the server's own log says it published one. Python's stub
+ * echoed the URI verbatim, which is why this survived until a real server was
+ * installed.
+ *
+ * Normalising cannot merge two genuinely different files: NTFS is
+ * case-insensitive and `%3A` is just `:`.
+ */
+function diagnosticKey(uri: string): string {
+  let out = uri;
+  try {
+    out = decodeURIComponent(uri);
+  } catch {
+    /* malformed escape: compare the raw form */
+  }
+  return process.platform === 'win32' ? out.toLowerCase() : out;
 }
 
 export function fileUri(p: string): string {

@@ -213,6 +213,67 @@ try {
     `${String(beforeText ?? '').length} -> ${String(afterText ?? '').length} chars`,
   );
 
+  // ---- L0: diagnostics are squiggles in the editor, not just a panel ----
+  // The engine has produced lint-level diagnostics for a long time; the question
+  // this answers is whether the *editor* shows them. `paintDiagMarks` marks the
+  // range and the gutter, and check-as-you-type fires 300 ms after the buffer
+  // changes — so this drives real editing, not a manual button.
+  const l0Typed = await cdp.eval(`(function(){
+    var cm = document.querySelector('.CodeMirror').CodeMirror;
+    cm.setValue('def broken(\\n    return undefined_name\\n');
+    return cm.getValue().length;
+  })()`);
+  check('the buffer accepts a file with two errors', typeof l0Typed.value === 'number', `${l0Typed.value} chars`);
+  await sleep(3000);
+  const l0Marks = await cdp.eval(`(function(){
+    return {
+      squiggles: document.querySelectorAll('.CodeMirror .diag-sq').length,
+      gutter: document.querySelectorAll('.CodeMirror .diag-g1, .CodeMirror .diag-g2').length,
+      problems: document.querySelectorAll('#probOut .prob').length,
+      status: (document.getElementById('stProblems') || {}).textContent || '',
+    };
+  })()`);
+  const l0 = (l0Marks.value ?? {}) as { squiggles?: number; gutter?: number; problems?: number; status?: string };
+  check('a syntax error paints a squiggle in the editor', (l0.squiggles ?? 0) > 0, JSON.stringify(l0));
+  check('the gutter carries the same severity', (l0.gutter ?? 0) > 0, `${l0.gutter} line(s)`);
+  check('the Problems panel agrees with the editor', (l0.problems ?? 0) > 0, `${l0.problems} row(s)`);
+  check('the status bar counts the same problems', /problem/.test(String(l0.status ?? '')), String(l0.status ?? 'none'));
+
+  // Fixing the file must clear them: a stale squiggle is worse than none.
+  await cdp.eval(`(function(){
+    var cm = document.querySelector('.CodeMirror').CodeMirror;
+    cm.setValue('def ok():\\n    return 42\\n');
+    return true;
+  })()`);
+  await sleep(3000);
+  const l0Cleared = await cdp.eval("document.querySelectorAll('.CodeMirror .diag-sq').length");
+  check('fixing the file clears the squiggles', (l0Cleared.value ?? -1) === 0, `${String(l0Cleared.value)} left`);
+
+  // ---- Ctrl+Alt+L: reformat falls back to the local indenter ----
+  // The bundled Python stub does not implement `textDocument/formatting`, so the
+  // correct behaviour is the local pass plus a toast that says so — not a silent
+  // no-op, and not a lie that the server did it. The input has trailing spaces on
+  // purpose: the local pass trims them, so "something changed" is observable.
+  const NL = 'String.fromCharCode(10)';
+  await cdp.eval(`(function(){
+    var cm = document.querySelector('.CodeMirror').CodeMirror;
+    cm.setValue('def f():' + ${NL} + '    return 1   ' + ${NL});
+    cm.focus();
+    return cm.getValue().length;
+  })()`);
+  await sleep(600);
+  await cdp.press('l', 'KeyL', 76, MOD.ctrl | MOD.alt);
+  await sleep(1500);
+  const fmtFrame = await cdp.eval(`(function(){
+    var cm = document.querySelector('.CodeMirror').CodeMirror;
+    return { text: cm.getValue(), toast: (document.querySelector('.toast, #toast') || {}).textContent || '' };
+  })()`);
+  const fmtRes = (fmtFrame.value ?? {}) as { text?: string; toast?: string };
+  check('Ctrl+Alt+L reformats the buffer', /return 1/.test(String(fmtRes.text ?? '')),
+    JSON.stringify(String(fmtRes.text ?? '').slice(0, 40)));
+  check('the local pass is what changed it, and says so', /Reformatted locally · \d+ line/.test(String(fmtRes.toast ?? '')),
+    String(fmtRes.toast ?? 'none'));
+
   // ---- Ctrl+T: workspace symbols ----
   await cdp.press('t', 'KeyT', 84, MOD.ctrl);
   await sleep(700);

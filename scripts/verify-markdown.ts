@@ -172,6 +172,40 @@ function testRenderer(): void {
   check('renderer: oversized input is clipped (truncated flag)', bigR.truncated === true,
     `lines=${MAX_LINES + 5000}`);
   check('renderer: oversized input still returns promptly', bigMs < 2000, `${bigMs}ms`);
+
+  // ---- sanitisation: the preview writes this HTML with innerHTML ----
+  // A README comes from a repository, which is not a trusted source. Every one
+  // of these is a shape that would run script in the panel's own origin, where
+  // the WebSocket can read and write files.
+  const xss: Array<[string, string, RegExp]> = [
+    ['raw <script> is escaped', '<script>alert(1)</script>', /<script/i],
+    // `onerror=` alone would match the *escaped* text, which is inert; the
+    // question is whether a real tag survives, so look for one.
+    ['raw <img onerror> is escaped', '<img src=x onerror=alert(1)>', /<img\b/i],
+    ['a javascript: link keeps its label only', '[click](javascript:alert(1))', /href="javascript:/i],
+    ['a data: image is dropped', '![i](data:image/svg+xml,<svg onload=alert(1)>)', /src="data:/i],
+    ['a protocol-relative link is dropped', '[a](//evil.example/x)', /href="\/\//i],
+    ['a javascript: autolink stays text', '<javascript:alert(1)>', /href=/i],
+    ['a data: link is dropped', '[a](data:text/html,<script>alert(1)</script>)', /href="data:/i],
+  ];
+  for (const [name, src, danger] of xss) {
+    const html = renderMarkdown(src).html;
+    check(`sanitize: ${name}`, !danger.test(html), html.slice(0, 90));
+  }
+  // An autolink is the one shape that becomes a real anchor, so it has to be
+  // proven to work *and* to be limited to http(s). It used to match a literal
+  // `<` after the string had already been escaped, so it never fired at all.
+  const auto = renderMarkdown('see <https://ok.example/x> here').html;
+  check(
+    'sanitize: an https autolink becomes an anchor',
+    /<a href="https:\/\/ok\.example\/x">/.test(auto),
+    auto.slice(0, 90),
+  );
+  check(
+    'sanitize: safeUrl refuses every non-http scheme',
+    ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'vbscript:x', '//evil.example']
+      .every((u) => safeUrl(u) === null),
+  );
 }
 
 // ============================================================ discovery

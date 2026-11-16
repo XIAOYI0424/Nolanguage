@@ -96,6 +96,26 @@ jobs:
       - name: Verify sidecar mirror
         run: npm run verify:sidecar
 
+      # The dependency features (read / install / post-install refresh) and the
+      # completion trio only prove themselves against the shipped binary: the
+      # suite launches dist/Nolanguage.exe and drives it over the panel's own
+      # WebSocket. It writes a project-tier plugin so the install runs the real
+      # code path without needing the network.
+      - name: Verify dependency features in the packaged exe
+        run: npm run verify:packages-exe
+
+      # The other three languages have no bundled language server, so what this
+      # pins down is the degradation: every request that cannot be served must
+      # name its reason instead of answering with an empty list.
+      - name: Verify Go / JavaScript / Markdown in the packaged exe
+        run: npm run verify:langs-exe
+
+      # The manager is language-agnostic, so this runs without jdtls: pooling,
+      # cancellation and cache invalidation are exercised against a fake server,
+      # and the jdtls block SKIPs when the server is absent.
+      - name: Verify the pooled LSP manager
+        run: npm run verify:lsp-manager
+
       # The whole regression: kernel, panel, Python/Go loops, baseline,
       # extension host, explorer, WebView host, PyCharm shell, Dev Panel DOM,
       # packaged-exe smoke. The pure suites run again here on purpose — they are

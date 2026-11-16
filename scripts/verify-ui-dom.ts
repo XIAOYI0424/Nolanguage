@@ -15,11 +15,15 @@
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ui-dom.ts
  */
 import { join, resolve, dirname } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { renderPanelHtml } from '../src/ui/ui.js';
 import { renderPyCharmHtml } from '../src/panel/pycharm-ui.js';
 import { renderPerfHtml } from '../src/ui/perf-ui.js';
+import { renderPluginsHtml } from '../src/ui/plugins-ui.js';
+import { renderProfileHtml } from '../src/ui/profile-ui.js';
+import { renderExtensionsHtml } from '../src/ui/extensions-ui.js';
 
 const TOOLS = join('C:', 'Users', '15936', '.workbuddy-ai', 'binaries', 'node', 'workspace');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -467,6 +471,42 @@ async function testNavigation(): Promise<void> {
   await settle(w, 320);
   check('nav: a definition reply moves the caret', (q(w, '#stPos')?.textContent ?? '').indexOf('Ln 5, Col 5') === 0, q(w, '#stPos')?.textContent ?? '?');
 
+  // An edit for another file must never be applied here. A rename across files
+  // (pyright does this) carries offsets for other buffers; applying them to the
+  // current one rewrites unrelated text at the same line numbers.
+  socket.sent.length = 0;
+  const beforeForeign = (q(w, '#ta')?.value ?? '');
+  fire(w, ta, 'keydown', { key: 'F6', shiftKey: true });
+  await settle(w);
+  const input = q(w, '#dlgRoot input');
+  const okBtn = q(w, '#dlgRoot .dlg-btn.primary');
+  if (input) input.value = 'sum2';
+  if (okBtn) fire(w, okBtn, 'click');
+  await settle(w);
+  const renReq = socket.lastSentOf('renameSymbol');
+  if (renReq) {
+    socket.deliver({
+      kind: 'renameResult',
+      requestId: renReq.requestId,
+      edits: [
+        { uri: 'utils.py', line: 0, character: 0, endLine: 0, endCharacter: 3, newText: 'ZZZ' },
+      ],
+    });
+    await settle(w);
+  }
+  const afterForeign = (q(w, '#ta')?.value ?? '');
+  check(
+    'nav: an edit for another file is not applied to this buffer',
+    afterForeign === beforeForeign,
+    afterForeign === beforeForeign ? 'buffer unchanged' : 'BUFFER WAS REWRITTEN',
+  );
+  const foreignNote = (q(w, '#dlgRoot')?.textContent ?? '');
+  check(
+    'nav: the skipped edit is reported, not swallowed',
+    foreignNote.indexOf('another file') >= 0,
+    foreignNote.slice(0, 60) || '(no dialog)',
+  );
+
   // "unsupported" must not look like "nothing found".
   socket.sent.length = 0;
   fire(w, ta, 'keydown', { key: 'b', ctrlKey: true });
@@ -482,6 +522,45 @@ async function testNavigation(): Promise<void> {
   w.close();
 }
 
+// ============================================================ emoji policy
+
+/**
+ * Rule 二十五: no emoji in the UI.
+ *
+ * `check-plugins-html` enforced it on the plugins page only, and the other five
+ * pages plus every client shard went unchecked - which is how a check mark and
+ * two cross marks survived in the IDE shell. A pictograph renders as a different
+ * glyph on every platform and at every font size, so the affordance stops being
+ * an affordance; the project draws its icons with `ic()` instead.
+ *
+ * The ranges cover pictographs, dingbats, geometric symbols used as icons, and
+ * the two combining marks that turn a character into an emoji presentation.
+ */
+const EMOJI = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/u;
+
+async function testNoEmoji(): Promise<void> {
+  const pages: Array<[string, string]> = [
+    ['IDE shell', renderPyCharmHtml(7310)],
+    ['monitor', renderPanelHtml(7310)],
+    ['perf', renderPerfHtml(7310)],
+    ['plugins', renderPluginsHtml()],
+    ['profile', renderProfileHtml(7310)],
+    ['extensions', renderExtensionsHtml(7310)],
+  ];
+  for (const [name, html] of pages) {
+    const hit = EMOJI.exec(html);
+    const where = hit ? `...${html.slice(Math.max(0, hit.index - 30), hit.index + 12)}` : '';
+    check(`no emoji in the ${name} page`, !hit, hit ? `${JSON.stringify(hit[0])} ${where}` : 'clean');
+  }
+  // The shards are what the IDE page is assembled from; checking the assembled
+  // page alone would pass while a shard carried a glyph into an unrendered path.
+  for (const f of readdirSync(join(ROOT, 'src', 'ui', 'client')).filter((x) => x.endsWith('.js')).sort()) {
+    const text = readFileSync(join(ROOT, 'src', 'ui', 'client', f), 'utf8');
+    const hit = EMOJI.exec(text);
+    check(`no emoji in ${f}`, !hit, hit ? JSON.stringify(hit[0]) : 'clean');
+  }
+}
+
 // =============================================================== run
 
 await testMonitor();
@@ -489,6 +568,8 @@ console.log('');
 await testPerf();
 console.log('');
 await testNavigation();
+console.log('');
+await testNoEmoji();
 
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);

@@ -1,0 +1,177 @@
+{
+  "id": "c",
+  "displayName": "C",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "example",
+  "description": "C compiled with gcc, clang or cc, then run from the same scratch directory. Claims `.c` only: a `.h` header is equally valid C or C++, and the C++ plugin already owns it.",
+  "order": 51,
+  "trust": {
+    "sandbox": "subprocess"
+  },
+  "file": {
+    "extensions": [
+      "c"
+    ],
+    "defaultExt": "c",
+    "fileName": "main.c"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "#[^\\n]*",
+        "cls": "d"
+      },
+      {
+        "re": "//[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "/\\*[\\s\\S]*?\\*/",
+        "cls": "c"
+      },
+      {
+        "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'(?:[^'\\\\\\n]|\\\\.)*'",
+        "cls": "s"
+      },
+      {
+        "re": "\\b(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while|_Bool|_Complex|_Generic|_Static_assert)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:printf|fprintf|sprintf|snprintf|scanf|malloc|calloc|realloc|free|memcpy|memset|strlen|strcmp|strcpy|FILE|size_t|ssize_t|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|NULL|EOF)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "\\b[0-9][0-9_]*(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?[fFlLuU]*\\b",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_][A-Za-z0-9_]*(?=\\()",
+        "cls": "f"
+      },
+      {
+        "re": "\\b[A-Z][A-Za-z0-9_]*\\b",
+        "cls": "cl"
+      }
+    ]
+  },
+  "lsp": {
+    "provider": {
+      "kind": "github",
+      "package": "clangd/clangd",
+      "asset": "clangd.exe"
+    },
+    "discovery": {
+      "commands": [
+        "clangd"
+      ],
+      "envVars": [
+        "CLANGD"
+      ],
+      "knownPaths": [
+        "C:/Program Files/LLVM/bin/clangd.exe",
+        "C:/msys64/mingw64/bin/clangd.exe",
+        "~/.local/bin/clangd"
+      ]
+    },
+    "args": [],
+    "languageId": "c",
+    "serverName": "clangd",
+    "memoryHint": "180MB",
+    "degradedNote": "clangd not installed - Run works, Check and completion do not"
+  },
+  "run": {
+    "mode": "template",
+    "requires": [
+      "template@^1.0.0"
+    ],
+    "timeoutMs": 30000,
+    "sourceExt": ".c",
+    "discovery": {
+      "commands": [
+        "gcc",
+        "clang",
+        "cc"
+      ],
+      "envVars": [
+        "CC"
+      ],
+      "knownPaths": [
+        "C:/mingw64/bin/gcc.exe",
+        "C:/msys64/mingw64/bin/gcc.exe",
+        "C:/Program Files/LLVM/bin/clang.exe",
+        "/usr/bin/gcc",
+        "/usr/local/bin/gcc",
+        "~/.local/bin/gcc"
+      ]
+    },
+    "versionArgs": [
+      "--version"
+    ],
+    "steps": [
+      {
+        "role": "build",
+        "cmd": "\"{toolchain}\" -std=c11 -O0 \"{file}\" -o \"{workdir}/nl_main{exe}\""
+      },
+      {
+        "role": "run",
+        "cmd": "\"{workdir}/nl_main{exe}\""
+      }
+    ],
+    "modes": {
+      "test": {
+        "steps": [
+          {
+            "role": "build",
+            "cmd": "\"{toolchain}\" -std=c11 -O0 \"{file}\" -o \"{workdir}/nl_main{exe}\""
+          },
+          {
+            "role": "run",
+            "cmd": "\"{workdir}/nl_main{exe}\""
+          }
+        ]
+      }
+    }
+  },
+  "debug": {
+    "adapter": "codelldb",
+    "type": "cppdbg",
+    "discovery": {
+      "commands": [
+        "codelldb"
+      ],
+      "envVars": [
+        "CODELLDB"
+      ],
+      "knownPaths": [
+        "~/.local/bin/codelldb",
+        "C:/Users/Public/codelldb/adapter/codelldb.exe"
+      ]
+    },
+    "command": [
+      "{resolved}",
+      "--port",
+      "0"
+    ],
+    "preLaunch": {
+      "cmd": "\"{toolchain}\" -std=c11 -g -O0 \"{file}\" -o \"{workdir}/nl_dbg{exe}\"",
+      "timeoutMs": 60000
+    },
+    "launch": {
+      "program": "{workdir}/nl_dbg{exe}",
+      "cwd": "{cwd}",
+      "args": "{args}",
+      "stopOnEntry": "{stopOnEntry}",
+      "MIMode": "lldb"
+    },
+    "serverName": "codelldb",
+    "memoryHint": "120MB",
+    "degradedNote": "codelldb not installed - debugging is unavailable for C",
+    "supportsAttach": true
+  }
+}

@@ -112,6 +112,10 @@ const stages = [
   // Phase 3 + 4: install/uninstall/enable/disable applied live, the memory
   // budget (LRU + idle + the eager exemption), and upgrade migration scripts.
   { name: 'Plugins · lifecycle, budget + migrations', script: 'scripts/verify-plugins.ts' },
+  // The pooled language-server manager: routing, root convergence, lazy start,
+  // latest-only cancellation, signature invalidation, dirty-file sync, and the
+  // lexical fallback — against a fake server, plus real jdtls when installed.
+  { name: 'LSP · manager (pool, scheduler, cache, fallback, jdtls)', script: 'scripts/verify-lsp-manager.ts' },
   // Phase 6: the DAP runtime — a real framed-JSON-RPC session against a mock
   // adapter, degradation when no adapter is installed, and the debug contract.
   { name: 'Phase 6 · DAP runtime (mock adapter + degradation)', script: 'scripts/verify-dap.ts' },

@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { materializeAssets } from '../assets/embeddedAssets.js';
+import { appDataPath } from '../util/appData.js';
 import type { RegistryRoot } from './types.js';
 
 /**
@@ -58,7 +59,7 @@ export function officialRoots(): RegistryRoot[] {
   const repo = [join(moduleDir(), '..', '..', 'builtin'), join(process.cwd(), 'builtin')]
     .filter((d) => existsSync(d))
     .map((d) => ({ dir: resolve(d), kind: 'builtin' as const, removable: false }));
-  const unpacked = materializeAssets('builtin');
+  const unpacked = materializeAssets('builtin', { fallbackRoot: appDataPath('embedded') });
   const embedded: RegistryRoot[] = unpacked
     ? [{ dir: unpacked, kind: 'builtin', removable: false }]
     : [];

@@ -670,7 +670,16 @@ export class LanguageRegistry {
     const p = this.plugins.get(id);
     if (!p) return false;
     if (!p.source.removable) throw new Error(`"${id}" is a builtin plugin — disable it instead of uninstalling`);
-    await rm(p.source.dir, { recursive: true, force: true }).catch(() => undefined);
+    // `force: true` only suppresses ENOENT. Everything else — a file held open by
+    // a running IDE, a permission wall, a read-only volume — used to be swallowed
+    // by `.catch(() => undefined)`, so the CLI printed "uninstalled" while the
+    // directory was still on disk and the plugin stayed in the listing. Report it
+    // instead: a failed removal the user can act on beats a lie.
+    try {
+      await rm(p.source.dir, { recursive: true, force: true });
+    } catch (err) {
+      throw new Error(`could not remove ${p.source.dir}: ${(err as Error).message}`);
+    }
     if (opts.keepData === false) {
       await rm(this.dataDir(id), { recursive: true, force: true }).catch(() => undefined);
     }

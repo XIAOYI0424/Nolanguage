@@ -11,7 +11,7 @@
  * not a replacement.
  */
 // Test functions are supplied by the active Vitest collector (see globals in vitest.config.ts).
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -25,6 +25,15 @@ import {
 import { discoverInterpreters, pickInterpreter, shortVersion } from '../src/langs/interpreters';
 import { buildExtensionIndex, languageForName } from '../src/langs/extensionIndex';
 import {
+  installPackage,
+  packageNameProblem,
+  parseDependencies,
+  readDependencies,
+  undeclaredImports,
+} from '../src/langs/dependencies';
+import { materializeAssets } from '../src/assets/embeddedAssets';
+import { describeFailure } from '../src/desktop/fatalDialog';
+import {
   declaresFeature,
   normalizeCodeActions,
   normalizeLocations,
@@ -35,11 +44,21 @@ import { decodeEntities, findAll, options, parseXml } from '../src/util/xml';
 import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
 import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../src/panel/run-timeout';
-import { isCmdScript, planMcpSpawn, quoteCmdArg } from '../src/mcp/spawn-command';
+import { isCmdScript, planSpawn, quoteCmdArg } from '../src/util/spawnPlan';
 import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../src/mcp/McpManager';
 import { FileTransport } from '../src/log/transports/FileTransport';
 import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
 import { resolveBundledFallback } from '../src/lsp/bundledFallback';
+import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/serverInstall';
+import { CacheValidator } from '../src/lsp/manager/CacheValidator';
+import { DiagnosticsBuffer } from '../src/lsp/manager/DiagnosticsBuffer';
+import { LexicalFallback, scanText } from '../src/lsp/manager/fallback';
+import { LspManager } from '../src/lsp/manager/LspManager';
+import { PluginRegistry } from '../src/lsp/manager/PluginRegistry';
+import { Scheduler } from '../src/lsp/manager/Scheduler';
+import { versionSignature } from '../src/lsp/manager/signature';
+import { ContentHashStrategy, GitDiffStrategy } from '../src/lsp/manager/strategies';
+import type { DirtyReport, IndexMetadata, LanguagePlugin } from '../src/lsp/manager/types';
 import { sliceDigest } from '../src/panel/log-digest';
 import { LogLevel } from '../src/log/LogLevel';
 import type { LogRecord } from '../src/log/types';
@@ -367,14 +386,14 @@ describe('mcp · turning an mcp.json command into a spawn()', () => {
   });
 
   it('leaves the command alone off Windows', () => {
-    const plan = planMcpSpawn('npx', ['-y', 'pkg'], { ...win(), platform: 'linux' });
+    const plan = planSpawn('npx', ['-y', 'pkg'], { ...win(), platform: 'linux' });
     expect(plan).toEqual({ command: 'npx', args: ['-y', 'pkg'], shell: false });
   });
 
   it('resolves a bare name to its .cmd shim and asks for a shell', () => {
     // This is the bug a local run found: `spawn('npx')` is ENOENT on Windows,
     // and `spawn('npx.cmd')` is EINVAL. Both are only launchable via cmd.exe.
-    const plan = planMcpSpawn('npx', ['-y', '@modelcontextprotocol/server-filesystem', 'C:/my dir'], win());
+    const plan = planSpawn('npx', ['-y', '@modelcontextprotocol/server-filesystem', 'C:/my dir'], win());
     // Same file: Windows paths are case-insensitive, and the resolver echoes the
     // extension as PATHEXT spells it.
     expect(plan.command.toLowerCase()).toBe(join(dir, 'npx.cmd').toLowerCase());
@@ -384,7 +403,7 @@ describe('mcp · turning an mcp.json command into a spawn()', () => {
   });
 
   it('resolves a bare name to an .exe without a shell', () => {
-    const plan = planMcpSpawn('tool', ['--flag'], win());
+    const plan = planSpawn('tool', ['--flag'], win());
     expect(plan.command.toLowerCase()).toBe(join(dir, 'tool.exe').toLowerCase());
     expect(plan.shell).toBe(false);
     expect(plan.args).toEqual(['--flag']);
@@ -392,19 +411,19 @@ describe('mcp · turning an mcp.json command into a spawn()', () => {
 
   it('passes an explicit path through untouched', () => {
     const cmd = join(dir, 'tool.exe');
-    const plan = planMcpSpawn(cmd, ['a'], win());
+    const plan = planSpawn(cmd, ['a'], win());
     expect(plan).toEqual({ command: cmd, args: ['a'], shell: false });
   });
 
   it('routes an explicit .cmd path through the shell too', () => {
     const cmd = join(dir, 'npx.cmd');
-    const plan = planMcpSpawn(cmd, ['-y', 'pkg'], win());
+    const plan = planSpawn(cmd, ['-y', 'pkg'], win());
     expect(plan.shell).toBe(true);
     expect(plan.command).toBe(cmd);
   });
 
   it('leaves an unresolvable name alone so spawn reports ENOENT', () => {
-    const plan = planMcpSpawn('definitely-not-here', ['x'], win());
+    const plan = planSpawn('definitely-not-here', ['x'], win());
     expect(plan).toEqual({ command: 'definitely-not-here', args: ['x'], shell: false });
   });
 
@@ -692,6 +711,225 @@ describe('log · the boot sink that exists before the kernel', () => {
   });
 });
 
+describe('language server providers', () => {
+  const home = join(tmpdir(), 'nl-servers-test');
+  const manifest = (lsp: Record<string, unknown>) => ({ id: 'demo', lsp } as never);
+
+  it('turns an npm provider into one reproducible install command', () => {
+    const plan = planFor(manifest({ provider: { kind: 'npm', package: 'pyright', version: '1.1.414', bin: 'pyright-langserver' } }), home);
+    expect(plan.command).toEqual([
+      'npm', 'install', '--prefix', join(home, 'servers', 'demo'), '--no-audit', '--no-fund', 'pyright@1.1.414',
+    ]);
+    // Both shims are probed: Windows gets a .cmd, POSIX a bare script.
+    expect(plan.probe).toEqual(['node_modules/.bin/pyright-langserver.cmd', 'node_modules/.bin/pyright-langserver']);
+  });
+
+  it('pulls in a peer dependency in the same install', () => {
+    const plan = planFor(manifest({
+      provider: { kind: 'npm', package: 'typescript-language-server', version: '6.1.0', also: ['typescript@5.6.3'] },
+    }), home);
+    // Without `typescript` the server starts and then fails on the first request.
+    expect(plan.command?.slice(-1)).toEqual(['typescript@5.6.3']);
+  });
+
+  it('points a Go install at the managed bin directory', () => {
+    const plan = planFor(manifest({ provider: { kind: 'go-install', package: 'golang.org/x/tools/gopls', version: 'v0.24.0' } }), home);
+    expect(plan.command).toEqual(['go', 'install', 'golang.org/x/tools/gopls@v0.24.0']);
+    expect(plan.probe).toEqual([join('bin', process.platform === 'win32' ? 'gopls.exe' : 'gopls')]);
+  });
+
+  it('refuses to auto-download a GitHub release, and says where to put it', () => {
+    const plan = planFor(manifest({ provider: { kind: 'github', package: 'artempyanykh/marksman', asset: 'marksman.exe' } }), home);
+    expect(plan.command).toBeUndefined();
+    expect(plan.manual).toMatch(/github\.com\/artempyanykh\/marksman/);
+    expect(plan.manual).toContain(join(home, 'servers', 'demo', 'marksman.exe'));
+  });
+
+  it('says so when a plugin declares no provider', () => {
+    expect(planFor(manifest({}), home).manual).toMatch(/lsp\.provider/);
+  });
+
+  it('finds a managed install only when normal discovery finds nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-managed-'));
+    const m = manifest({
+      discovery: { envVars: ['NL_TEST_SERVER'], knownPaths: [], commands: ['definitely-not-a-real-server'] },
+      provider: { kind: 'npm', package: 'x', version: '1.0.0', bin: 'x' },
+      serverName: 'x',
+    });
+    try {
+      expect(managedBinary(m, dir)).toBeUndefined();
+      const bin = join(dir, 'servers', 'demo', 'node_modules', '.bin');
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, 'x.cmd'), '@echo off\n');
+      expect(managedBinary(m, dir)).toBe(join(bin, 'x.cmd'));
+      expect(resolveServer(m, dir)).toEqual({ bin: join(bin, 'x.cmd'), source: 'managed' });
+
+      // An env var is the user telling us where their server is: it wins.
+      const own = join(dir, 'own-server.exe');
+      writeFileSync(own, '');
+      process.env.NL_TEST_SERVER = own;
+      expect(resolveServer(m, dir).source).toBe('env:NL_TEST_SERVER');
+      delete process.env.NL_TEST_SERVER;
+    } finally {
+      delete process.env.NL_TEST_SERVER;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the memory hint and the degraded note from the manifest', () => {
+    const st = statusFor(manifest({
+      serverName: 'gopls', memoryHint: '80MB', degradedNote: 'gopls not installed',
+      provider: { kind: 'go-install', package: 'golang.org/x/tools/gopls', version: 'v0.24.0' },
+      discovery: { commands: ['definitely-not-a-real-server'] },
+    }), join(tmpdir(), 'nl-servers-test'));
+    expect(st.serverName).toBe('gopls');
+    expect(st.memoryHint).toBe('80MB');
+    expect(st.found).toBe(false);
+  });
+});
+
+describe('lsp manager · routing, signature, invalidation, scheduling', () => {
+  const plugin = (id: string, priority = 0): LanguagePlugin => ({
+    id,
+    matches: (file: string) => file.endsWith(`.${id}`),
+    projectRoot: () => undefined,
+    lspConfig: () => undefined,
+    versionSignature: () => `sig-${id}`,
+    fallback: () => undefined,
+    incremental: () => undefined,
+    serverPriority: () => priority,
+    idleTtlMs: () => 0,
+  });
+
+  it('routes a file to the plugin that claims it, and nothing otherwise', () => {
+    const registry = new PluginRegistry();
+    registry.register(plugin('aaa'));
+    registry.register(plugin('bbb'));
+    expect(registry.route('/p/x.aaa')?.id).toBe('aaa');
+    expect(registry.route('/p/x.bbb')?.id).toBe('bbb');
+    expect(registry.route('/p/x.ccc')).toBeUndefined();
+  });
+
+  it('breaks a tie by priority, then by id, so routing is deterministic', () => {
+    const registry = new PluginRegistry();
+    registry.register(plugin('zzz'));
+    registry.register(plugin('yyy', 5));
+    // Both match `.zzz`/`.yyy`? No: `matches` is per-extension, so give both
+    // the same extension through a shared matcher.
+    const shared = (id: string, priority: number): LanguagePlugin => ({ ...plugin(id, priority), matches: () => true });
+    const tie = new PluginRegistry();
+    tie.register(shared('zzz', 0));
+    tie.register(shared('aaa', 0));
+    expect(tie.route('/p/x.h')?.id).toBe('aaa');
+    const ranked = new PluginRegistry();
+    ranked.register(shared('zzz', 1));
+    ranked.register(shared('aaa', 0));
+    expect(ranked.route('/p/x.h')?.id).toBe('zzz');
+  });
+
+  it('refuses a duplicate plugin id instead of silently replacing it', () => {
+    const registry = new PluginRegistry();
+    registry.register(plugin('dup'));
+    expect(() => registry.register(plugin('dup'))).toThrow(/already registered/);
+  });
+
+  it('treats a root as inside itself, and not the other way round', () => {
+    const parent = join(tmpdir(), 'nl-root', 'reactor');
+    const child = join(parent, 'module-a');
+    expect(LspManager.containsRoot(parent, child)).toBe(true);
+    expect(LspManager.containsRoot(parent, parent)).toBe(true);
+    expect(LspManager.containsRoot(child, parent)).toBe(false);
+    // A sibling whose name merely starts with the same characters is not inside.
+    expect(LspManager.containsRoot(parent, `${parent}-other`)).toBe(false);
+  });
+
+  it('derives a signature that changes with the server version', () => {
+    const a = versionSignature({ pluginId: 'p', serverName: 's', serverVersion: '1.0.0' });
+    const b = versionSignature({ pluginId: 'p', serverName: 's', serverVersion: '1.0.1' });
+    expect(a).toBe(versionSignature({ pluginId: 'p', serverName: 's', serverVersion: '1.0.0' }));
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('invalidates a cached index whose signature does not match', () => {
+    const validator = new CacheValidator(join(tmpdir(), 'nl-cache-test'));
+    const meta: IndexMetadata = { signature: 'old', indexedCommit: null, indexedAt: new Date().toISOString() };
+    const verdict = validator.validate(plugin('p'), meta);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.reason).toMatch(/signature changed/);
+    expect(validator.validate(plugin('p'), { ...meta, signature: 'sig-p' }).valid).toBe(true);
+    expect(validator.validate(plugin('p'), undefined).valid).toBe(false);
+  });
+
+  it('calls a change large only when it exceeds the threshold', () => {
+    const git = new GitDiffStrategy();
+    const dirty: DirtyReport = { files: ['a', 'b', 'c'], source: 'git' };
+    expect(git.isLargeChange(dirty, 2)).toBe(true);
+    expect(git.isLargeChange(dirty, 3)).toBe(false);
+    expect(new ContentHashStrategy().isLargeChange({ files: [], source: 'none' }, 0)).toBe(false);
+  });
+
+  it('dedupes diagnostics and caps them per file and overall', () => {
+    const buffer = new DiagnosticsBuffer(3, 2);
+    const d = (line: number): Diagnostic => ({
+      range: { start: { line, character: 0 }, end: { line, character: 1 } },
+      message: `m${line}`,
+    });
+    buffer.set('file:///a', [d(0), d(0), d(1)]);
+    expect(buffer.get('file:///a')).toHaveLength(2);
+    buffer.set('file:///b', [d(0), d(1)]);
+    buffer.set('file:///c', [d(0)]);
+    // 2 + 2 + 1 exceeds the global cap of 3, so the last file is dropped whole.
+    expect(buffer.all()).toHaveLength(1);
+    expect(buffer.stats().files).toBe(3);
+  });
+
+  it('finds an unterminated literal and an unbalanced brace, ignoring strings', () => {
+    expect(scanText('class A { String s = "}"; }\n').depth).toBe(0);
+    expect(scanText('class A {\n').depth).toBe(1);
+    expect(scanText('class A { String s = "oops;\n').unterminated?.what).toBe('string');
+    // A line comment must not open a string.
+    expect(scanText('// "unclosed\nclass A {}\n').unterminated).toBeUndefined();
+  });
+
+  it('offers the declarations in the buffer, filtered by prefix', () => {
+    const fallback = new LexicalFallback({
+      keywords: ['class', 'void'],
+      declarationPattern: 'class\\s+([A-Za-z_$][\\w$]*)',
+    });
+    const text = 'public class Demo {\n    void run() {}\n}\n';
+    const all = fallback.completions({ file: 'Demo.java', text, line: 0, character: 0 });
+    expect(all.map((c) => c.label)).toContain('Demo');
+    // The whole buffer, with the caret on the half-typed line: the declaration
+    // only exists in the document, so a one-line snippet could not offer it.
+    const filtered = fallback.completions({
+      file: 'Demo.java',
+      text: 'public class Demo {\n}\n        Dem\n',
+      line: 2,
+      character: 11,
+    });
+    // Both the declaration and the half-typed identifier match the prefix; what
+    // matters is that nothing else leaks through.
+    expect(filtered.map((c) => c.label)).toContain('Demo');
+    expect(filtered.every((c) => c.label.toLowerCase().startsWith('dem'))).toBe(true);
+  });
+
+  it('marks a superseded result stale and never returns it as fresh', async () => {
+    const scheduler = new Scheduler();
+    const first = scheduler.latest('k', async () => {
+      await new Promise((ok) => setTimeout(ok, 60));
+      return 'old';
+    });
+    await new Promise((ok) => setTimeout(ok, 5));
+    const second = scheduler.latest('k', async () => 'new');
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.stale).toBe(true);
+    expect(b.stale).toBe(false);
+    expect(b.value).toBe('new');
+    expect(scheduler.stats().staleDropped).toBe(1);
+  });
+});
+
 describe('lsp · the bundled fallback is declared, not guessed', () => {
   it('expands the toolchain and the embedded asset', () => {
     // The real Python declaration: `{toolchain} -u {embedded:pyrightServer.py}`.
@@ -929,4 +1167,391 @@ describe('lsp · navigation results are normalised in one place', () => {
     expect(declaresFeature({ workspaceSymbolProvider: true }, 'workspaceSymbol')).toBe(true);
     expect(declaresFeature({ codeActionProvider: true }, 'codeAction')).toBe(true);
   });
+});
+
+describe('assets · materialising the embedded tree survives a hostile %TEMP%', () => {
+  let dir = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nlg-embed-'));
+    // The store is a global the packaged build installs; a test can supply one.
+    (globalThis as { __NOLANGUAGE_EMBEDDED__?: Record<string, string> }).__NOLANGUAGE_EMBEDDED__ = {
+      'extensions/examples/hello/extension.json': '{"id":"demo.hello"}',
+      'extensions/examples/hello/extension.ts': 'export const x = 1;\n',
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as { __NOLANGUAGE_EMBEDDED__?: Record<string, string> }).__NOLANGUAGE_EMBEDDED__;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes the tree and returns the prefix directory', () => {
+    const root = join(dir, 'primary');
+    const out = materializeAssets('extensions/examples', { root });
+    expect(out).toBe(join(root, 'extensions', 'examples'));
+    expect(existsSync(join(root, 'extensions/examples/hello/extension.json'))).toBe(true);
+  });
+
+  it('falls back to the second root when the first cannot be written', () => {
+    // A *file* where the root directory should be: mkdir fails, which is the
+    // same failure a locked or read-only %TEMP% produces.
+    const blocked = join(dir, 'blocked');
+    writeFileSync(blocked, 'not a directory');
+    const fallback = join(dir, 'fallback');
+    const out = materializeAssets('extensions/examples', { root: blocked, fallbackRoot: fallback });
+    expect(out).toBe(join(fallback, 'extensions', 'examples'));
+    expect(existsSync(join(fallback, 'extensions/examples/hello/extension.json'))).toBe(true);
+  });
+
+  it('does not rewrite a file that already holds the same bytes', () => {
+    // The write is what EPERM's on Windows when another process holds the file;
+    // an identical cache must not need one.
+    const root = join(dir, 'primary');
+    materializeAssets('extensions/examples', { root });
+    const target = join(root, 'extensions/examples/hello/extension.json');
+    const before = statSync(target).mtimeMs;
+    const later = materializeAssets('extensions/examples', { root });
+    expect(later).toBe(join(root, 'extensions', 'examples'));
+    expect(statSync(target).mtimeMs).toBe(before);
+  });
+
+  it('returns undefined when nothing is embedded', () => {
+    delete (globalThis as { __NOLANGUAGE_EMBEDDED__?: Record<string, string> }).__NOLANGUAGE_EMBEDDED__;
+    expect(materializeAssets('extensions/examples', { root: join(dir, 'x') })).toBeUndefined();
+  });
+});
+
+describe('desktop · what a windowless failure tells the user', () => {
+  let dir = '';
+  let previous: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nlg-fatal-'));
+    previous = process.env.NOLANGUAGE_DATA;
+    process.env.NOLANGUAGE_DATA = dir;
+  });
+  afterEach(() => {
+    if (previous === undefined) delete process.env.NOLANGUAGE_DATA;
+    else process.env.NOLANGUAGE_DATA = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('carries the message, the stack and the boot log tail', () => {
+    mkdirSync(join(dir, 'logs'), { recursive: true });
+    writeFileSync(
+      join(dir, 'logs', 'boot.log'),
+      ['{"ev":"boot"}', '{"ev":"server-starting"}', '{"ev":"server-start-failed"}'].join('\n'),
+      'utf8',
+    );
+    const err = new Error('EPERM: operation not permitted, open X');
+    err.stack = 'Error: EPERM\n    at writeFileSync\n    at materialize';
+    const { text } = describeFailure(err, '0.7.23');
+    expect(text).toContain('could not start');
+    expect(text).toContain('EPERM');
+    expect(text).toContain('at writeFileSync');
+    // The tail is what explains the failure; the head of a log is a week old.
+    expect(text).toContain('server-start-failed');
+    expect(text).toContain('logs/boot.log');
+  });
+
+  it('keeps an untruncated copy on disk even when the dialog text is capped', () => {
+    const err = new Error('x'.repeat(4000));
+    const { text, file } = describeFailure(err, '0.7.23');
+    expect(text.length).toBeLessThan(2000);
+    expect(text).toContain('truncated');
+    const onDisk = readFileSync(file, 'utf8');
+    expect(onDisk.length).toBeGreaterThan(4000);
+    expect(file.endsWith('last-error.txt')).toBe(true);
+  });
+
+  it('never throws when the log directory cannot be written', () => {
+    // The app data dir is frequently the thing that just failed.
+    const blocked = join(dir, 'blocked');
+    writeFileSync(blocked, 'not a directory');
+    process.env.NOLANGUAGE_DATA = blocked;
+    expect(() => describeFailure(new Error('boom'), '0.7.23')).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------- dependencies
+// The Packages view is only as honest as its parser. These cover the three
+// formats, the "not declared" hint, and the one thing that must never happen:
+// a package name that an installer would read as a flag.
+
+describe('project dependencies', () => {
+  it('reads a requirements file: comments, extras, pins, -r skipped', () => {
+    const text = [
+      '# runtime',
+      'requests==2.31.0',
+      'numpy>=1.26',
+      'uvicorn[standard]',
+      '',
+      '-r other.txt',
+      '  # indented comment',
+      'Flask',
+    ].join('\n');
+    expect(parseDependencies('requirements', text)).toEqual([
+      { name: 'requests', version: '==2.31.0' },
+      { name: 'numpy', version: '>=1.26' },
+      { name: 'uvicorn' },
+      { name: 'Flask' },
+    ]);
+  });
+
+  it('reads both go.mod require forms', () => {
+    const text = [
+      'module example.com/app',
+      '',
+      'go 1.22',
+      '',
+      'require github.com/gin-gonic/gin v1.9.1',
+      '',
+      'require (',
+      '\tgithub.com/spf13/cobra v1.8.0',
+      '\tgolang.org/x/text v0.14.0 // indirect',
+      ')',
+    ].join('\n');
+    expect(parseDependencies('gomod', text)).toEqual([
+      { name: 'github.com/gin-gonic/gin', version: 'v1.9.1' },
+      { name: 'github.com/spf13/cobra', version: 'v1.8.0' },
+      { name: 'golang.org/x/text', version: 'v0.14.0' },
+    ]);
+  });
+
+  it('reads package.json dependencies and devDependencies', () => {
+    const text = JSON.stringify({ dependencies: { react: '^18.0.0' }, devDependencies: { vitest: '^2' } });
+    expect(parseDependencies('npm', text)).toEqual([
+      { name: 'react', version: '^18.0.0' },
+      { name: 'vitest', version: '^2' },
+    ]);
+  });
+
+  it('treats a broken package.json as empty rather than throwing', () => {
+    expect(parseDependencies('npm', '{ not json')).toEqual([]);
+  });
+
+  it('reads pyproject.toml: only [project].dependencies, never [build-system]', () => {
+    // Read as a requirements list this file yields `name = "demo"` and
+    // `version = "1.0.0"` as "packages" and misses the two real ones — which is
+    // exactly what the Python plugin used to declare.
+    const text = [
+      '[build-system]',
+      'requires = ["setuptools>=61"]',
+      'build-backend = "setuptools.build_meta"',
+      '',
+      '[project]',
+      'name = "demo"',
+      'version = "1.0.0"',
+      'dependencies = [',
+      '  "requests>=2.31",',
+      '  "flask",  # web',
+      ']',
+      '',
+      '[project.optional-dependencies]',
+      'test = ["pytest"]',
+    ].join('\n');
+    expect(parseDependencies('pyproject', text)).toEqual([
+      { name: 'requests', version: '>=2.31' },
+      { name: 'flask' },
+    ]);
+  });
+
+  it('reads a single-line pyproject dependencies array', () => {
+    const text = '[project]\ndependencies = ["a>=1", "b"]\n';
+    expect(parseDependencies('pyproject', text)).toEqual([
+      { name: 'a', version: '>=1' },
+      { name: 'b' },
+    ]);
+  });
+
+  it('reads no packages out of a pyproject with no [project] table', () => {
+    expect(parseDependencies('pyproject', '[tool.black]\nline-length = 100\n')).toEqual([]);
+  });
+
+  it('flags an import no declared package covers, and only once', () => {
+    const code = 'import requests\nimport requests.adapters\nfrom flask import Flask\nimport json\n';
+    // Grouped by pattern, not by source order: `import` forms first, then `from`.
+    expect(undeclaredImports(code, [{ name: 'requests' }])).toEqual(['json', 'flask']);
+  });
+
+  it('matches a declared name case- and dash-insensitively', () => {
+    // pip normalises My-Module to my_module; the import says my_module.
+    expect(undeclaredImports('import my_module\n', [{ name: 'My-Module' }])).toEqual([]);
+    expect(undeclaredImports('import My_Module\n', [{ name: 'my-module' }])).toEqual([]);
+  });
+
+  it('refuses a package name an installer would read as a flag', () => {
+    expect(packageNameProblem('-r')).toContain('cannot start with');
+    expect(packageNameProblem('--index-url')).toContain('cannot start with');
+    expect(packageNameProblem('two words')).toContain('misread');
+    expect(packageNameProblem('a;b')).toContain('misread');
+    expect(packageNameProblem('')).toContain('required');
+  });
+
+  it('accepts the shapes a real installer takes', () => {
+    for (const ok of ['requests', 'requests==2.31.0', 'requests>=2', '@scope/pkg', 'github.com/x/y@v1']) {
+      expect(packageNameProblem(ok)).toBeUndefined();
+    }
+  });
+
+  it('honours a per-file format: requirements.txt and pyproject.toml disagree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-deps-'));
+    try {
+      // Only a pyproject.toml: the manifest's default format is `requirements`,
+      // so reading it that way would produce five fake packages.
+      writeFileSync(join(dir, 'pyproject.toml'), '[project]\nname = "demo"\ndependencies = ["requests>=2.31"]\n');
+      const report = await readDependencies('python', {
+        format: 'requirements',
+        files: ['requirements.txt', { file: 'pyproject.toml', format: 'pyproject' }],
+      }, dir, 'import requests\nimport flask\n');
+      expect(report.file).toBe('pyproject.toml');
+      expect(report.format).toBe('pyproject');
+      expect(report.packages).toEqual([{ name: 'requests', version: '>=2.31' }]);
+      expect(report.undeclared).toEqual(['flask']);
+      // The empty state must name every candidate, not just the strings.
+      expect(report.searched).toEqual(['requirements.txt', 'pyproject.toml']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads the file the manifest names, from the project root', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-deps-'));
+    try {
+      writeFileSync(join(dir, 'requirements.txt'), 'requests==2.31.0\n');
+      const report = await readDependencies('python', {
+        format: 'requirements',
+        files: ['requirements.txt', 'pyproject.toml'],
+      }, dir, 'import requests\nimport flask\n');
+      expect(report.supported).toBe(true);
+      expect(report.file).toBe('requirements.txt');
+      expect(report.packages).toEqual([{ name: 'requests', version: '==2.31.0' }]);
+      expect(report.undeclared).toEqual(['flask']);
+      expect(report.installable).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a missing file as an empty state, not an error', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-deps-'));
+    try {
+      const report = await readDependencies('go', { format: 'gomod', files: ['go.mod'] }, dir, '');
+      expect(report.supported).toBe(true);
+      expect(report.file).toBeUndefined();
+      expect(report.note).toContain('go.mod');
+      expect(report.packages).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says so when the language declares no dependency file', async () => {
+    const report = await readDependencies('markdown', undefined, tmpdir(), '');
+    expect(report.supported).toBe(false);
+    expect(report.note).toContain('manifest.dependencies');
+  });
+
+  it('ignores a manifest entry that escapes the project root', async () => {
+    // A `files` entry is data, and data can be wrong. Reading ../../etc/passwd
+    // because a plugin asked for it is not a feature.
+    const dir = mkdtempSync(join(tmpdir(), 'nl-deps-'));
+    try {
+      const report = await readDependencies('x', {
+        format: 'requirements',
+        files: ['../../../../etc/passwd', 'requirements.txt'],
+      }, dir, '');
+      expect(report.file).toBeUndefined();
+      expect(report.packages).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ------------------------------------------------------------- package install
+// The installer is the one place the product runs a toolchain to *change* the
+// project. These use the Node binary itself as the "installer" so the argv,
+// the streaming and the exit code are all checked without the network.
+
+describe('package install', () => {
+  /** A spec whose "installer" echoes its argv, so the test can read it back. */
+  const echoSpec = {
+    format: 'npm' as const,
+    files: ['package.json'],
+    install: [process.execPath, '-e', 'process.stdout.write(process.argv.slice(1).join(" "))'],
+  };
+
+  it('appends the package name to the declared command and streams its output', async () => {
+    const seen: string[] = [];
+    const r = await installPackage(echoSpec, 'left-pad', undefined, tmpdir(), {
+      onData: (stream, text) => seen.push(`${stream}:${text}`),
+    });
+    expect(r.ok).toBe(true);
+    expect(r.code).toBe(0);
+    expect(r.output).toBe('left-pad');
+    expect(seen.join('')).toContain('left-pad');
+    expect(r.command).toContain('left-pad');
+    expect(r.truncated).toBe(false);
+  });
+
+  it('expands {toolchain} in the command and the arguments', async () => {
+    const spec = {
+      format: 'requirements' as const,
+      files: ['requirements.txt'],
+      install: [process.execPath, '-e', 'process.stdout.write(process.argv.slice(1).join(" "))', '{toolchain}'],
+    };
+    const r = await installPackage(spec, 'pkg', 'PYTHON', tmpdir(), { onData: () => undefined });
+    expect(r.ok).toBe(true);
+    // The literal placeholder must be gone, and the toolchain must have landed.
+    expect(r.output).toBe('PYTHON pkg');
+    expect(r.command).not.toContain('{toolchain}');
+  });
+
+  it('refuses a flag-shaped name without running anything', async () => {
+    let spawned = false;
+    const r = await installPackage(echoSpec, '-r', undefined, tmpdir(), {
+      onData: () => undefined,
+      onSpawn: () => { spawned = true; },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('cannot start with');
+    expect(spawned).toBe(false);
+  });
+
+  it('refuses when the language declares no install command', async () => {
+    const r = await installPackage({ format: 'npm', files: ['package.json'] }, 'x', undefined, tmpdir(), {
+      onData: () => undefined,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('install command');
+  });
+
+  it('reports a non-zero exit with the installer own message', async () => {
+    const spec = {
+      format: 'npm' as const,
+      files: ['package.json'],
+      install: [process.execPath, '-e', 'process.stderr.write("no such package"); process.exit(3)'],
+    };
+    const r = await installPackage(spec, 'nope', undefined, tmpdir(), { onData: () => undefined });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe(3);
+    expect(r.output).toContain('no such package');
+  });
+
+  it('hands the child to the caller so a cancel is possible', async () => {
+    let pid = 0;
+    const spec = {
+      format: 'npm' as const,
+      files: ['package.json'],
+      install: [process.execPath, '-e', 'setTimeout(() => {}, 800)'],
+    };
+    const done = installPackage(spec, 'slow', undefined, tmpdir(), {
+      onData: () => undefined,
+      onSpawn: (c) => { pid = c.pid ?? 0; },
+    });
+    expect(pid).toBeGreaterThan(0);
+    const r = await done;
+    // The test does not kill it; the point is only that the child was exposed
+    // before it finished, which is what makes Stop work while pip is running.
+    expect(r.ok).toBe(true);
+  }, 20000);
 });

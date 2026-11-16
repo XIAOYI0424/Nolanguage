@@ -119,6 +119,7 @@
       { label: 'Kernel Flame Graph', sc: 'Ctrl+Alt+F', act: openFlame },
       { label: 'Performance', sc: 'Alt+8', act: function () { toggleWindow('perf'); } },
       { label: 'Logs', sc: 'Alt+0', act: function () { toggleWindow('logs'); } },
+      { label: 'Packages', sc: 'Alt+6', act: function () { toggleWindow('packages'); } },
       { label: 'Terminal', act: function () { toggleWindow('terminal'); } }
     ],
     'VCS': [
@@ -210,6 +211,7 @@
         ? 'Language mode: ' + langLabel(currentLang) + ' — set manually. ' + currentFile + ' reads as ' + langLabel(auto) + ' by extension. Click to change.'
         : 'Language mode: ' + langLabel(currentLang) + ' — from the file type of ' + currentFile + '. Click to change.';
     el.classList.add('act');
+    syncTestButton();
   }
   function openLangPicker() {
     var inp = $('langInput');
@@ -261,6 +263,11 @@
     setLangOverride(currentFile, lang);
     BUFFERS[currentFile].languageId = chosen;
     currentLang = chosen;
+    // Documentation is cached by label, and the same label means different
+    // things in different languages; a stale entry would show python's docstring
+    // under a go symbol.
+    CMP.docs = {};
+    pkgSync();
     closeModals();
     renderStLang();
     renderEditor(); updateCaret();
@@ -788,7 +795,7 @@
   function openRunConfig() {
     var btn = $('cfgBtn'); var r = btn ? btn.getBoundingClientRect() : { left: 0, bottom: 0 };
     var items = RUN_CONFIGS.map(function (c) {
-      return { label: (c.name === ACTIVE_CFG ? '✓  ' : '    ') + c.name, act: function () { ACTIVE_CFG = c.name; renderCfgLabel(); savePrefs({ activeConfig: ACTIVE_CFG }); } };
+      return { label: (c.name === ACTIVE_CFG ? '\u25cf  ' : '   ') + c.name, act: function () { ACTIVE_CFG = c.name; renderCfgLabel(); savePrefs({ activeConfig: ACTIVE_CFG }); } };
     });
     items.push({ sep: true });
     items.push({ label: 'Edit Configurations…', act: editRunConfigs });
@@ -855,7 +862,7 @@
           '<label>Host</label><input data-ch="' + i + '" value="' + esc(c.host) + '" placeholder="localhost (attach)" />' +
           '<label>Port</label><input data-cpt="' + i + '" value="' + esc(c.port) + '" placeholder="attach port" />' +
           '<label>Process ID</label><input data-cpid="' + i + '" value="' + esc(c.processId) + '" placeholder="attach to pid" />' +
-          '<label></label><button data-del="' + i + '" class="dlg-btn" style="padding:0 9px">✕ remove</button>' +
+          '<label></label><button data-del="' + i + '" class="dlg-btn" style="padding:0 9px">' + ic('close', 10) + ' remove</button>' +
           '</div>';
       }).join('');
       body.querySelectorAll('input[data-cn]').forEach(function (inp) { inp.addEventListener('input', function () { dirty[+inp.getAttribute('data-cn')].name = inp.value; }); });

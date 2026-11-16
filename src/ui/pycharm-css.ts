@@ -517,6 +517,27 @@ export const PYCHARM_CSS = `
     border:1px solid var(--border); border-radius:8px; background:var(--bg-primary);
     font:11px var(--mono); color:var(--text-secondary); }
 
+  /* ---------- Packages tool window ---------- */
+  .pkgs { display:flex; flex-direction:column; gap:8px; padding:10px; font-size:12.5px; min-height:0; }
+  .pkgs-head { display:flex; align-items:center; gap:6px; }
+  .pkgs-title { flex:1; font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--text-secondary); }
+  .pkgs-file { font:11px var(--mono); color:var(--text-tertiary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pkgs-install { display:flex; align-items:center; gap:6px; }
+  .pkgs-install input { flex:1; min-width:0; padding:4px 8px; border:1px solid var(--border); border-radius:6px;
+    background:var(--bg-primary); color:var(--text-primary); font:12px var(--mono); }
+  .pkgs-install input:focus { outline:none; border-color:var(--accent); }
+  .pkgs-note { font-size:11px; color:var(--text-tertiary); }
+  .pkgs-note.warn { color:var(--warning); }
+  .pkgs-list { display:flex; flex-direction:column; gap:2px; max-height:200px; overflow:auto; }
+  .pkgs-row { display:flex; align-items:baseline; gap:6px; padding:2px 4px; border-radius:4px; font:12px var(--mono); }
+  .pkgs-row:hover { background:var(--bg-hover); }
+  .pkgs-row b { font-weight:500; color:var(--text-primary); }
+  .pkgs-ver { color:var(--text-tertiary); font-size:11px; }
+  .pkgs-tag { margin-left:auto; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--warning); }
+  .pkgs-out { margin:0; padding:8px; flex:1; min-height:60px; overflow:auto; white-space:pre-wrap;
+    border:1px solid var(--border); border-radius:8px; background:var(--bg-primary);
+    font:11px var(--mono); color:var(--text-secondary); }
+
   /* ---------- commit / VCS ---------- */
   .commit-pane { display:flex; flex-direction:column; gap:8px; padding:10px; height:100%; }
   .commit-pane textarea { flex:1; min-height:90px; resize:none; background:var(--bg-secondary);

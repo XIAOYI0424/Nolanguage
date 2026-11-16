@@ -32,7 +32,14 @@ SetCompressor /SOLID lzma
 !endif
 
 !define APP_NAME      "Nolanguage"
-!define APP_VERSION   "0.7.23"
+; `build-setup.mjs` passes this from package.json (`/DAPP_VERSION=…`), so the
+; Add/Remove entry and the file version can never disagree with the build. The
+; fallback is for a hand-run `makensis`, and `verify:handshake` asserts it is
+; the same number — a stale copy here once registered 0.7.23 while the app was
+; 0.7.24, which is invisible until someone reads Add/Remove Programs.
+!ifndef APP_VERSION
+  !define APP_VERSION "0.7.24"
+!endif
 !define APP_PUBLISHER "Nolanguage"
 !define APP_WEB_ARG   "--open-browser"
 !define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"

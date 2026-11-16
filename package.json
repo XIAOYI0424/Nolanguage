@@ -1,6 +1,6 @@
 {
   "name": "nolanguage",
-  "version": "0.7.23",
+  "version": "0.7.24",
   "private": true,
   "type": "module",
   "description": "Unified multi-language dev & execution platform — stages 1–6: minimal kernel (three buses + performance & log spines), live dev panel (WebSocket + UI), a Python + LSP closed loop (RPC instrumentation + LSP log collection), an interactive multi-language workspace (write, run, check, complete), Go support (toolchain discovery + GoRunner + gopls), and a baseline system (git commit 打点 + SQLite warm tier + long-term metric baselines).",
@@ -73,7 +73,13 @@
     "ci:integration": "npm run build:exe && npm run verify:sidecar && npm run verify && npm run build:setup",
     "ci:install-smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/smoke-install.ps1",
     "install:app": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/install-app.ps1",
-    "verify:ci": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-ci.ts"
+    "verify:ci": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-ci.ts",
+    "verify:packages-exe": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-packages-exe.ts",
+    "verify:langs-exe": "node --experimental-loader ./resolve-loader.mjs --experimental-transform-types scripts/verify-langs-exe.ts",
+    "verify:langs-real": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-langs-real.ts",
+    "verify:lang-plugin": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lang-plugin.ts",
+    "verify:server-install": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-server-install.ts",
+    "verify:lsp-manager": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-manager.ts"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.3",

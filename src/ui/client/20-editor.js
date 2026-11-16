@@ -278,6 +278,10 @@
   // if it is opened with no backend at all). Installing a language plugin must
   // never require editing this file.
   var SERVER_LANGS = { python: true, go: true, javascript: true };
+  // A language can run, but not every one can be *tested*: the plugin has to
+  // declare a 'test' mode. The toolbar button follows this map so it never
+  // offers an action the engine would refuse.
+  var TESTABLE = {};
   /**
    * Languages whose built-in (L1) completion is on.
    *
@@ -334,6 +338,7 @@
       LANG_NAMES[l.id] = l.displayName || l.id;
       // "the backend can act on this language": run it, check it, or both.
       SERVER_LANGS[l.id] = !!(l.supportsRun || l.hasLsp);
+      TESTABLE[l.id] = !!l.supportsTest;
       // L1 is opt-out only; a manifest that says nothing keeps it.
       LEXICAL[l.id] = l.lexical !== false;
       (l.extensions || []).forEach(function (e) { EXT_LANG[String(e).replace(/^[.]/, '').toLowerCase()] = l.id; });
@@ -488,7 +493,7 @@
   // The dismissed flag records that the user closed the popup on purpose (Esc, accept,
   // blur). A late LSP answer for the same request must not yank it back open;
   // only fresh input / an explicit Ctrl+Space clears the flag.
-  var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [], dismissed: false };
+  var CMP = { open: false, items: [], sel: 0, reqId: 0, lex: [], dismissed: false, docs: {} };
   var HOV = { timer: 0, reqId: 0, cx: 0, cy: 0 };
 
   ta.addEventListener('input', function () { renderEditor(); scheduleComplete(); scheduleCheck(); schedulePreview(); });

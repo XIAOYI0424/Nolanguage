@@ -18,6 +18,8 @@
  *   lang ls                                every plugin, where it lives, whether it is on
  *   lang info <id>                         one plugin in full
  *   lang deps [id]                         runtime requirements and whether they are met
+ *   lang server [id]                       language-server status: found, size, how to get it
+ *   lang server install <id>               install that server (npm/go; github is manual)
  *   lang up <id> [source]                  reinstall from the recorded origin
  *   lang search [query]                    browse plugin indexes
  *
@@ -44,6 +46,7 @@ import {
   type RequirementReport,
 } from '../langs/Registry.js';
 import type { LanguageManifest } from '../langs/manifest.js';
+import { installServer, statusFor } from '../langs/serverInstall.js';
 import { disposeSource, resolveSource, SourceError, classifySource } from '../langs/SourceResolver.js';
 import {
   resolveSources,
@@ -191,6 +194,15 @@ export async function runLang(argv: string[], io: LangIo = consoleIo): Promise<n
         return 0;
       case 'deps':
         await doDeps(ctx, target);
+        return 0;
+      case 'server':
+        // `server` = status for every language; `server install <id>` = do it.
+        if (target === 'install' || target === 'add') {
+          if (!extra) throw new CliError('server install needs a language id', 2);
+          await doServerInstall(ctx, extra);
+          return 0;
+        }
+        await doServerStatus(ctx, target);
         return 0;
       case 'search':
         await doSearch(ctx, target);
@@ -413,6 +425,79 @@ async function doList(ctx: Ctx): Promise<void> {
       r.extensions.join(' '),
     ]),
   );
+}
+
+/**
+ * `lang server` — one row per language: which server it wants, whether it is
+ * here, how big it is, and what to type if it is not.
+ *
+ * This is the answer to "why is this language dumb?" without reading a manifest
+ * or guessing a package name. Everything shown comes from the plugin itself
+ * (`lsp.serverName`, `lsp.memoryHint`, `lsp.provider`), so a plugin installed
+ * from a directory gets the same treatment as a built-in one.
+ */
+async function doServerStatus(ctx: Ctx, only?: string): Promise<void> {
+  const reg = await open(ctx);
+  const rows = reg
+    .describe()
+    .filter((r) => (only ? r.id === only : true))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  if (!rows.length) {
+    ctx.io.out(only ? `"${only}" is not installed` : '(no languages installed)');
+    return;
+  }
+  ctx.io.out(`home ${reg.home}`);
+  const statuses = rows.map((r) => {
+    const entry = reg.entry(r.id);
+    return entry ? statusFor(entry.manifest, reg.home) : undefined;
+  });
+  printTable(
+    ctx.io,
+    ['ID', 'SERVER', 'FOUND', 'WHERE', 'MEMORY', 'HOW'],
+    statuses.filter((x): x is NonNullable<typeof x> => !!x).map((st) => [
+      st.id,
+      st.serverName,
+      st.found ? 'yes' : 'MISSING',
+      st.source,
+      st.memoryHint ?? '-',
+      st.found ? '' : st.plan.command ? st.plan.command.join(' ') : 'see `lang server install ' + st.id + '`',
+    ]),
+  );
+  const missing = statuses.filter((x): x is NonNullable<typeof x> => !!x && !x.found);
+  if (missing.length) {
+    ctx.io.out('');
+    ctx.io.out(`${missing.length} of ${statuses.length} language server(s) missing.`);
+    for (const st of missing) {
+      if (!st.plan.command) {
+        ctx.io.out(`  ${st.id}: ${st.plan.manual ?? 'no provider declared'}`);
+      }
+    }
+    ctx.io.out('  install with: nlg lang server install <id>');
+  }
+}
+
+/** `lang server install <id>` — run the plugin's provider, or explain why not. */
+async function doServerInstall(ctx: Ctx, id: string): Promise<void> {
+  const reg = await open(ctx);
+  const entry = reg.entry(id);
+  if (!entry) throw new CliError(`"${id}" is not installed`);
+  const st = statusFor(entry.manifest, reg.home);
+  if (st.found) {
+    ctx.io.out(`${id}: already available (${st.source}) at ${st.bin}`);
+    return;
+  }
+  if (!st.plan.command) {
+    // Manual by design: a GitHub release asset has no checksum we can verify, so
+    // the product does not fetch one and pretend it is trustworthy.
+    ctx.io.out(`${id}: no automatic install for this server.`);
+    ctx.io.out(`  ${st.plan.manual ?? 'this plugin declares no provider (lsp.provider)'}`);
+    return;
+  }
+  ctx.io.out(`${id}: ${st.plan.command.join(' ')}`);
+  const result = await installServer(entry.manifest, reg.home, { onData: (d) => ctx.io.out(d.trimEnd()) });
+  if (!result.ok) throw new CliError(result.error ?? 'install failed');
+  ctx.io.out(`installed ${id}: ${result.bin}`);
+  ctx.io.out('a running IDE picks this up on its next language-server restart');
 }
 
 async function doInfo(ctx: Ctx, id: string): Promise<void> {

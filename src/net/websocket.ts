@@ -25,6 +25,19 @@ const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
  */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
+/**
+ * Ceiling on one inbound message, fragments included.
+ *
+ * The panel's largest legitimate message is an `fsWrite` carrying a file the
+ * read side already capped at 4 MiB, plus JSON escaping — so 16 MiB is well
+ * above anything the UI sends. Without a ceiling a client could declare a
+ * 2^53-byte frame (the 64-bit length form allows it) and make the server buffer
+ * until the process dies. "Only the app can reach this" is not an argument:
+ * `originAllowed` deliberately accepts a native client with no `Origin`, so any
+ * local process can open a socket.
+ */
+const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+
 const OPCODE = {
   CONT: 0x0,
   TEXT: 0x1,
@@ -62,6 +75,8 @@ export class WebSocketConnection extends EventEmitter {
   private closed = false;
   private buffer: Buffer = Buffer.alloc(0);
   private fragments: Buffer[] = [];
+  /** Running total of `fragments`, so a message cannot grow past the cap. */
+  private fragmentBytes = 0;
   private fragmentOpcode: number | null = null;
   private lastPong = Date.now();
 
@@ -199,6 +214,12 @@ export class WebSocketConnection extends EventEmitter {
       len = Number(big);
       offset += 8;
     }
+    // Refuse before allocating: `buf.length < offset + len` below would wait
+    // forever for bytes that are never coming, while `this.buffer` grows.
+    if (len > MAX_MESSAGE_BYTES) {
+      this.close(1009, 'message too large');
+      return null;
+    }
     let maskKey: Buffer | null = null;
     if (masked) {
       if (buf.length < offset + 4) return null;
@@ -234,11 +255,22 @@ export class WebSocketConnection extends EventEmitter {
         this.emit('close');
         return;
       case OPCODE.CONT: {
+        // A fragmented message is one message: cap the total, or a client can
+        // send a million small continuation frames and grow the array without
+        // limit even though every individual frame is small.
+        this.fragmentBytes += payload.length;
+        if (this.fragmentBytes > MAX_MESSAGE_BYTES) {
+          this.fragments = [];
+          this.fragmentOpcode = null;
+          this.close(1009, 'message too large');
+          return;
+        }
         this.fragments.push(payload);
         if (fin) {
           const full = Buffer.concat(this.fragments);
           const op = this.fragmentOpcode ?? OPCODE.TEXT;
           this.fragments = [];
+          this.fragmentBytes = 0;
           this.fragmentOpcode = null;
           this.dispatch(op, full);
         }
@@ -249,6 +281,7 @@ export class WebSocketConnection extends EventEmitter {
         if (!fin) {
           this.fragmentOpcode = opcode;
           this.fragments = [payload];
+          this.fragmentBytes = payload.length;
           return;
         }
         this.dispatch(opcode, payload);

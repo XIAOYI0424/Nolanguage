@@ -56,6 +56,7 @@ const LIVE = [
   'docs/README.md',
   'docs/ARCHITECTURE.md',
   'docs/添加新语言指南.md',
+  'docs/lsp-manager.md',
 ];
 
 /** A snapshot with a date. Allowed to be old, not allowed to be undated. */
@@ -71,6 +72,7 @@ const DATED = [
   'docs/评估_20261110.md',
   'docs/LSP能力测试清单_20261114.md',
   'docs/评估_20261115.md',
+  'docs/补全与依赖修复方案_20261115.md',
 ];
 
 const live = new Set(LIVE);

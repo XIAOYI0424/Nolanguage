@@ -26,7 +26,7 @@
  * run `npm run build:exe` yourself when `src/` changed.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { findMakensis } from '../scripts/lib/nsis.mjs';
@@ -68,11 +68,17 @@ log(`app image : ${APP_EXE} (${(statSync(APP_EXE).size / 1024 / 1024).toFixed(1)
 
 // `-INPUTCHARSET UTF8`: the script is UTF-8 (Chinese UI strings). NSIS would
 // otherwise read it as the ANSI code page and garble every label.
+// The version is read from package.json, not repeated in the .nsi: the
+// Add/Remove entry, the file version and `/health` must all name the same
+// build, and a hand-edited copy of the number is exactly how they drift.
+const { version } = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+
 const args = [
   '-INPUTCHARSET',
   'UTF8',
   `/DAPP_EXE=${APP_EXE}`,
   `/DOUTFILE=${SETUP}`,
+  `/DAPP_VERSION=${version}`,
   SCRIPT,
 ];
 log('running makensis…');

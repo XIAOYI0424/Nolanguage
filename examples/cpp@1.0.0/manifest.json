@@ -68,6 +68,11 @@
     ]
   },
   "lsp": {
+    "provider": {
+      "kind": "github",
+      "package": "clangd/clangd",
+      "asset": "clangd.exe"
+    },
     "discovery": {
       "commands": [
         "clangd"

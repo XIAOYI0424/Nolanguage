@@ -13,6 +13,14 @@ import type { DapClient } from '../dap/DapClient.js';
 export interface ConnState {
   runSink?: (d: string) => void;
   termChild?: ChildProcess;
+  /**
+   * The package installer this connection started, if any.
+   *
+   * Separate from `termChild`: the terminal is attached and interactive, while
+   * an install is a one-shot with no stdin, and the Packages view must be able
+   * to cancel it without disturbing whatever the terminal is running.
+   */
+  installChild?: ChildProcess;
   dap?: DapClient;
   /**
    * Thread the adapter last reported as stopped. Continue / step / pause must

@@ -63,6 +63,12 @@
     ]
   },
   "lsp": {
+    "provider": {
+      "kind": "npm",
+      "package": "pyright",
+      "version": "1.1.414",
+      "bin": "pyright-langserver"
+    },
     "discovery": {
       "commands": [
         "pyright-langserver"
@@ -191,5 +197,21 @@
     "degradedNote": "debugpy not installed - debugging is unavailable for Python",
     "install": "pip install debugpy",
     "supportsAttach": true
+  },
+  "dependencies": {
+    "format": "requirements",
+    "files": [
+      "requirements.txt",
+      {
+        "file": "pyproject.toml",
+        "format": "pyproject"
+      }
+    ],
+    "install": [
+      "{toolchain}",
+      "-m",
+      "pip",
+      "install"
+    ]
   }
 }

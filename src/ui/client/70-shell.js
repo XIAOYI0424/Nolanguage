@@ -72,7 +72,8 @@
     { name: 'Point.norm()', path: 'utils.py:9' }
   ];
   var ACTIONS = [
-    { name: "Run 'main'", sc: 'Shift+F10', act: runCode },
+    { name: "Run 'main'", sc: 'Shift+F10', act: function () { runCode('run'); } },
+    { name: 'Run tests', sc: 'Ctrl+Shift+F10', act: function () { runCode('test'); } },
     { name: "Debug 'main'", sc: 'Shift+F9', act: debugCurrent },
     { name: 'Run with Coverage', act: runCoverage },
     { name: 'Stop', act: stopRun },
@@ -132,7 +133,9 @@
   $('aboutClose').addEventListener('click', closeModals);
 
   // ---------- toolbar wiring ----------
-  $('runBtn').addEventListener('click', runCode);
+  $('runBtn').addEventListener('click', function () { runCode('run'); });
+  var tb0 = $('testBtn');
+  if (tb0) tb0.addEventListener('click', function () { runCode('test'); });
   $('debugBtn').addEventListener('click', debugCurrent);
   $('covBtn').addEventListener('click', runCoverage);
   $('stopBtn').addEventListener('click', stopRun);
@@ -670,7 +673,13 @@
     if (e.ctrlKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); openNativeFile(); return; }
     if (e.ctrlKey && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); openPalette(); return; }
     if (e.shiftKey && e.key === 'F9') { e.preventDefault(); debugCurrent(); return; }
-    if (e.shiftKey && e.key === 'F10') { e.preventDefault(); runCode(); return; }
+    if (e.key === 'F10' && e.shiftKey) {
+      e.preventDefault();
+      // Ctrl+Shift+F10 tests; Shift+F10 runs. Same key, one modifier apart, as
+      // PyCharm's "run context" pair.
+      runCode(e.ctrlKey || e.metaKey ? 'test' : 'run');
+      return;
+    }
     // Developer shortcuts added with the expanded menus.
     if (e.ctrlKey && e.altKey && e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); openGoToSymbol(); return; }
     if (e.ctrlKey && e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); openGoToFile(); return; }

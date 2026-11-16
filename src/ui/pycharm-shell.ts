@@ -36,6 +36,7 @@ export const PYCHARM_SHELL = `
     </div>
     <div class="run-group">
       <button class="tbtn primary" id="runBtn" title="Run 'main'  (Shift+F10)" data-i18n-title="toolbar.Run"><span class="ic" data-ic="run" data-size="16"></span><span data-i18n="toolbar.Run">Run</span></button>
+      <button class="tbtn" id="testBtn" hidden title="Run the test entry point  (Ctrl+Shift+F10)"><span class="ic" data-ic="check" data-size="16"></span><span>Test</span></button>
       <button class="tbtn" id="debugBtn" title="Debug 'main'  (Shift+F9)" data-i18n-title="toolbar.Debug"><span class="ic" data-ic="debug" data-size="16"></span><span data-i18n="toolbar.Debug">Debug</span></button>
       <button class="tbtn iconly" id="covBtn" title="Run with coverage" data-i18n-title="toolbar.Coverage"><span class="ic" data-ic="coverage" data-size="16"></span></button>
       <button class="tbtn iconly" id="stopBtn" title="Stop" data-i18n-title="toolbar.Stop"><span class="ic" data-ic="stop" data-size="16"></span></button>

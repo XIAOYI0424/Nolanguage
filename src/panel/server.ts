@@ -54,7 +54,7 @@ import { runPythonCoverage } from './coverage.js';
 import { gitStatus, gitCommit } from './git.js';
 import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '../dap/DapClient.js';
 import { discoverBinary } from '../langs/discover.js';
-import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleHover, handleMdRender } from './handlers/languages.js';
+import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleCompletionResolve, handleDependencyCancel, handleDependencyInstall, handleDependencyReport, handleFormat, handleHover, handleMdRender, handleSignatureHelp } from './handlers/languages.js';
 import { envToolchains, handleImportIdea, handleInterpreters, handleSetInterpreter } from './handlers/migration.js';
 import {
   handleCodeAction,
@@ -99,7 +99,9 @@ function extensionDirs(): string[] {
     .filter(Boolean)
     .map((p) => resolve(p));
   const builtins = [join(__dirname, '..', 'extensions', 'examples'), join(process.cwd(), 'extensions')];
-  const unpacked = materializeAssets('extensions/examples');
+  // `%TEMP%` can refuse (locked cache, read-only profile); the app data root is
+  // the fallback so a demo extension never blocks the whole launch.
+  const unpacked = materializeAssets('extensions/examples', { fallbackRoot: appDataPath('embedded') });
   return [...new Set([...fromEnv, ...builtins, ...(unpacked ? [unpacked] : [])])];
 }
 
@@ -734,8 +736,20 @@ export async function main(
         case 'codeAction':
           void handleCodeAction(workspace, msg, reply);
           break;
+        case 'completionResolve':
+          void handleCompletionResolve(workspace, msg, reply);
+          break;
+
+        case 'signatureHelp':
+          void handleSignatureHelp(workspace, msg, reply);
+          break;
+
         case 'workspaceSymbol':
           void handleWorkspaceSymbol(workspace, msg, reply);
+          break;
+
+        case 'format':
+          void handleFormat(workspace, msg, reply);
           break;
 
         case 'hover':
@@ -744,6 +758,20 @@ export async function main(
 
         case 'mdRender':
           void handleMdRender(workspace, msg, reply);
+          break;
+
+        // ---- project packages: read the declaration, install one more ----
+        // The dependency file follows the *project*, not the IDE's scratch
+        // buffers, so the root comes from the explorer — as a getter, because
+        // `openFolder` can repoint it at runtime.
+        case 'dependencyReport':
+          void handleDependencyReport(workspace, () => fs.root, msg, reply);
+          break;
+        case 'dependencyInstall':
+          void handleDependencyInstall(workspace, () => fs.root, msg, reply, key);
+          break;
+        case 'dependencyCancel':
+          handleDependencyCancel(key, reply);
           break;
 
         // ---------- P1 · migration thresholds ----------
@@ -831,6 +859,9 @@ export async function main(
       // connection cannot leave a `ChildProcess` behind.
       const st = takeConnection(key);
       if (st?.termChild) { try { st.termChild.kill('SIGKILL'); } catch { /* gone */ } }
+      // An installer outlives nothing: closing the window must not leave a
+      // half-finished `pip install` rewriting the project behind the user.
+      if (st?.installChild) { try { st.installChild.kill('SIGTERM'); } catch { /* gone */ } }
       // A closed window must not keep the CPU profiler (or a debug adapter)
       // alive; both are per-window subscriptions, not per-process services.
       flame.unsubscribe(reply);

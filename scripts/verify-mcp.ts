@@ -83,7 +83,7 @@ rl.on('line', (line) => {
   // and the reason a bare command name cannot be spawned directly there
   // (`spawn('npx')` is ENOENT, `spawn('npx.cmd')` is EINVAL). Pointing a server
   // entry at it, with that directory on the child's PATH, is the regression
-  // test for `planMcpSpawn`. Skipped off Windows, where the shim means nothing.
+  // test for `planSpawn`. Skipped off Windows, where the shim means nothing.
   const shimDir = join(dir, 'shim');
   const shimName = process.platform === 'win32' ? 'mcpfixture.cmd' : 'mcpfixture';
   await mkdir(shimDir, { recursive: true });

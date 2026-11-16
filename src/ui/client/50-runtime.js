@@ -29,7 +29,18 @@
     RUN_OUTPUT_CHARS = (out.textContent || '').length;
     RUN_OUTPUT_TRUNCATED = false;
   }
-  function runCode() {
+  /** Show the Test button only where the plugin declares a 'test' mode. */
+  function syncTestButton() {
+    var b = $('testBtn');
+    if (!b) return;
+    b.hidden = !TESTABLE[currentLang];
+  }
+  /**
+   * 'mode' is 'run' or 'test'. The engine has accepted both for a long time
+   * ('handlers/run.ts'), and Go/Rust/Java/C++ all declare a test mode — what was
+   * missing was a way to ask for it.
+   */
+  function runCode(mode) {
     var lg = lspLang();
     if (!lg) { toast('run: only Python / Go / JavaScript are supported yet'); return; }
     activeBottom = 'run'; $('dock').classList.remove('hidden'); renderDock();
@@ -39,9 +50,9 @@
     // contract the UI suite asserts — a Run/Debug *configuration* must never
     // hijack the editor, so it is not consulted here. Debug (Shift+F9) is where
     // the configuration drives things: program, args, env and cwd.
-    BRIDGE.send({ kind: 'run', code: ta.value, language: lg, sessionId: 'pycharm' });
+    BRIDGE.send({ kind: 'run', code: ta.value, language: lg, sessionId: 'pycharm', ...(mode === 'test' ? { mode: 'test' } : {}) });
     requestCheck();
-    toast('Running ' + currentFile + ' …');
+    toast((mode === 'test' ? 'Testing ' : 'Running ') + currentFile + ' …');
     var ri = $('runIn'); if (ri) { ri.disabled = false; ri.focus(); }
   }
   function appendRun(text, cls) {
@@ -294,7 +305,7 @@
       ? DBG_WATCHES.map(function (w, i) {
           return '<div class="dbg-row dbg-watch"><span class="vn">' + esc(w.expr) + '</span>' +
             '<span class="vv">' + esc(w.result == null ? '…' : w.result) + '</span>' +
-            '<span class="vx" data-wx="' + i + '">✕</span></div>';
+            '<span class="vx" data-wx="' + i + '">' + ic('close', 10) + '</span></div>';
         }).join('')
       : '<div class="empty">No watches yet.</div>';
     Array.prototype.forEach.call(ws.querySelectorAll('[data-wx]'), function (x) {
@@ -479,9 +490,53 @@
     for (var i = 0; i < Math.max(x.length, y.length); i++) if (x[i] !== y[i]) n++;
     return n;
   }
+  /**
+   * Apply LSP 'TextEdit's to a string.
+   *
+   * Edits are applied back-to-front so the offsets of the ones not yet applied
+   * stay valid. LSP positions are line/character in UTF-16 code units, which is
+   * exactly what a JS string indexes by, so no encoding step is needed.
+   */
+  function applyTextEdits(text, edits) {
+    if (!edits || !edits.length) return text;
+    var lines = String(text).split('\n');
+    var starts = [0];
+    for (var i = 1; i < lines.length; i++) starts.push(starts[i - 1] + lines[i - 1].length + 1);
+    function offset(pos) {
+      if (!pos) return 0;
+      var base = starts[pos.line] == null ? text.length : starts[pos.line];
+      return Math.max(0, Math.min(text.length, base + (pos.character || 0)));
+    }
+    var ordered = edits.slice().sort(function (a, b) { return offset(b.range.start) - offset(a.range.start); });
+    var out = String(text);
+    for (var k = 0; k < ordered.length; k++) {
+      var e = ordered[k];
+      out = out.slice(0, offset(e.range.start)) + (e.newText || '') + out.slice(offset(e.range.end));
+    }
+    return out;
+  }
+  // Ask the language's own formatter first. The hand-rolled indenter stays as
+  // the fallback: a language with no server (or a server without
+  // 'documentFormattingProvider') must still be reformattable.
+  var FMT_REQ = 0;
+  function reformatLocally(reason) {
+    var before = ta.value, after = basicFormat(before);
+    if (after === before) { toast('Reformatted · nothing to change'); return; }
+    setEditorText(after);
+    toast('Reformatted locally · ' + changedLines(before, after) + ' lines changed' + (reason ? ' (' + reason + ')' : ''));
+  }
   function reformatCode() {
     if (!CAN_EDIT()) { toast('Reformat: no editable document'); return; }
-    var before = ta.value, after = basicFormat(before);
+    var lg = lspLang();
+    if (!lg) { reformatLocally('no language server'); return; }
+    FMT_REQ = (FMT_REQ + 1) % 100000;
+    BRIDGE.send({ kind: 'format', code: ta.value, language: lg, requestId: FMT_REQ });
+  }
+  function onFormatResult(m) {
+    if (m.requestId !== FMT_REQ) return;
+    if (m.unsupported) { reformatLocally(String(m.unsupported)); return; }
+    var before = ta.value;
+    var after = applyTextEdits(before, m.edits || []);
     if (after === before) { toast('Reformatted · nothing to change'); return; }
     setEditorText(after);
     toast('Reformatted · ' + changedLines(before, after) + ' lines changed');
@@ -721,16 +776,33 @@
       case 'workspaceSymbolResult':
         navOnFrame(m);
         break;
+      case 'completionItemDetail':
+        cmpOnDetail(m);
+        break;
+      case 'signatureResult':
+        sigOnFrame(m);
+        break;
       case 'diagnostics':
         // A switch can move the document on while a check is in flight; showing
         // the old language's problems under the new one would be a lie.
         if (m.language && m.language !== currentLang) break;
         setDiags(m.items || []);
         break;
+      case 'formatResult':
+        onFormatResult(m);
+        break;
       case 'mdPreview':
         // The preview pane and the Structure window both read this; the handler
         // drops answers whose requestId is stale.
         mdOnPreview(m);
+        break;
+      case 'dependencies':
+      case 'dependencyStart':
+      case 'dependencyOut':
+      case 'dependencyResult':
+      case 'dependencyCancelled':
+        // One entry point for the Packages pane: read, install, stream, cancel.
+        pkgOnFrame(m);
         break;
       case 'runResult':
         if (m.cancelled) {

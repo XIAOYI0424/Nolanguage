@@ -18,6 +18,7 @@
  */
 import type { RunConfig, ScaffoldSpec } from '../runtimes/types.js';
 import type { BundledFallbackSpec } from '../lsp/bundledFallback.js';
+import type { DependencySpec } from './dependencies.js';
 
 export type { BundledFallbackSpec };
 
@@ -51,7 +52,15 @@ export interface LspSpec {
     envVars?: string[];
     knownPaths?: string[];
   };
-  /** Server command; `{resolved}` is replaced by the discovery result. */
+  /**
+   * Launch template. Placeholders: `{resolved}` (the discovered binary),
+   * `{dist}` (the distribution root, for launchers that live in `bin/`),
+   * `{root}`, `{dataDir}`, `{java}`, and `{glob:<pattern>}`.
+   *
+   * Needed because not every server is launched by its discovered binary:
+   * jdtls ships a `.bat` that shells out to Python and ends with `pause`, so the
+   * real command is `java -jar …/equinox.launcher_*.jar`.
+   */
   command?: string[];
   args?: string[];
   /** LSP `languageId` sent in `textDocument/didOpen`. Defaults to the plugin id. */
@@ -90,6 +99,74 @@ export interface LspSpec {
    * the engine — a named capability that was a language check underneath.
    */
   bundledFallback?: BundledFallbackSpec;
+  /**
+   * Where this server comes from, when it is not installed.
+   *
+   * Declared so `nlg lang server` can answer "what is missing, how big is it,
+   * what exactly do I type" without a per-language table in the CLI. The
+   * provider is *not* used at runtime: discovery still decides what runs, and a
+   * managed install is only consulted when discovery finds nothing.
+   */
+  provider?: ServerProviderSpec;
+
+  // ---------------- pooled manager (opt-in) ----------------
+  //
+  // Everything below is data, not code: the manager pools, routes, schedules and
+  // degrades; the plugin only says *what* its project is and *what to say* when
+  // no server is around. A language that leaves `manager` unset keeps the
+  // one-client-per-language path, which is what makes this migration reversible
+  // one manifest at a time.
+  /** Route this language through `LspManager` (pooling, fallback, scheduling). */
+  manager?: boolean;
+  /** Project-root markers, walked up from the file (`pom.xml`, `Cargo.toml`). */
+  projectMarkers?: string[];
+  /** Passed to `initialize.initializationOptions` verbatim. */
+  initializationOptions?: Record<string, unknown>;
+  /** Idle milliseconds before the pooled server is stopped. */
+  idleTtlMs?: number;
+  /** How long one request may wait for a cold server before the fallback answers. */
+  firstRequestBudgetMs?: number;
+  /** Budget for an explicit action (definition, formatting, signature help). */
+  navBudgetMs?: number;
+  /** Budget for the initialize handshake. */
+  startTimeoutMs?: number;
+  /** Which incremental strategy to use; `git` chains to content stamps. */
+  incremental?: 'git' | 'content-hash' | 'none';
+  /** Declarative fallback: keywords and a declaration pattern, not code. */
+  fallback?: LexicalFallbackSpec;
+  /** Optional `--version` args; absent means "identify the binary by its stamp". */
+  versionArgs?: string[];
+  /** Pinned server version, when the launcher file does not change on upgrade. */
+  serverVersion?: string;
+}
+
+export interface LexicalFallbackSpec {
+  kind?: 'lexical';
+  keywords?: string[];
+  types?: string[];
+  /** Regex source with one capture group naming a declaration. */
+  declarationPattern?: string;
+  note?: string;
+}
+
+export interface ServerProviderSpec {
+  /** `npm` and `go` are run for the user; `github` prints instructions instead. */
+  kind: 'npm' | 'go-install' | 'github';
+  /** npm package, Go module path, or `owner/repo`. */
+  package: string;
+  /** Pinned version. Absent only for `github`, where a user picks the asset. */
+  version?: string;
+  /** npm: the executable inside `node_modules/.bin/`. */
+  bin?: string;
+  /**
+   * Extra packages the install must pull in, each already versioned
+   * (`typescript@5.6.3`). A server whose peer dependency is not installed
+   * starts and then fails on the first request — typescript-language-server
+   * needs `typescript` for exactly that reason.
+   */
+  also?: string[];
+  /** github: the release asset to look for. */
+  asset?: string;
 }
 
 export interface DapSpec {
@@ -180,6 +257,11 @@ export interface LanguageManifest {
   scaffold?: ScaffoldSpec;
   lsp?: LspSpec;
   run?: RunConfig;
+  /**
+   * Where this language declares its third-party packages, and how to install
+   * one. The *format* is data, so the reader never branches on the language.
+   */
+  dependencies?: DependencySpec;
   dap?: DapSpec;
   debug?: DebugSpec;
   profiler?: ProfilerSpec;
@@ -392,9 +474,120 @@ export function validateManifest(raw: unknown): ManifestValidation {
     validateInterpreters(run.interpreters, 'run.interpreters', add);
   }
 
+  const deps = m.dependencies as Record<string, unknown> | undefined;
+  if (deps !== undefined) {
+    const formats = ['requirements', 'gomod', 'npm', 'pyproject'];
+    if (typeof deps.format !== 'string' || !formats.includes(deps.format)) {
+      add('dependencies.format', `must be one of ${formats.join(' | ')}`);
+    }
+    // An entry is a file name, or `{ file, format }` when the candidates answer
+    // the same question in different languages (requirements.txt vs
+    // pyproject.toml). A string is the common case and stays a string.
+    const okFile = (f: unknown): boolean => {
+      if (typeof f === 'string') return f.length > 0;
+      if (!f || typeof f !== 'object') return false;
+      const o = f as Record<string, unknown>;
+      if (typeof o.file !== 'string' || !o.file) return false;
+      if (o.format !== undefined && (typeof o.format !== 'string' || !formats.includes(o.format))) return false;
+      return true;
+    };
+    if (!Array.isArray(deps.files) || !deps.files.length || deps.files.some((f) => !okFile(f))) {
+      add('dependencies.files', 'must be a non-empty array of file names or { file, format } objects');
+    }
+    if (deps.install !== undefined && (!Array.isArray(deps.install) || deps.install.some((c) => typeof c !== 'string' || !c))) {
+      add('dependencies.install', 'must be an array of strings when present');
+    }
+  }
+
   const lsp = m.lsp as Record<string, unknown> | undefined;
   if (lsp) {
     validateDiscovery(lsp.discovery, 'lsp.discovery', add);
+    const prov = lsp.provider;
+    if (prov !== undefined) {
+      const p = prov as Record<string, unknown>;
+      const kinds = ['npm', 'go-install', 'github'];
+      if (!p || typeof p !== 'object' || Array.isArray(p)) {
+        add('lsp.provider', 'must be an object with a `kind` and a `package`');
+      } else {
+        if (typeof p.kind !== 'string' || !kinds.includes(p.kind)) {
+          add('lsp.provider.kind', `must be one of ${kinds.join(' | ')}`);
+        }
+        if (typeof p.package !== 'string' || !p.package) {
+          add('lsp.provider.package', 'must name the npm package, Go module or owner/repo');
+        }
+        // A pinned version is what makes the install reproducible. `github` is
+        // exempt because it is manual by design: the user picks the asset.
+        if (p.kind !== 'github' && (typeof p.version !== 'string' || !p.version)) {
+          add('lsp.provider.version', 'is required for npm/go — an unpinned install is not reproducible');
+        }
+        for (const opt of ['bin', 'asset']) {
+          if (p[opt] !== undefined && (typeof p[opt] !== 'string' || !p[opt])) {
+            add(`lsp.provider.${opt}`, 'must be a non-empty string when present');
+          }
+        }
+        if (p.also !== undefined && (!Array.isArray(p.also) || p.also.some((x) => typeof x !== 'string' || !x))) {
+          add('lsp.provider.also', 'must be an array of versioned package specs');
+        }
+      }
+    }
+    // ---- pooled manager fields ----
+    if (lsp.manager !== undefined && typeof lsp.manager !== 'boolean') {
+      add('lsp.manager', 'must be a boolean');
+    }
+    if (lsp.projectMarkers !== undefined) {
+      const m2 = lsp.projectMarkers;
+      if (!Array.isArray(m2) || !m2.length || m2.some((x) => typeof x !== 'string' || !x || x.includes('/') || x.includes('\\'))) {
+        add('lsp.projectMarkers', 'must be a non-empty array of file names (no path separators)');
+      }
+    }
+    if (lsp.initializationOptions !== undefined && (!lsp.initializationOptions || typeof lsp.initializationOptions !== 'object' || Array.isArray(lsp.initializationOptions))) {
+      add('lsp.initializationOptions', 'must be an object');
+    }
+    for (const key of ['idleTtlMs', 'firstRequestBudgetMs', 'navBudgetMs', 'startTimeoutMs']) {
+      const v = lsp[key];
+      if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) {
+        add(`lsp.${key}`, 'must be a non-negative number of milliseconds');
+      }
+    }
+    if (lsp.incremental !== undefined && !['git', 'content-hash', 'none'].includes(String(lsp.incremental))) {
+      add('lsp.incremental', 'must be one of git | content-hash | none');
+    }
+    if (lsp.versionArgs !== undefined && (!Array.isArray(lsp.versionArgs) || lsp.versionArgs.some((x) => typeof x !== 'string'))) {
+      add('lsp.versionArgs', 'must be an array of strings');
+    }
+    if (lsp.serverVersion !== undefined && (typeof lsp.serverVersion !== 'string' || !lsp.serverVersion)) {
+      add('lsp.serverVersion', 'must be a non-empty string when present');
+    }
+    const lfb = lsp.fallback as Record<string, unknown> | undefined;
+    if (lfb !== undefined) {
+      if (!lfb || typeof lfb !== 'object' || Array.isArray(lfb)) {
+        add('lsp.fallback', 'must be an object');
+      } else {
+        if (lfb.kind !== undefined && lfb.kind !== 'lexical') {
+          add('lsp.fallback.kind', 'must be "lexical" (tree-sitter is a provider, not a manifest value)');
+        }
+        for (const key of ['keywords', 'types']) {
+          const v = lfb[key];
+          if (v !== undefined && (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || !x))) {
+            add(`lsp.fallback.${key}`, 'must be an array of non-empty strings');
+          }
+        }
+        if (lfb.declarationPattern !== undefined) {
+          if (typeof lfb.declarationPattern !== 'string' || !lfb.declarationPattern) {
+            add('lsp.fallback.declarationPattern', 'must be a non-empty string');
+          } else {
+            try {
+              // A pattern that does not compile would throw on the first
+              // keystroke, in the one code path that must never fail.
+              new RegExp(lfb.declarationPattern, 'g');
+            } catch (err) {
+              add('lsp.fallback.declarationPattern', `does not compile: ${(err as Error).message}`);
+            }
+          }
+        }
+      }
+    }
+
     const fb = lsp.bundledFallback;
     if (fb !== undefined) {
       if (!fb || typeof fb !== 'object' || Array.isArray(fb)) {

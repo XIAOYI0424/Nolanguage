@@ -60,6 +60,15 @@
     ]
   },
   "lsp": {
+    "provider": {
+      "kind": "npm",
+      "package": "typescript-language-server",
+      "version": "6.1.0",
+      "bin": "typescript-language-server",
+      "also": [
+        "typescript@5.6.3"
+      ]
+    },
     "discovery": {
       "commands": [
         "typescript-language-server"
@@ -109,5 +118,15 @@
       ],
       "sdkPrefix": "Node.js"
     }
+  },
+  "dependencies": {
+    "format": "npm",
+    "files": [
+      "package.json"
+    ],
+    "install": [
+      "npm",
+      "install"
+    ]
   }
 }

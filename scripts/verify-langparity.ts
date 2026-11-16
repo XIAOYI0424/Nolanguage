@@ -95,6 +95,11 @@ const LITERAL_BUDGET: Record<string, number> = {
   // The fallback table itself: three keys, kept so plugins written before
   // `run.interpreters` still get discovery. Built-ins no longer use it.
   'src/langs/interpreters.ts': 3,
+  // The `go` **tool name** in `['go', 'install', spec]` — a toolchain, not a
+  // language. The provider kind is spelled `go-install` for exactly this reason:
+  // nothing in `serverInstall.ts` recognises the *language* `go` by name, and the
+  // GOBIN branch keys on the kind, not on the command string.
+  'src/langs/serverInstall.ts': 1,
   // The single extension -> language table now. It holds the no-plugin
   // languages plus the defaults a registry-less process (NDebug.exe) needs;
   // the panel replaces the plugin entries with the manifests at startup, and the

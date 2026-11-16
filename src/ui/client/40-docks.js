@@ -98,11 +98,12 @@
       pane('run', runPaneHtml()) +
       pane('debug', debugPane()) +
       pane('terminal', termPane()) +
+      pane('packages', packagesPane()) +
       pane('perf', perfPane()) +
       pane('logs', logsPane()) +
       pane('find', findPane()) +
       pane('problems', '<div id="probOut"><div class="empty">No problems.</div></div>');
-    wireLogs(); wireTerm(); wireFind(); wireDbg(); wireDebugViews();
+    wireLogs(); wireTerm(); wireFind(); wireDbg(); wireDebugViews(); wirePackages();
     var ri = $('runIn');
     if (ri) ri.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
@@ -113,6 +114,7 @@
     if (activeBottom === 'logs') renderLogs();
     if (activeBottom === 'perf') renderPerf(lastMetrics);
     if (activeBottom === 'terminal') { renderTermOut(); var ti = $('termIn'); if (ti) ti.focus(); }
+    if (activeBottom === 'packages') { renderPkg(); requestDeps(); }
   }
   // ---- Find in Files (bottom dock, Ctrl+Shift+F) ----
   // Searches the documents currently held in memory (open buffers) plus any
@@ -189,6 +191,163 @@
   }
   function pane(id, inner) {
     return '<div class="dock-pane' + (activeBottom === id ? ' active' : '') + '" data-pane="' + id + '">' + inner + '</div>';
+  }
+
+  // ---- Packages (bottom dock, Alt+6) ----
+  // PyCharm's "Python Packages" window, generalized. The list, the file it is
+  // read from and the command that installs one package all come from the
+  // language manifest, so this pane renders an answer instead of knowing a
+  // language: nothing below mentions python, go or node.
+  var PKG = { report: null, out: '', busy: false };
+
+  function packagesPane() {
+    return '<div class="pkgs">' +
+      '<div class="pkgs-head"><span class="pkgs-title">Project packages</span>' +
+      '<span class="pkgs-file" id="pkgFile"></span>' +
+      '<button class="tbtn" data-pkg="refresh">Refresh</button></div>' +
+      '<div class="pkgs-install">' +
+      '<input id="pkgName" placeholder="Package name" spellcheck="false" autocapitalize="off" autocomplete="off" />' +
+      '<button class="tbtn primary" data-pkg="install" id="pkgGo">Install</button>' +
+      '<button class="tbtn" data-pkg="cancel" id="pkgStop">Stop</button>' +
+      '</div>' +
+      '<div class="pkgs-note" id="pkgNote"></div>' +
+      '<div class="pkgs-list" id="pkgList"></div>' +
+      '<pre class="pkgs-out" id="pkgOut"></pre>' +
+      '</div>';
+  }
+
+  // The declaration lives next to the project, so the current buffer has to
+  // travel with the request: the engine compares what the file imports against
+  // what the dependency file declares.
+  function requestDeps() {
+    BRIDGE.send({ kind: 'dependencyReport', language: currentLang, code: ta.value });
+  }
+
+  /**
+   * Follow the document. A language switch makes the last report describe the
+   * wrong language, so re-read instead of showing python's packages under go.
+   */
+  function pkgSync() {
+    if (activeBottom !== 'packages') return;
+    var dock = $('dock');
+    if (dock && dock.classList.contains('hidden')) return;
+    if (PKG.report && PKG.report.language === currentLang) return;
+    requestDeps();
+  }
+
+  function installPkg() {
+    var inp = $('pkgName'); if (!inp) return;
+    var name = (inp.value || '').trim();
+    if (!name || PKG.busy) { inp.focus(); return; }
+    PKG.out = '';
+    PKG.busy = true;
+    renderPkg();
+    BRIDGE.send({ kind: 'dependencyInstall', language: currentLang, package: name });
+  }
+
+  function renderPkg() {
+    var out = $('pkgOut'); if (!out) return;
+    out.textContent = PKG.out || 'Installer output appears here.';
+    out.scrollTop = out.scrollHeight;
+    var go = $('pkgGo'); if (go) go.disabled = PKG.busy;
+    var stop = $('pkgStop'); if (stop) stop.disabled = !PKG.busy;
+    var list = $('pkgList'), note = $('pkgNote'), file = $('pkgFile');
+    if (!list) return;
+    var r = PKG.report;
+    if (!r) {
+      if (file) file.textContent = '';
+      if (note) { note.textContent = ''; note.className = 'pkgs-note'; }
+      list.innerHTML = '<div class="empty">Reading the dependency file…</div>';
+      return;
+    }
+    if (file) file.textContent = r.file || '';
+    if (note) {
+      note.textContent = r.note || '';
+      note.className = 'pkgs-note' + (r.note ? ' warn' : '');
+    }
+    var rows = '';
+    (r.packages || []).forEach(function (p) {
+      rows += '<div class="pkgs-row"><b>' + esc(p.name) + '</b>' +
+        (p.version ? '<span class="pkgs-ver">' + esc(p.version) + '</span>' : '') + '</div>';
+    });
+    // Imports with no matching declaration. A hint, not a verdict: the engine
+    // reads imports textually, so a standard-library module shows up here too.
+    (r.undeclared || []).forEach(function (name) {
+      rows += '<div class="pkgs-row"><b>' + esc(name) + '</b>' +
+        '<span class="pkgs-tag">not declared</span>' +
+        '<button class="tbtn" data-pkg="use" data-name="' + esc(name) + '">Use</button></div>';
+    });
+    if (!rows) {
+      rows = '<div class="empty">' +
+        (r.supported === false ? 'This language declares no dependency file.' : 'Nothing declared yet.') + '</div>';
+    }
+    list.innerHTML = rows;
+    list.querySelectorAll('button[data-pkg="use"]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var inp = $('pkgName');
+        if (inp) { inp.value = b.getAttribute('data-name') || ''; inp.focus(); }
+      });
+    });
+  }
+
+  function wirePackages() {
+    var body = $('dockBody'); if (!body) return;
+    body.querySelectorAll('button[data-pkg]').forEach(function (b) {
+      var act = b.getAttribute('data-pkg');
+      if (act === 'use') return; // per-row buttons are wired by renderPkg
+      b.addEventListener('click', function () {
+        if (act === 'refresh') requestDeps();
+        else if (act === 'cancel') BRIDGE.send({ kind: 'dependencyCancel' });
+        else if (act === 'install') installPkg();
+      });
+    });
+    var inp = $('pkgName');
+    if (inp) inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); installPkg(); }
+    });
+  }
+
+  /** Every dependency frame, in one place: the pane is a projection of these. */
+  function pkgOnFrame(m) {
+    if (m.kind === 'dependencies') {
+      // A switch can move the document on while the read is in flight; showing
+      // another language's packages would be a lie.
+      if (m.language && m.language !== currentLang) return;
+      PKG.report = m;
+      renderPkg();
+      return;
+    }
+    if (m.kind === 'dependencyStart') {
+      PKG.busy = true;
+      PKG.out = '$ ' + (m.package || '') + '\n';
+      renderPkg();
+      return;
+    }
+    if (m.kind === 'dependencyOut') {
+      PKG.out += m.text || '';
+      // The engine caps the process output; this is the render cap on top of it.
+      if (PKG.out.length > 200000) PKG.out = PKG.out.slice(-200000);
+      renderPkg();
+      return;
+    }
+    if (m.kind === 'dependencyCancelled') {
+      if (!m.ok && m.error) PKG.out += '[' + m.error + ']\n';
+      renderPkg();
+      return;
+    }
+    if (m.kind !== 'dependencyResult') return;
+    PKG.busy = false;
+    var line = m.ok
+      ? '[finished in ' + fmtMs(m.ms) + ']\n'
+      : '[failed: ' + (m.error || ('exit code ' + (m.code == null ? '?' : m.code))) + ']\n';
+    if (m.refresh && m.refresh.ok) line += '[language server restarted]\n';
+    else if (m.refresh && m.refresh.error) line += '[language server not restarted: ' + m.refresh.error + ']\n';
+    PKG.out += line;
+    renderPkg();
+    var inp = $('pkgName'); if (inp) inp.value = '';
+    // The file on disk may have just gained a line; re-read it rather than
+    // guessing what the installer decided to write.
+    if (m.ok) requestDeps();
   }
   // The Run pane owns the debug toolbar: the bar is the control surface for a
   // session that is already running, while the Debug pane (below) is the view
@@ -502,7 +661,7 @@
     var r = anchorEl.getBoundingClientRect();
     showCtx(r.left, r.bottom + 3, items.map(function (it) {
       return {
-        label: (it.checked ? '✓  ' : '    ') + it.label,
+        label: (it.checked ? '\u25cf  ' : '   ') + it.label,
         act: function () { onPick(it); },
       };
     }));

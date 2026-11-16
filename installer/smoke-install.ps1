@@ -129,9 +129,24 @@ finally {
     Remove-Item -Path $receipt -Force
   }
   # Start Menu: put back exactly what was there, or remove what we created.
+  #
   # Best effort on purpose — a restore that cannot write must warn, never throw:
   # the `finally` block must not replace the real verdict with a cleanup error.
-  try {
+  #
+  # But one attempt is not enough, and both reasons are structural rather than
+  # bad luck:
+  #
+  #   - a silent NSIS uninstaller copies itself to %TEMP% and returns, so `-Wait`
+  #     on the stub is not the end of the uninstall. The real one keeps deleting
+  #     the Start Menu folder for a moment afterwards.
+  #   - Windows holds a .lnk it has just written for a few hundred milliseconds.
+  #
+  # Losing that race is not cosmetic: the uninstaller deletes *every* shortcut in
+  # the folder, so a failed restore leaves the user with the installer's
+  # shortcuts pointing at a %TEMP% directory that no longer exists. That is
+  # exactly what happened on the first machine this ran on — hence retry, and
+  # verify the result instead of assuming the copy worked.
+  $restoreStartMenu = {
     if ($savedStartMenu) {
       if (Test-Path $startMenu) { Remove-Item -LiteralPath $startMenu -Recurse -Force -ErrorAction SilentlyContinue }
       # Copy the *contents*, not the folder: `Copy-Item <dir> -Destination <dir>`
@@ -140,14 +155,29 @@ finally {
       # `Nolanguage\nl-smoke-startmenu-<guid>\Nolanguage.lnk`.
       New-Item -ItemType Directory -Path $startMenu -Force -ErrorAction Stop | Out-Null
       Copy-Item -Path (Join-Path $savedStartMenu '*') -Destination $startMenu -Recurse -Force -ErrorAction Stop
+      $want = @(Get-ChildItem -LiteralPath $savedStartMenu -File).Count
+      $got = @(Get-ChildItem -LiteralPath $startMenu -File).Count
+      if ($got -lt $want) { throw "only $got of $want shortcut(s) came back" }
     } elseif (-not $hadStartMenu -and (Test-Path $startMenu)) {
-      Remove-Item -LiteralPath $startMenu -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $startMenu -Recurse -Force -ErrorAction Stop
+      if (Test-Path $startMenu) { throw 'the Start Menu folder survived removal' }
     }
-  } catch {
-    Write-Warning "could not restore the Start Menu folder: $($_.Exception.Message)"
-  } finally {
-    if ($savedStartMenu) { Remove-Item -LiteralPath $savedStartMenu -Recurse -Force -ErrorAction SilentlyContinue }
   }
+  $restoreError = $null
+  for ($attempt = 1; $attempt -le 12; $attempt++) {
+    try {
+      & $restoreStartMenu
+      $restoreError = $null
+      break
+    } catch {
+      $restoreError = $_.Exception.Message
+      Start-Sleep -Milliseconds 400
+    }
+  }
+  if ($restoreError) {
+    Write-Warning "could not restore the Start Menu folder after 12 attempts: $restoreError"
+  }
+  if ($savedStartMenu) { Remove-Item -LiteralPath $savedStartMenu -Recurse -Force -ErrorAction SilentlyContinue }
   Remove-Item -Path $run -Force -ErrorAction SilentlyContinue
   if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 }

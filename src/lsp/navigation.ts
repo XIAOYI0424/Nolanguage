@@ -46,6 +46,20 @@ export interface CodeAction {
   edits?: TextEdit[];
 }
 
+/** One call signature, as `textDocument/signatureHelp` reports it. */
+export interface Signature {
+  label: string;
+  documentation?: string;
+  /** Offsets of the active parameter inside `label`, when the server says. */
+  activeParameter?: number;
+}
+
+export interface SignatureHelp {
+  signatures: Signature[];
+  activeSignature: number;
+  activeParameter: number;
+}
+
 export interface SymbolInformation {
   name: string;
   kind: number;
@@ -54,7 +68,14 @@ export interface SymbolInformation {
   containerName?: string;
 }
 
-export type NavFeature = 'definition' | 'references' | 'rename' | 'codeAction' | 'workspaceSymbol';
+export type NavFeature =
+  | 'definition'
+  | 'references'
+  | 'rename'
+  | 'codeAction'
+  | 'workspaceSymbol'
+  | 'signatureHelp'
+  | 'format';
 
 /**
  * Either a value, or a reason there is none.
@@ -178,6 +199,36 @@ export function normalizeCodeActions(raw: unknown): CodeAction[] {
   return out;
 }
 
+/**
+ * `SignatureHelp | null` → our shape.
+ *
+ * `activeParameter` may live on the help object or on the active signature;
+ * LSP allows both, and servers differ. The help-level value wins when present.
+ */
+export function normalizeSignatureHelp(raw: unknown): SignatureHelp {
+  const o = raw as Record<string, unknown> | null;
+  const signatures = Array.isArray(o?.signatures) ? (o!.signatures as Array<Record<string, unknown>>) : [];
+  const activeSignature = typeof o?.activeSignature === 'number' ? o.activeSignature : 0;
+  const fromHelp = typeof o?.activeParameter === 'number' ? o.activeParameter : undefined;
+  const active = signatures[activeSignature] ?? signatures[0];
+  const fromSig = typeof active?.activeParameter === 'number' ? (active.activeParameter as number) : 0;
+  return {
+    signatures: signatures
+      .filter((sig) => typeof sig.label === 'string')
+      .map((sig) => ({
+        label: String(sig.label),
+        ...(typeof sig.documentation === 'string'
+          ? { documentation: sig.documentation }
+          : typeof sig.documentation === 'object' && sig.documentation
+            ? { documentation: String((sig.documentation as { value?: string }).value ?? '') }
+            : {}),
+        ...(typeof sig.activeParameter === 'number' ? { activeParameter: sig.activeParameter } : {}),
+      })),
+    activeSignature,
+    activeParameter: fromHelp ?? fromSig,
+  };
+}
+
 /** `SymbolInformation[] | WorkspaceSymbol[] | null` → flat symbols. */
 export function normalizeSymbols(raw: unknown): SymbolInformation[] {
   if (!Array.isArray(raw)) return [];
@@ -207,12 +258,15 @@ export function normalizeSymbols(raw: unknown): SymbolInformation[] {
  * confusing empty result.
  */
 export function declaresFeature(capabilities: Record<string, unknown>, feature: NavFeature): boolean {
+  // LSP names these three inconsistently; the rest are `<feature>Provider`.
   const key =
     feature === 'workspaceSymbol'
       ? 'workspaceSymbolProvider'
       : feature === 'codeAction'
         ? 'codeActionProvider'
-        : `${feature}Provider`;
+        : feature === 'format'
+          ? 'documentFormattingProvider'
+          : `${feature}Provider`;
   const value = capabilities[key];
   return value !== undefined && value !== null && value !== false;
 }

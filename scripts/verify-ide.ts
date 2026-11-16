@@ -302,6 +302,54 @@ async function main(): Promise<void> {
       check('LSP unavailable — diagnostics checks skipped', true, 'graceful degradation');
     }
 
+    // ---------- project packages ----------
+    // The dependency file follows the project root, which for this harness is
+    // the repository itself: it has a package.json, so the JavaScript plugin's
+    // declaration can be read for real instead of mocked.
+    client.clearReceived();
+    client.send({ kind: 'dependencyReport', language: 'javascript', code: 'const x = require("left-pad");' });
+    const pkgJs = await client.waitFor('dependencies', 10_000);
+    const jsPackages = (pkgJs?.packages ?? []) as Array<{ name: string; version?: string }>;
+    check('dependency report answers for the declared format', pkgJs?.supported === true && pkgJs?.format === 'npm');
+    check('dependency report names the file it read', pkgJs?.file === 'package.json', String(pkgJs?.file ?? 'none'));
+    check('dependency report lists the declared packages', jsPackages.length > 0, `${jsPackages.length} package(s)`);
+    check(
+      'dependency report carries versions',
+      jsPackages.every((p) => typeof p.name === 'string' && p.name.length > 0),
+      jsPackages.slice(0, 3).map((p) => `${p.name}@${p.version ?? '?'}`).join(', '),
+    );
+    check(
+      'dependency report flags an import nothing declares',
+      ((pkgJs?.undeclared ?? []) as string[]).includes('left-pad'),
+      JSON.stringify(pkgJs?.undeclared ?? []),
+    );
+
+    client.clearReceived();
+    client.send({ kind: 'dependencyReport', language: 'markdown', code: '' });
+    const pkgMd = await client.waitFor('dependencies', 10_000);
+    check(
+      'a language with no dependency block says so instead of guessing',
+      pkgMd?.supported === false && /manifest\.dependencies/.test(String(pkgMd?.note ?? '')),
+      String(pkgMd?.note ?? ''),
+    );
+
+    // A flag-shaped name must be refused before anything is spawned: `pip install
+    // -r x` would install a file, which is the one shape that does damage.
+    client.clearReceived();
+    client.send({ kind: 'dependencyInstall', language: 'javascript', package: '-r' });
+    const badInstall = await client.waitFor('dependencyResult', 10_000);
+    check('an install of a flag-shaped name is refused', badInstall?.ok === false);
+    check(
+      'the refusal explains itself',
+      /cannot start with/.test(String(badInstall?.error ?? '')),
+      String(badInstall?.error ?? ''),
+    );
+
+    client.clearReceived();
+    client.send({ kind: 'dependencyCancel' });
+    const cancelled = await client.waitFor('dependencyCancelled', 5000);
+    check('cancelling an install that is not running is answered', cancelled?.ok === false);
+
     // ---------- Go over the same protocol ----------
     // `gopls` is optional: a machine can run Go without a language server, and
     // the platform is required to keep working in that state. Probe it here so

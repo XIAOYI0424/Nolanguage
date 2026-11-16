@@ -1,0 +1,187 @@
+{
+  "id": "rust",
+  "displayName": "Rust",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "example",
+  "description": "Rust compiled with rustc and run from the same scratch directory. rust-analyzer gives this plugin the full navigation set when it is installed.",
+  "order": 52,
+  "trust": {
+    "sandbox": "subprocess"
+  },
+  "file": {
+    "extensions": [
+      "rs"
+    ],
+    "defaultExt": "rs",
+    "fileName": "main.rs"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "//[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "/\\*[\\s\\S]*?\\*/",
+        "cls": "c"
+      },
+      {
+        "re": "r#*\"[\\s\\S]*?\"#*",
+        "cls": "s"
+      },
+      {
+        "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'(?:[^'\\\\\\n]|\\\\.)'",
+        "cls": "s"
+      },
+      {
+        "re": "#!?\\[[^\\]]*\\]",
+        "cls": "d"
+      },
+      {
+        "re": "\\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while|yield|box|macro_rules)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str|String|Vec|Option|Result|Some|None|Ok|Err|Box|Rc|Arc|HashMap|HashSet|println|print|format|vec|panic|assert|assert_eq|unwrap|expect)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "\\b[0-9][0-9_]*(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?[iufl]*(?:8|16|32|64|128|size)?\\b",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_][A-Za-z0-9_]*(?=\\()",
+        "cls": "f"
+      },
+      {
+        "re": "\\b[A-Z][A-Za-z0-9_]*\\b",
+        "cls": "cl"
+      }
+    ]
+  },
+  "scaffold": {
+    "onFirstRun": [
+      {
+        "file": "Cargo.toml",
+        "template": "[package]\nname = \"nl_main\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"nl_main\"\npath = \"main.rs\"\n"
+      }
+    ],
+    "projectFiles": [
+      "Cargo.toml"
+    ]
+  },
+  "lsp": {
+    "provider": {
+      "kind": "github",
+      "package": "rust-lang/rust-analyzer",
+      "asset": "rust-analyzer.exe"
+    },
+    "discovery": {
+      "commands": [
+        "rust-analyzer"
+      ],
+      "envVars": [
+        "RUST_ANALYZER"
+      ],
+      "knownPaths": [
+        "~/.cargo/bin/rust-analyzer.exe",
+        "~/.cargo/bin/rust-analyzer",
+        "C:/Program Files/Rust/bin/rust-analyzer.exe"
+      ]
+    },
+    "args": [],
+    "languageId": "rust",
+    "serverName": "rust-analyzer",
+    "memoryHint": "250MB",
+    "degradedNote": "rust-analyzer not installed - Run works, Check and completion do not"
+  },
+  "run": {
+    "mode": "template",
+    "requires": [
+      "template@^1.0.0"
+    ],
+    "timeoutMs": 60000,
+    "sourceExt": ".rs",
+    "discovery": {
+      "commands": [
+        "rustc"
+      ],
+      "envVars": [
+        "RUSTC"
+      ],
+      "knownPaths": [
+        "~/.cargo/bin/rustc.exe",
+        "~/.cargo/bin/rustc",
+        "C:/Program Files/Rust/bin/rustc.exe"
+      ]
+    },
+    "versionArgs": [
+      "--version"
+    ],
+    "steps": [
+      {
+        "role": "build",
+        "cmd": "\"{toolchain}\" --edition 2021 -O -o \"{workdir}/nl_main{exe}\" \"{file}\""
+      },
+      {
+        "role": "run",
+        "cmd": "\"{workdir}/nl_main{exe}\""
+      }
+    ],
+    "modes": {
+      "test": {
+        "steps": [
+          {
+            "role": "build",
+            "cmd": "\"{toolchain}\" --edition 2021 --test -o \"{workdir}/nl_test{exe}\" \"{file}\""
+          },
+          {
+            "role": "run",
+            "cmd": "\"{workdir}/nl_test{exe}\""
+          }
+        ]
+      }
+    }
+  },
+  "debug": {
+    "adapter": "codelldb",
+    "type": "cppdbg",
+    "discovery": {
+      "commands": [
+        "codelldb"
+      ],
+      "envVars": [
+        "CODELLDB"
+      ],
+      "knownPaths": [
+        "~/.local/bin/codelldb",
+        "C:/Users/Public/codelldb/adapter/codelldb.exe"
+      ]
+    },
+    "command": [
+      "{resolved}",
+      "--port",
+      "0"
+    ],
+    "preLaunch": {
+      "cmd": "\"{toolchain}\" --edition 2021 -g -o \"{workdir}/nl_dbg{exe}\" \"{file}\"",
+      "timeoutMs": 120000
+    },
+    "launch": {
+      "program": "{workdir}/nl_dbg{exe}",
+      "cwd": "{cwd}",
+      "args": "{args}",
+      "stopOnEntry": "{stopOnEntry}",
+      "MIMode": "lldb"
+    },
+    "serverName": "codelldb",
+    "memoryHint": "120MB",
+    "degradedNote": "codelldb not installed - debugging is unavailable for Rust",
+    "supportsAttach": true
+  }
+}

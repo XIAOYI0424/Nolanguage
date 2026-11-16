@@ -65,6 +65,11 @@
     ]
   },
   "lsp": {
+    "provider": {
+      "kind": "github",
+      "package": "artempyanykh/marksman",
+      "asset": "marksman.exe"
+    },
     "discovery": {
       "commands": [
         "marksman"

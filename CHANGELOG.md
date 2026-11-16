@@ -1,5 +1,311 @@
 # Changelog
 
+## 0.7.24 — 2026-11-15
+
+### 补全质量：短字段、签名提示、按需文档
+
+补全之前只回 `label` 和 `kind`，所以客户端拿不到「服务端想让你插入什么」「该排在哪」「文档是什么」。三处改动，都是透传而不是自造：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 插入文本 | 只能插 `label`，`foo(x, y)` 变成 `foo` | 转发 `insertText` / `sortText` / `filterText`，客户端按 `sortText` 排序并展开 `$1` / `${1:name}` 片段 |
+| 签名提示 | 无 | `signatureHelp` 全链路：只在 `(` / `,` 触发，150 ms 去抖，`requestId` 过期丢弃，服务端未声明能力时回 `unsupported` 而不是空框 |
+| 文档 | 无 | `completionItem/resolve`：列表帧不带 docstring（100 项 × 300 字符 ≈ 30 KB/帧），选中才取一次 |
+
+修了一个由第 3 项引入、只有真跑才会发现的崩溃：`CMP.docs` 从未初始化，`verify-pycharm` 一进补全就 `Cannot read properties of undefined (reading 'print')`。文档缓存也按语言清空——同名 label 在两种语言里是两回事。
+
+### 依赖：读得懂、装得上、装完能看见
+
+之前产品里**没有任何依赖管理**（`pip install` / `npm install` / `go get` 在 `src/` 里零命中），所以「装了包就有补全」这件事从来没成立过。现在按 manifest 声明实现，没有一处按语言名分支：
+
+```jsonc
+"dependencies": { "format": "requirements", "files": ["requirements.txt", "pyproject.toml"],
+                  "install": ["{toolchain}", "-m", "pip", "install"] }
+```
+
+- **读**：`readDependencies` 按 `format` 选解析器（requirements / go.mod / package.json），只读项目根，清单里越界的 `files` 条目直接跳过而不是解析。
+- **装**：`installPackage` 用清单的 `install` 前缀 + 包名，`spawn` 直连（不经 shell），输出流式回传、2 MiB 封顶、可取消；连接断开时 SIGTERM 掉，不留半个 `pip install` 在后台改项目。以 `-` 开头的包名一律拒绝——`pip install -r x` 会去装一个文件。
+- **刷**：装成功后 `releaseLsp` + `ensureLsp` 只重启该语言的服务（实测 412 ms），因为服务端缓存了导入图。探针实测：重启前 `ready`，重启后仍 `ready`，并且**能继续报出** `'undefined_name' is not defined` —— 只把状态改回 `ready` 而不真正重连，这条会退化成空诊断，探针正是为它写的。没有服务端的语言（markdown）返回 `{"ok":false,"error":"marksman not installed…"}`，不会挂住。
+
+界面是底部工具窗 **Packages（Alt+6）**：声明清单 + 版本、未声明导入（标 `not declared`，点 Use 填入输入框）、安装输入框、输出台。切文件/切语言会重读，不会把 python 的包显示在 go 下面。
+
+### 落点与门禁
+
+| 项 | 位置 |
+|---|---|
+| 补全短字段 | `handlers/languages.ts` · `30-panels.js`（`expandSnippet` / `sortText` 排序） |
+| `signatureHelp` | `LspClient` → `WorkspaceService` → `handleSignatureHelp` → `68-nav.js` |
+| `completionItem/resolve` | `resolveCompletion` → `handleCompletionResolve` → `cmpOnDetail` |
+| 依赖读/装 | `src/langs/dependencies.ts` |
+| 装后刷新 | `WorkspaceService.restartLanguageServer` |
+| Packages 窗 | `40-docks.js` + `pycharm-css.ts` |
+
+- `tests/pure.test.ts` +18（共 **119**）：三种格式的解析、未声明导入、包名白名单、`{toolchain}` 展开、非零退出码、子进程句柄外露。
+- `verify-ide` +9（共 **72**）：真读仓库自己的 `package.json`（8 个包）、未声明导入命中、拒绝 `-r`、空转取消。
+- `verify-pycharm` +16（共 **327**）：Packages 窗的请求、渲染、Use→Install 流转、输出流、装完重读、跨语言过期帧丢弃。
+- `verify:langparity` 7/7，`verify:arch` 18/18（169 files · 488 imports），`ci:pure` 413/413。
+
+### 打包产物实测（`dist/Nolanguage.exe`，85.0 MiB）
+
+`build:exe` 重建后逐项验，全部对着**打包好的二进制**跑，不是对着源码：
+
+| 套件 | 结果 | 覆盖 |
+|---|---|---|
+| 新增 `verify:packages-exe` | **29/29** | 依赖读/装/刷的完整链路 + 补全三件套 |
+| `verify:ui-live`（真 Edge + CDP） | 11/11 | 五个导航键在打包产物里仍然可用 |
+| `verify:smoke` | 27/27（2 skip） | 六个页面、Python 真执行、SQLite、日志落盘、扩展宿主 |
+| `verify:mcp-exe` | 30/30 | MCP 五种卡片状态 |
+
+新套件要解决的是「`pip install` 要联网」这个矛盾：往临时工程写一个 **project tier 插件**（`<workspace>/.nolanguage/languages/pkgpy@1.0.0`），内容是 Python 清单的副本，只改两处——新 id，和 `install: [node, -e, "console.log('installed ' + process.argv[1])"]`。语言服务器、工具链发现、`{toolchain}` 展开全是真的，所以安装走的是真代码路径，装完重启的是真语言服务器。全程不联网。
+
+实测到的关键几条：
+
+```
+PASS  a successful install restarts the language server  — {"ok":true}
+PASS  the restarted server still answers diagnostics  — 2 item(s)
+PASS  signatureHelp returns real signatures  — print(args, sep, end, file, flush)
+PASS  signatureHelp names the active parameter  — 1
+PASS  completionItemDetail comes back for a builtin  — {"detail":"builtin", ...}
+PASS  the reply names the command it ran  — node.exe -e console.log(...) requests
+```
+
+装完重启后仍然报出 `undefined_name` —— 这条是刻意加的：如果 `restartLanguageServer` 只是把状态改回 `ready` 而没有真重连，诊断会退化成空列表，只有这条能抓到。
+
+启动日志里只有两条 WARN，都与本轮无关：scratch home 下 SQLite 退化成内存态、冷启动 LSP `initialize` 312 ms 超 60 ms 阈值。
+
+顺带印证了一个设计选择：日志里 javascript 的工具链被解析成 `Nolanguage.exe` 自己（exe 就是 Node 运行时），所以 JS 的安装命令必须是 `npm install` 而不是 `{toolchain} install` —— 后者会变成 `Nolanguage.exe install <pkg>`。
+
+### 池化语言服务管理器（Java 为第一个真实插件）
+
+一份方案要求用 **Rust** 写一个 `LspManager`（`inventory` 编译期注册、`trait LanguagePlugin`、`Arc<Mutex>`）。产品是 TypeScript 内核 + SEA 单文件，`src-tauri/` 只有 457 行外壳且不随包分发，`LspClient` / `check` / Problems 面板全在 TS 里。所以按**接口等价**实现，并把理由写进 `docs/lsp-manager.md` 第一节：`trait` → `interface`、`&'static str` → 冻结字段、`inventory` → 静态表 + 注册表扫描、`Arc<Mutex>` → 单线程事件循环。
+
+管理器本身是语言无关的（`src/lsp/manager/`，10 个文件）：池化、根收敛、懒启动、latest-only + `$/cancelRequest`、去重、聚合、版本签名、增量失效、词法降级、诊断上限。语言知识全部落在 manifest：`lsp.manager` / `projectMarkers` / `command` 模板 / `initializationOptions` / `idleTtlMs` / `firstRequestBudgetMs` / `incremental` / `fallback`。**核心层没有任何 `if language == "java"`**，`verify-langparity` 的字面量预算也没动。
+
+`slot.lsp` 的类型从 `LspClient` 换成 `LspLike`，`LspClient` 与 `ManagedLsp` 都结构满足它——所以**面板里没有一行管理器分支**。Java 通过 `"manager": true` 走新路径，其余七种仍是原来的一条客户端，迁移是每种一行。
+
+**三个只有真服务器才暴露的问题：**
+
+| 问题 | 现象 | 修法 |
+|---|---|---|
+| **jdtls 的 `.bat` 根本不能 spawn** | 本机 `bin/jdtls.bat` 是 `python jdtls %*` 加一行 `pause`——spawn 它永久阻塞。也就是说「用发现的二进制启动」这个假设对 jdtls 完全不成立 | manifest 新增 `lsp.command` 模板：`{toolchain}` / `{dist}` / `{platform}` / `{dataDir}` / `{glob:…}`，jdtls 声明成 `java -jar …/equinox.launcher_*.jar` |
+| **`initializationOptions` 被硬编码成 `{}`** | 任何需要初始化配置才有用的服务器（jdtls 的 `java.import.mode`）都拿不到配置，插件也无法影响 | `LspLaunchSpec` 加字段并透传 |
+| **没有请求取消** | `JsonRpcConnection.request` 不返回 id，`$/cancelRequest` 无从谈起；连击时旧答案会覆盖新答案 | `request(method, params, onId)` + `cancel(id)` + `LspClient.cancelRequest`，调度器按单调序号丢弃过期结果 |
+
+**两个量出来的数字：** jdtls `initialize` 2.6–2.9 s，Maven 导入 4.9–5.2 s，热补全 53–62 ms。所以 `firstRequestBudgetMs` 默认 500 ms——第一次击键由词法兜底回答，服务就绪后自动切换；`navBudgetMs` 5 s 给显式动作。没有这个预算，打开一个 Maven 工程后的第一次补全会卡近 5 秒。
+
+新增 `verify:lsp-manager`（`scripts/verify-lsp-manager.ts`）：纯逻辑 + 假服务器（`scripts/fixtures/fake-lsp.mjs`，记录每个收到的方法，所以「取消确实转发了」是断言而不是期望）+ 真 jdtls（缺失时 SKIP）+ stdio 测试服务（`scripts/lsp-manager-service.ts`）。已进 `verify-all`（50 套件）与 CI。`npm test` 也补了管理器单测。
+
+### P0 · 语言服务按需下载（`nlg lang server`）
+
+产品不分发语言服务，于是「八种语言」实际只有两种有智能，而那两种是手动装进 `.tmp/langdeps` 的。这一轮补上缺失的另一半：**插件声明服务从哪来，CLI 逐语言说清缺什么、多大、怎么装**。
+
+```bash
+nlg lang server                 # 一张表：ID / SERVER / FOUND / WHERE / MEMORY / HOW
+nlg lang server install python  # 真的装（npm / go），或告诉你为什么不能自动装
+```
+
+实测输出（装之前）：
+
+```
+ID          SERVER    FOUND    WHERE    MEMORY  HOW
+go          gopls     MISSING  missing  80MB    go install golang.org/x/tools/gopls@v0.24.0
+javascript  tsserver  MISSING  missing  150MB   npm install --prefix <home>/servers/javascript … typescript-language-server@6.1.0
+markdown    marksman  MISSING  missing  20MB    see `lang server install markdown`
+python      pyright   MISSING  missing  380MB   npm install --prefix <home>/servers/python … pyright@1.1.414
+```
+
+**三条设计约束，都是有理由的：**
+
+| 约束 | 理由 |
+|---|---|
+| 只调 `npm` / `go`，**不自己下二进制** | 这两个包管理器自己校验（npm integrity、Go 校验数据库）。GitHub release 没有可校验的 hash，所以 `github` 类只打印 releases 页面和目标路径，**不代下** |
+| `version` 必填（github 除外） | 不 pin 的版本 = 装「今天注册表给的那个」，出了问题无法复现 |
+| 托管目录只做**兜底** | `<home>/servers/<id>` 只在 `discovery` 找不到时才查。用户设了 `PYTHON_BIN` 就是告诉我们用哪个，不能被托管副本覆盖 |
+
+`verify:server-install`（15 项）跑完整条链路，验收标准就是当初承诺的那条：**装完之后不设任何环境变量**，面板里 `nums.` 拿到 **25 项真实成员补全**（`concat/every/filter/…`），而不是 stub 的 31 个内置名。
+
+写这套测试时又踩了一次「环境伪装成产品 bug」：第一次跑 `lang server install` 报 npm EPERM——是沙箱拦了 `%LOCALAPPDATA%\npm-cache`，不是安装器的问题。测试里把 `npm_config_cache` 指进仓库就好了。
+
+### P1 · 测试按钮：后端早就有，缺的是入口
+
+`handlers/run.ts:207` 一直接受 `mode: 'test'`，`go test` / `rustc --test` / `javac` 的路径全在，`supportsTest` 也一直从 manifest 传到 `workspace` 帧——**客户端从来没发过这个字段**。
+
+现在：工具栏多了 **Test** 按钮（只在插件声明了 `test` 模式时出现），快捷键 **Ctrl+Shift+F10**（Shift+F10 仍是 Run，与 PyCharm 的「run context」一致），`runCode(mode)` 把 `mode` 带上。
+
+`verify:lang-plugin` 从 39 项扩到 **43** 项，四种语言的 test 模式逐个真跑：`cpp bin=g++` / `c bin=gcc` / `rust bin=rustc` / `java bin=java`，全部 exit 0。
+
+### P1 · 格式化走语言服务（并修掉一个把所有人都挡住的 bug）
+
+`Ctrl+Alt+L` 和菜单项一直都在，但它调的是 `basicFormat()`——一个手写的缩进整理器。现在先问 `textDocument/formatting`，服务端不支持才退回本地，并在 toast 里说明是「Reformatted locally」。
+
+**写这条链时发现 `declaresFeature()` 把 key 猜错了**：它对所有特性都用 `${feature}Provider`，而 LSP 的格式化能力叫 **`documentFormattingProvider`**。于是 `format` 永远被判为「服务不支持」——也就是说，**即使装上 pyright/gopls，格式化也永远不会走服务**。改成显式映射后，tsserver 立刻返回 **9 处编辑**（`verify:langs-real` 新增两项断言）。
+
+客户端新增 `applyTextEdits()`：从后往前应用，避免偏移失效；LSP 的 line/character 正好是 JS 字符串的索引单位，不需要编码转换。
+
+`verify:ui-live` 加了两项：`Ctrl+Alt+L` 真的改写了缓冲区（尾随空格被清掉），且 toast 说明是本地完成的（Python 的 stub 不支持格式化）。
+
+### L0 波浪线：本来就有，这次才被证明
+
+一份改进计划把「语法检查 L0（CodeMirror linter + lintGutter）」列为 P0.5、工期 0.5–1 天，理由是「客户端有 lint 级诊断但没渲染，编辑器里没有波浪线」。**这条前提是错的。**
+
+`40-docks.js` 的 `setDiags()` 一直在调 `paintDiagMarks()`：`cm.markText` 打 `diag-sq`（`pycharm-css.ts` 里是 `text-decoration: underline wavy`，按 severity 上色），`cm.addLineClass` 打 `diag-g1/2/3` 行号槽底色；`50-runtime.js` 还有 300ms 去抖的 check-as-you-type。缺的从来不是渲染。
+
+现在 `verify:ui-live` 用真 Edge + CDP 把这件事钉住（11 → **17** 项）：
+
+```
+PASS  a syntax error paints a squiggle in the editor  — {"squiggles":1,"gutter":2,"problems":1,"status":"1 problem"}
+PASS  the gutter carries the same severity  — 2 line(s)
+PASS  the Problems panel agrees with the editor  — 1 row(s)
+PASS  the status bar counts the same problems  — 1 problem
+PASS  fixing the file clears the squiggles  — 0 left
+```
+
+写完之后再回头看那份计划，另外两条也偏了：
+
+- **「测试运行器」不是「三种语言不能跑单测」**：`handlers/run.ts` 早就接受 `mode: 'test'`，`go test` / `rustc --test` / `javac` 的路径都在，缺的只是一个按钮。
+- **「Go 覆盖率」不是纯 manifest 改动**：`handlers/perf.ts` 的 `coverage()` 无论哪个语言都调 `runPythonCoverage`。给 Go 写上 `coverage: true` 会拿 Python 的 `trace` 去打 `go` 编译器——需要的是按 runtime 分派的实现，而不是一个布尔字段。
+
+### 一次装四种语言：C++ / C / Rust / Java
+
+`examples/` 原来只有 `cpp`，这一轮补齐成四种，全部走同一条 `nlg lang add` 路径装进临时 home，然后在应用里真编译、真运行：
+
+| 语言 | 编译器 | 语言服务 | 实测 |
+|---|---|---|---|
+| C++ | g++ | clangd（缺） | `cpp 42`，exit 0；导航说 clangd 缺失 |
+| C | gcc | clangd（缺） | `c 42`，exit 0；同上 |
+| **Rust** | rustc | **rust-analyzer（有）** | `rust 42`，exit 0；补全 **100 项**（`into_bytes()` / `leak()` …），定义跳到 `fn add` |
+| Java | java | jdtls（缺） | `java 42`，exit 0（单文件源码启动器，无构建步骤） |
+
+`verify:lang-plugin` 从 19 项扩到 **39 项**，一次装四种、逐个验。八种语言同窗：`python,go,javascript,markdown,cpp,c,rust,java`。
+
+三个实现细节值得记：
+
+- **C 只声明 `.c`，不要 `.h`。** `.h` 同时属于 C 和 C++，C++ 插件已经占了它；两个插件抢同一个扩展名，扩展名解析就会看加载顺序。宁可 C 少一个扩展名。
+- **Java 用单文件源码启动器**（`java Main.java`，JDK 11+），一步跑完，不需要 classpath、不需要 `javac` 两步、也不受「public 类名必须等于文件名」的约束——实测 `main.java` 里写 `public class Main` 能跑。少一个 `{toolchain}` 之外的工具，就少一处「装了 JDK 但 javac 不在 PATH」的坑。
+- **rust-analyzer 必须有 Cargo 项目。** 第一次跑时它报 `failed to find any projects in [.../rust]`，然后每条请求都在 1 ms 内返回 0 项——看起来像「补全坏了」，实际是它根本没有工作区。给插件加 `scaffold.onFirstRun` 写一个最小 `Cargo.toml`（`[[bin]] path = "main.rs"`，让 `rustc` 直接编译同一个文件）之后，`failed to fetch workspace` 消失。**还有一个冷启动窗口**：RA 载入 crate 之前会立刻回空列表，之后才是 138 项——所以套件里加了「问到有结果或超时为止」，而不是把第一次的空结果当成失败。
+
+### 用 `nlg` 装一门语言，然后在软件里用它
+
+`nlg lang add` 是没上市场的插件唯一的分发方式：一个目录 + 一份 manifest。这一轮把它整条链路走通了，新增 `verify:lang-plugin`（19 项）：
+
+```bash
+nlg lang ls  --home <tmp>                      # 4 个内置
+nlg lang add examples/cpp@1.0.0 --home <tmp>   # added cpp@1.0.0 · requires template@^1.0.0 (met)
+nlg lang ls  --home <tmp>                      # cpp 1.0.0 user user yes template cpp cc cxx …
+```
+
+然后用同一个 home 启动应用，C++ 就是一等公民了：
+
+```
+languages   python,go,javascript,markdown,cpp
+cpp slot    main.cpp · template · supportsRun=true
+toolchains  cpp=g++（发现成功）
+run         exit=0  "cpp 42"        ← g++ -std=c++17 编译后真跑
+check       fromLsp=false · clangd not installed - Run works, Check and completion do not
+definition  unsupported：同上
+deps        supported=false（该插件没声明依赖文件）
+```
+
+也就是说：**一个原本不在产品里的语言，装进来就能编译、能跑、能诚实地说清自己缺什么**。之后 `lang disable` 翻标志、`lang uninstall` 删除本体，`ls` 随之变化。
+
+**顺带修掉一个会撒谎的返回值**：`Registry.uninstall` 原来是 `rm(dir, {recursive:true, force:true}).catch(() => undefined)`，然后无条件 `return true`。目录删不掉（被运行中的 IDE 占着、权限墙、只读卷）时，CLI 照样打印 `uninstalled`、退出码 0，而插件仍在磁盘上、仍在列表里。现在把失败抛出去：实测输出 `lang: could not remove <dir>: … EPERM …`、**退出码 1**、列表如实保留该插件。
+
+写这个套件时还踩了一次自己的坑：第一次跑 `uninstall` 失败，我以为是产品 bug，实际是这台机器的批量删除守卫拒绝了递归删除（`SAFE_DELETE_BULK_GUARD_ERROR`）。现在套件把「环境拒绝删除」和「产品漏删」分开：前者断言「必须如实报错」并 SKIP 掉「目录已消失」，后者才是 FAIL。
+
+### 装上真语言服务之后：两个只有真服务才暴露的 bug
+
+`verify-langs-exe` 证明「没装服务时说得很清楚」。这一轮把服务真的装上，验证另一端——装上了到底能不能用。全部装在仓库内的 `.tmp/langdeps`，不碰系统环境：
+
+```bash
+npm install --prefix .tmp/langdeps typescript-language-server typescript
+GOBIN=<abs>/.tmp/langdeps/bin GOPROXY=https://goproxy.cn \
+  go install golang.org/x/tools/gopls@latest        # 官方 proxy 在本机被挡，镜像可用
+```
+
+然后新增 `verify:langs-real`（16 项，服务器缺失时 SKIP），结果：
+
+| 能力 | JavaScript（tsserver） | Go（gopls） |
+|---|---|---|
+| 成员补全 | `nums.` → **28 项**，`concat/every/filter/forEach/…` | `fmt.` → **29 项**，`Append/Appendf/Appendln/Errorf/…` |
+| 参数提示 | `max(...values: number[]): number` | — |
+| 跳转定义 | 跳到 `function sum`（line 0） | `fmt` 解析到包声明 |
+| 查找引用 | 2 处 | — |
+| 符号重命名 | 2 处编辑，都改成 `total` | — |
+| 快速修复 | 「Move to a new file」 | — |
+| 全局符号 | `sum` | `Add` |
+| 诊断 | 语法错误 1 条 | `undefined: undefinedThing` |
+
+**关键对比**：没有服务时 `json.` 和 `requests.` 返回**同一批 31 个内置名**；现在 `nums.` 是 28 个**数组方法**——成员解析是真的在工作。
+
+两个 bug 都是这一轮才浮出来的，且都做了注入验证：
+
+| 问题 | 现象 | 修法 |
+|---|---|---|
+| **`.cmd` 起不来** | 装好 tsserver/gopls 后，所有请求回 `spawn EINVAL`。Windows 上每个 npm 分发的语言服务（`typescript-language-server`、`pyright-langserver`、`vscode-*-server`）都是 `.cmd` 垫片：裸名 `ENOENT`（CreateProcess 不看 PATHEXT），`.cmd` 本身 `EINVAL`（那是给 cmd.exe 的脚本，不是镜像）。**也就是说「用 npm 装的语言服务」在 Windows 上从来没能启动过** | 把 MCP 早就写好的解析器搬出来共用：`src/mcp/spawn-command.ts` → `src/util/spawnPlan.ts`（`lsp` 不能 import `mcp`，同层），`LspClient` 用它决定 `command`/`args`/`shell`。注入掉 `shell: plan.shell` → 全套请求回 `spawn EINVAL`，还原后 16/16 |
+| **诊断的 URI 对不上** | 服务端日志说「Diagnostics published 1 error」，Check 却报 0 条。tsserver 把文档回显成 `file:///d%3A/...`，我们打开时是 `file:///D:/...`——`Map` 用原始字符串当键，写入和读取永远不相等。Python 的内置 stub 原样回显，所以这条一直藏着 | 新增 `diagnosticKey()`：先 `decodeURIComponent`，Windows 上再折叠大小写；写入与读取都用它。注入掉折叠 → 语法错误变回 0 条，还原后 1 条 |
+
+`verify:langs-real` 支持 `NOLANGUAGE_EXE`，所以同一套检查对**源码**、**`dist/Nolanguage.exe`**、**已安装的 `D://Nolanguage//Nolanguage.exe`** 各跑了一遍，都是 **16/16**。
+
+gopls 的缓存与 `go` 的构建目录要落在仓库内（`LOCALAPPDATA` / `TMP` / `GOCACHE`），否则受限环境里 gopls 会以 `Access is denied` 退出，看起来像「gopls 坏了」。
+
+### 另外三种语言：降级是否诚实（新增 `verify:langs-exe`，16 项）
+
+Python 有内置语言服务，其余三种在本机**一个服务都没有**（gopls / typescript-language-server / marksman 全缺）。所以真正要验的不是「能不能用」，而是**用不了的时候说不说得清**——空列表和「没有服务」在界面上长得一模一样，但只有后者值得处理。
+
+逐语言跑了同样的 8 个 LSP 请求（补全、参数提示、补全文档、定义、引用、重命名、快速修复、全局符号），三种语言**全部 8/8 带着原因**回来，而且用的是各自清单里的措辞：
+
+```
+go          gopls not installed — Run works, Check and completion do not
+javascript  typescript-language-server not installed — Run works, Check and completion do not
+markdown    marksman not installed — rendering, outline and breadcrumbs still work
+```
+
+同一条链路上还验了：`go.mod` / `package.json` 的依赖读取、Go 真跑（`3`，exit 0）、JS 真跑（`6`，exit 0）、Markdown 拒绝运行并说明「documents render」、Markdown 在无 marksman 的情况下仍渲染出 `<h1>` 与两条大纲。
+
+**顺带修掉一处不一致**：`complete` 是八个请求里唯一一个把「没有服务」报成 `items: []` 的——其余七个早已用 `unsupported` 区分。现在 `WorkspaceService.complete` 返回 `{ items, unsupported? }`，帧里带上原因；客户端本来就会回退到自己的词表，所以体验不变，只是不再撒谎。
+
+写这个套件时自己踩了一个坑，值得记下来：第一版忘了在请求里带 `language`，而 `asLanguage` 对缺失的 id **不报错、退回默认语言**，于是八条请求全部由 Python 回答、看起来完全正常。是「8/8 都有原因」这条断言把它逼出来的——它要求每条都带 `unsupported`，而 Python 有服务、不该带。
+
+门禁：`verify:langs-exe` 16 项，已加进 `.github/workflows/ci.yml`（`verify:ci` 6/6，15 commands）；对**已安装**的那份跑同样 16/16。
+
+### 安全与缺陷审计（修了四处，报了两处）
+
+按「能读到别人的文件」「能让进程挂掉」「UI 说的和实际不符」三类过了一遍。四处修复都配了门禁，并且都做了**注入违规 → FAIL、还原 → PASS** 的对照。
+
+| 问题 | 严重度 | 修法 |
+|---|---|---|
+| 工程目录里的**符号链接/junction 能把资源管理器带出工作区**：`link/secret.txt` 的解析路径确实在根下，`readFile` 却跟着链接跑。`realRoot` 字段的注释写着「每次包含性检查的锚点」，`setRoot` 还专门 `realpath` 了它——但**从来没有任何代码读过它** | 高（读+写都越界；工作区里带 junction 的仓库即可触发） | `resolveSafe` 增加 `assertInsideRealRoot`：对**最深的已存在祖先**做 `realpath` 再比对（叶子常常还不存在，`create`/`write` 时 `realpath` 会抛），Windows 上按大小写不敏感比较。指向根内的链接仍然可用（monorepo 合法） |
+| **入站 WebSocket 消息没有上限**：64 位长度形式允许声明 2^53 字节的帧，`tryParseFrame` 会一直等那些永远不来的字节，`this.buffer` 无限增长；分片消息的 `fragments` 同样无上限 | 中（本机任意进程可打；`originAllowed` 故意放行无 `Origin` 的原生客户端，所以「只有本应用能连」不成立） | 单帧与分片总量都封 16 MiB（面板最大的合法消息是 4 MiB 文件的 `fsWrite`），超限 `close(1009)` |
+| **`pyproject.toml` 被当成 requirements 解析**：`name = "demo"`、`version = "1.0.0"`、`dependencies = [` 等五行被当成五个「包」，真正的 `requests`/`flask` 反而漏掉。而 Python 清单本来就把它列为依赖来源 | 中（每个现代 Python 项目都会看到错误清单，正是模块注释里说的「错的清单比短的清单更有害」） | 新增 `pyproject` 格式（只读 `[project]` 的 `dependencies = [ … ]`，不读 `[build-system]`）；schema 允许 `files` 里每项自带 `format`（`string \| { file, format }`），Python 清单随之更新 |
+| **Markdown 自动链接从来没生效**：正则找的是字面 `<`，而那时字符串已经被 `escapeHtml` 成了 `&lt;` | 低（功能静默失效） | 改为匹配转义后的形式，`[^&\s]+` 避免把收尾的 `&gt;` 吞进 URL |
+
+审计确认**没有**问题的部分（都补了或已有门禁）：WebSocket 升级的 Origin 校验（回环主机 + 精确端口，`Origin: null` 拒绝）、Markdown 原始 HTML 转义与 `javascript:`/`data:`/协议相对 URL 的丢弃、插件 `id` 的 `ID_RE` 校验（`dataDir`/`installDir` 无法穿越）、包安装不走 shell 且拒绝 `-` 开头的名字、`fsRead` 4 MiB 上限、调试录像的密钥脱敏。
+
+**报而不修**：`dist/Nolanguage.exe` 的 PE 文件版本资源是 Node 的 `22.22.2`（SEA 从 node.exe 注入，版本资源来自基镜像，产品不读它）；`readDependencies` 在 `stat` 与 `readFile` 之间有 TOCTOU 窗口（本机同用户，收益不抵复杂度）；Markdown 的 `title` 属性未单独转义，仅因「先整体转义再解析链接」的顺序而安全——顺序脆弱但没有现行漏洞。**已知且接受的安全姿态**：回环 WebSocket 没有鉴权 token，本机任意进程都能连（与多数开发服务器一致）。
+
+新增/扩充门禁：`verify-explorer` 75→**79**（链接穿越 7 种操作、超大帧）、`verify-markdown` 48→**57**（9 条 XSS 形状 + 自动链接）、`tests/pure.test.ts` 119→**123**（pyproject 三种形态、按文件 format）、`verify:packages-exe` 29→**34**（打包产物里读 pyproject-only 项目、在真实 WebSocket 上验证链接穿越被拒）。
+
+### 安装包：`installer/Nolanguage-Setup.exe`（21.8 MiB）
+
+本机 NSIS 在 `D:\NSIS`，用 `NSIS_MAKENSIS=D:\NSIS\makensis.exe npm run build:setup` 打出安装包（89.3 MB 载荷压到 22.9 MB，25.6%）。`npm run install:app` 把它装到 `D:\Nolanguage`，`/health` 报 `0.7.24-workspace`，注册表 `DisplayVersion` 报 `0.7.24`。
+
+真跑安装才暴露两个问题，都不是「能编译就算过」能发现的：
+
+| 问题 | 现象 | 修法 |
+|---|---|---|
+| 冒烟脚本还原开始菜单时会输掉竞争 | `install smoke: ok`，但 `Write-Warning` 说 `could not restore the Start Menu folder: 访问被拒绝`，机器上留下三个指向已删除 `%TEMP%\nl-smoke` 的快捷方式——正是上一版声称修好的那个 bug | 静默 NSIS 卸载器会把自己复制到临时目录后**立即返回**，`-Wait` 等到的只是存根；真正的卸载还在删开始菜单。再加上 Windows 会短暂锁住刚写的 `.lnk`。改为**重试 12 次 × 400 ms 并校验结果**（备份文件数 vs 还原后的文件数），而不是假定复制成功 |
+| 安装包登记的版本号是硬编码的 | 应用是 0.7.24，Add/Remove Programs 里却写 `0.7.23` | 版本号在 `Nolanguage.nsi` 里另有一份拷贝。改成 `!ifndef APP_VERSION` 兜底 + `build-setup.mjs` 从 `package.json` 传 `/DAPP_VERSION=`，并给 `verify:handshake` 加一条门禁比对两者 |
+
+两个修法都做了对照验证：先建一个带 `marker-a.lnk` / `marker-b.txt` / `sub/nested.txt` 的假开始菜单目录再跑冒烟 —— 修前报 access denied 且文件丢失，修后三个文件（含嵌套）原样还原、无警告；清空后再跑一次，目录被完整删除、机器无残留。
+
+`verify:packages-exe` 新增 `NOLANGUAGE_EXE` 环境变量，可以直接对着**已安装的那份**跑：`NOLANGUAGE_EXE=D:\Nolanguage\Nolanguage.exe npm run verify:packages-exe` → **29/29**，与 `dist/` 里的产物一致。
+
+已知且不打算修的：`dist/Nolanguage.exe` 的 PE 文件版本资源显示 `22.22.2`（Node 的），因为 SEA 是从 node.exe 注入的，版本资源来自基镜像。产品本身从不依赖它——`/health`、install receipt、注册表三处各自正确。
+
+
+
+预算门禁在这轮挡下两次：`WorkspaceService.ts` 一度 1209 行、`panel` 一度 27 个文件。做法不是加例外——依赖的读与装搬进 `langs/`（那里本来就有 `discover.ts` 在起子进程），`resourceProfiles` 搬进 `workspace-wire.ts`，两个新增的 panel 文件并回既有文件。
+
 ## 0.7.23 — 2026-11-13
 
 ### 轻量化优化（SEA、空闲 worker、数据增长上限）
@@ -206,7 +512,9 @@ npm run install:app -- -DryRun    # 只打印计划
 门禁本身做了注入验证：往 `coverage.ts` 里塞一行 `language === 'python'` → 两条检查同时 FAIL（比较 + 预算），还原后 5/5 通过。
 
 同时修了门禁自己的一个 bug：CRLF 下按 `
-` 分行会留下 ``，而 `$` 不能匹配 `` 之前，导致注释剥离静默失效、文档注释被当成代码报错。
+` 分行会留下 `
+`，而 `$` 不能匹配 `
+` 之前，导致注释剥离静默失效、文档注释被当成代码报错。
 
 **能力覆盖矩阵**（报告，不强制——这是产品决策）：`lsp` 4/5（zh-cn 是本地化包）、`run` 3/5（markdown 无运行时）、`debug` 2/5、`profiler` 2/5（仅 python/go）。
 ### 内置兜底服务通用化：插件声明命令，引擎不再认识语言
@@ -1193,6 +1501,24 @@ Go 没有 `sitecustomize`、没有 `--require`，也没有从进程外注入钩�
 - `npm test`：9/9；`tsc --noEmit`：0 错误。
 - 新增 `verify-mcp` 12 条并接入全量验证。
 
+### 启动失败时弹窗报错（GUI 程序唯一的报错出口）
+
+`Nolanguage.exe` 是 GUI 子系统，没有控制台。启动抛错时它把错误打到没人挂着的 stderr 上、`process.exit(1)`——从外面看就是**双击没反应**：没窗口、没弹窗、没痕迹。上一轮那个 `%TEMP%` 写不进去的失败就是这么「隐身」的。
+
+新增 `src/desktop/fatalDialog.ts`，接在 `main().catch()` 上：
+
+- 弹窗内容 = 错误消息 + 栈 + **`logs/boot.log` / `logs/app.log` 的尾部**（出事前几行才有用，日志开头是一周前的）；
+- 同时把**完整**文本写到 `logs/last-error.txt`（弹窗只显示 1800 字符，文件不截断）；
+- 每次尝试记一行到 `logs/fatal-history.log`（`dialog=messagebox pid=…`），「没弹出来」时有据可查；
+- 两套机制：先试 WPF 的消息框，失败则回退到 COM 的 `Popup`（前者依赖 PresentationFramework 可加载，受限镜像可能拒绝）；
+- 文本用 **base64 内联**传入、不落文件——「刚写不进去的目录」往往就是 appData 本身，靠文件传参等于在最需要它的时候显示空白；
+- `CI=1` 或 `NOLANGUAGE_NO_DIALOG=1` 时不弹（无头环境不能留一个没人点的模态框卡住 job），改为写 stderr。
+
+实测（人为制造 `ENOTDIR` 硬失败）：`main().catch` 触发 → `[fatal] ENOTDIR: …` 落到 stderr → `last-error.txt` 写入。
+
+**未能验证的部分**：弹窗的**视觉结果**。我的工具环境里 GUI 子进程不落到可见桌面上（运行期编译 .NET 与 COM 实例化都被安全策略拦），所以窗口有没有真的画出来我无法确认——机制层面（进程被拉起、参数正确）是通的。
+
+测试 +3（共 **101**）：文案包含消息/栈/日志尾、文件保留未截断版本、日志目录不可写时不抛。
 ### 已知问题
 
 - Tauri 原生窗口在 wry 0.57 + WebView2 143 上启动崩（`msedge.dll`，`SubCode=0x80000003`），且无更新版本可升；0.7 不发布 Tauri 安装包，桌面使用 Edge `--app`。

@@ -19,9 +19,73 @@ import {
 } from '../langs/manifest.js';
 import type { LanguageRegistry } from '../langs/Registry.js';
 import type { ProfileManager } from '../langs/ProfileManager.js';
-import type { LspClient } from '../lsp/LspClient.js';
+import { parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
+import type { CompletionItem } from '../lsp/LspClient.js';
+import type { LspLike } from '../lsp/lspLike.js';
 import type { Runner } from '../runtimes/types.js';
 import type { LanguageId } from './samples.js';
+
+/**
+ * Completion items, plus why there are none when the server could not answer.
+ *
+ * `unsupported` is absent when a server answered and simply had nothing — that
+ * distinction is the whole point of the type, and it is the same one the five
+ * navigation requests make.
+ */
+export interface CompletionResult {
+  items: CompletionItem[];
+  unsupported?: string;
+}
+
+/** What `diagnose` reports: the problems, and whether a server produced them. */
+export interface DiagnoseResult {
+  uri: string;
+  items: Array<{
+    line: number;
+    character: number;
+    endLine: number;
+    endCharacter: number;
+    severity: number;
+    severityName: string;
+    message: string;
+    code?: string | number;
+    source?: string;
+  }>;
+  errors: number;
+  warnings: number;
+  /** True when the language server answered; false when it is unavailable. */
+  fromLsp: boolean;
+  /** Populated when the server could not be reached, to explain why. */
+  note?: string;
+}
+
+/** Uniform run result across languages (the IDE consumes only this). */
+export interface WorkspaceRunResult {
+  languageId: string;
+  sessionId: string;
+  runId: string;
+  exitCode: number | null;
+  signal: string | null;
+  /** The host stopped this run (Stop button), not the program exiting. */
+  cancelled?: boolean;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  logLinesTruncated?: boolean;
+  timedOut: boolean;
+  logLines: number;
+  mode: string;
+  /** Which binary produced the output (interpreter / toolchain). */
+  binary: string;
+  /** Set when a multi-step run failed part-way (compiled languages). */
+  phase?: 'build' | 'run' | 'test';
+  /** The compiler rejected the source. */
+  compileError?: boolean;
+  /** Wall time spent in the build step. */
+  buildMs?: number;
+}
 
 export interface Slot {
   id: string;
@@ -36,7 +100,12 @@ export interface Slot {
   /** Resolved toolchain from `manifest.run.discovery`. */
   toolchain?: string;
   toolchainSource?: string;
-  lsp?: LspClient;
+  /**
+   * A language server for this slot: a per-language `LspClient`, or the pooled
+   * `ManagedLsp` from `LspManager`. Both satisfy `LspLike`, which is why nothing
+   * else in this service has to know which one it got.
+   */
+  lsp?: LspLike;
   lspError?: string;
   lspNote?: string;
   /** True until the LSP has been started (or attempted) for the first time. */
@@ -255,3 +324,37 @@ export function languageStatus(view: WorkspaceView, id: LanguageId): LanguageSta
       },
     };
   }
+
+/**
+ * What every language currently costs, straight from its manifest.
+ *
+ * The manifest's `memoryHint` is the only number available without shelling out
+ * to the OS, and it is a *hint*: it keeps the accounting honest about the
+ * difference between a full language server and a Markdown one, which is what the
+ * budget needs. Only the reclaimable LSP estimate is counted while that process
+ * is alive — otherwise an idle, never-started server would make the total look
+ * exceeded and evict servers the user is about to need.
+ *
+ * Moved out of `WorkspaceService` with the other projections: it reads slot
+ * state, it does not own it.
+ */
+export function resourceProfilesOf(
+  slots: Iterable<Slot>,
+  lastUsedAt: (id: string, now: number) => number,
+  now = Date.now(),
+): ResourceProfile[] {
+  const out: ResourceProfile[] = [];
+  for (const slot of slots) {
+    const m = slot.manifest;
+    const lspBytes = slot.lsp ? parseMemoryHint(m.lsp?.memoryHint) : 0;
+    out.push({
+      languageId: slot.id,
+      memoryBytes: lspBytes + parseMemoryHint(m.profiler?.memoryHint) + (slot.runner ? runtimeMemoryBytes(m.run?.mode) : 0),
+      lspMemoryBytes: lspBytes,
+      lspRunning: !!slot.lsp,
+      eager: m.lsp?.eager === true,
+      lastUsedAt: lastUsedAt(slot.id, now),
+    });
+  }
+  return out;
+}

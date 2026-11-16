@@ -125,6 +125,17 @@ check(
 );
 check('version: APP_VERSION is the 0.7 line', /^0\.7\.\d+-workspace$/.test(APP_VERSION), APP_VERSION);
 
+// The installer writes this number into Add/Remove Programs and into the file
+// version of the setup, so it has to be the same build. `build-setup.mjs`
+// passes it from package.json; the fallback in the .nsi is what a hand-run
+// `makensis` uses, and it drifted once (registered 0.7.23 for a 0.7.24 build).
+const nsiVersion = /!define\s+APP_VERSION\s+"([^"]+)"/.exec(read('installer/Nolanguage.nsi'))?.[1];
+check(
+  'version: the installer fallback version matches package.json',
+  nsiVersion === pkg.version,
+  `${nsiVersion ?? 'not found'} vs ${pkg.version}`,
+);
+
 check('client: reads the updated param', /\[\?&\]updated=\(\[\^&\]\*\)/.test(clientSource));
 check('client: announces the update', /function announceUpdate\(\)/.test(clientSource));
 check('client: strips the param so a reload stays quiet', /history\.replaceState\(\{\}, '', location\.pathname\)/.test(clientSource));

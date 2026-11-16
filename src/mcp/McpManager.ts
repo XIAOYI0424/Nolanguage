@@ -47,7 +47,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { appDataPath } from '../util/appData.js';
-import { planMcpSpawn } from './spawn-command.js';
+import { planSpawn } from '../util/spawnPlan.js';
 
 /** One declared server. Everything but `command` is optional. */
 export interface McpServerConfig {
@@ -259,7 +259,7 @@ export class McpManager {
       // Resolve against the *child's* PATH, not ours: a server entry may set
       // `env.PATH` to reach a toolchain we do not have.
       const childEnv = { ...process.env, ...(cfg.env || {}) };
-      const plan = planMcpSpawn(cfg.command, state.args, {
+      const plan = planSpawn(cfg.command, state.args, {
         ...(childEnv.PATH !== undefined ? { PATH: childEnv.PATH } : {}),
         ...(childEnv.PATHEXT !== undefined ? { PATHEXT: childEnv.PATHEXT } : {}),
       });

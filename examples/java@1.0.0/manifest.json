@@ -1,0 +1,260 @@
+{
+  "id": "java",
+  "displayName": "Java",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "example",
+  "description": "Java run through the single-file source launcher (JDK 11+): no build step, no classpath, no class-name juggling. jdtls gives navigation when it is installed.",
+  "order": 53,
+  "trust": {
+    "sandbox": "subprocess"
+  },
+  "file": {
+    "extensions": [
+      "java"
+    ],
+    "defaultExt": "java",
+    "fileName": "Main.java"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "//[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "/\\*[\\s\\S]*?\\*/",
+        "cls": "c"
+      },
+      {
+        "re": "\"\"\"[\\s\\S]*?\"\"\"",
+        "cls": "s"
+      },
+      {
+        "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'(?:[^'\\\\\\n]|\\\\.)*'",
+        "cls": "s"
+      },
+      {
+        "re": "@[A-Za-z_][A-Za-z0-9_]*",
+        "cls": "d"
+      },
+      {
+        "re": "\\b(?:abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|default|do|double|else|enum|extends|final|finally|float|for|goto|if|implements|import|instanceof|int|interface|long|native|new|package|private|protected|public|return|short|static|strictfp|super|switch|synchronized|this|throw|throws|transient|try|void|volatile|while|var|record|sealed|permits|yield)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:String|System|Object|Integer|Long|Double|Boolean|Character|Math|List|ArrayList|Map|HashMap|Set|HashSet|Optional|Stream|Exception|RuntimeException|IllegalArgumentException|StringBuilder|Thread|Runnable|Override|Deprecated|Record|Builder)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "\\b[0-9][0-9_]*(?:\\.[0-9]+)?[fFdDlL]?\\b",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_][A-Za-z0-9_]*(?=\\()",
+        "cls": "f"
+      },
+      {
+        "re": "\\b[A-Z][A-Za-z0-9_]*\\b",
+        "cls": "cl"
+      }
+    ]
+  },
+  "lsp": {
+    "manager": true,
+    "provider": {
+      "kind": "github",
+      "package": "eclipse-jdtls/eclipse.jdt.ls",
+      "asset": "jdtls"
+    },
+    "discovery": {
+      "commands": [
+        "jdtls"
+      ],
+      "envVars": [
+        "JDTLS"
+      ],
+      "knownPaths": [
+        "~/.local/share/jdtls/bin/jdtls",
+        "~/.local/bin/jdtls",
+        "C:/jdtls/bin/jdtls.bat"
+      ]
+    },
+    "projectMarkers": [
+      "pom.xml",
+      "build.gradle",
+      "settings.gradle",
+      "build.gradle.kts",
+      "settings.gradle.kts"
+    ],
+    "command": [
+      "{toolchain}",
+      "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+      "-Dosgi.bundles.defaultStartLevel=4",
+      "-Declipse.product=org.eclipse.jdt.ls.core.product",
+      "-Dlog.level=ERROR",
+      "-Xmx2G",
+      "-XX:+UseG1GC",
+      "-jar",
+      "{glob:{dist}/plugins/org.eclipse.equinox.launcher_*.jar}",
+      "-configuration",
+      "{dist}/config_{platform}",
+      "-data",
+      "{dataDir}"
+    ],
+    "args": [],
+    "initializationOptions": {
+      "settings": {
+        "java.import.mode": "ondemand",
+        "java.jdt.ls.vmargs": "-Xmx2G -XX:+UseG1GC",
+        "java.configuration.updateBuildConfiguration": "disabled"
+      },
+      "extendedClientCapabilities": {
+        "progressReportProvider": false
+      }
+    },
+    "idleTtlMs": 1800000,
+    "firstRequestBudgetMs": 500,
+    "startTimeoutMs": 120000,
+    "incremental": "git",
+    "fallback": {
+      "kind": "lexical",
+      "keywords": [
+        "abstract",
+        "assert",
+        "boolean",
+        "break",
+        "byte",
+        "case",
+        "catch",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extends",
+        "final",
+        "finally",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "instanceof",
+        "int",
+        "interface",
+        "long",
+        "native",
+        "new",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "record",
+        "return",
+        "sealed",
+        "short",
+        "static",
+        "strictfp",
+        "super",
+        "switch",
+        "synchronized",
+        "this",
+        "throw",
+        "throws",
+        "transient",
+        "try",
+        "var",
+        "void",
+        "volatile",
+        "while",
+        "yield",
+        "true",
+        "false",
+        "null"
+      ],
+      "types": [
+        "String",
+        "System",
+        "Object",
+        "Integer",
+        "Long",
+        "Double",
+        "Boolean",
+        "Character",
+        "Math",
+        "List",
+        "ArrayList",
+        "Map",
+        "HashMap",
+        "Set",
+        "HashSet",
+        "Optional",
+        "Stream",
+        "StringBuilder",
+        "Exception",
+        "RuntimeException",
+        "IllegalArgumentException",
+        "Thread",
+        "Runnable",
+        "Override"
+      ],
+      "declarationPattern": "(?:class|interface|enum|record)\\s+([A-Za-z_$][\\w$]*)",
+      "note": "jdtls is not installed — lexical fallback: keywords, declarations in this file, and brace/literal checks only"
+    },
+    "languageId": "java",
+    "serverName": "jdtls",
+    "memoryHint": "400MB",
+    "degradedNote": "jdtls not installed - Run works, Check and completion do not"
+  },
+  "run": {
+    "mode": "template",
+    "requires": [
+      "template@^1.0.0"
+    ],
+    "timeoutMs": 60000,
+    "sourceExt": ".java",
+    "discovery": {
+      "commands": [
+        "java"
+      ],
+      "envVars": [
+        "JAVA_BIN"
+      ],
+      "knownPaths": [
+        "C:/Program Files/Java/latest/bin/java.exe",
+        "C:/Program Files/Eclipse Adoptium/jdk-21/bin/java.exe",
+        "/usr/bin/java",
+        "~/.local/bin/java"
+      ]
+    },
+    "versionArgs": [
+      "-version"
+    ],
+    "steps": [
+      {
+        "role": "run",
+        "cmd": "\"{toolchain}\" \"{file}\""
+      }
+    ],
+    "modes": {
+      "test": {
+        "steps": [
+          {
+            "role": "run",
+            "cmd": "\"{toolchain}\" \"{file}\""
+          }
+        ]
+      }
+    }
+  }
+}

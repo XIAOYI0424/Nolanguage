@@ -140,7 +140,20 @@
   /** Send one navigation request; 'apply' runs with the reply frame. */
   function navRequest(kind, payload, apply) {
     var id = navNextId();
-    NAV_WAIT[id] = { kind: kind, apply: apply };
+    // Without a timeout an unanswered request leaks its entry forever and the
+    // user gets silence: no overlay, no dialog, nothing to act on.
+    var timer = setTimeout(function () {
+      if (!NAV_WAIT[id]) return;
+      delete NAV_WAIT[id];
+      navError('The language server did not answer the ' + kind + ' request.');
+    }, 15000);
+    NAV_WAIT[id] = {
+      kind: kind,
+      apply: function (m) {
+        clearTimeout(timer);
+        apply(m);
+      },
+    };
     payload.kind = kind;
     payload.requestId = id;
     BRIDGE.send(payload);
@@ -193,8 +206,19 @@
    * than refusing.
    */
   function navApplyEdits(edits) {
-    var mine = (edits || []).filter(function (e) { return true; });
-    if (!mine.length) return 0;
+    // Only edits for the buffer on screen may be applied here. A WorkspaceEdit
+    // can carry edits for other files (pyright's rename does exactly that), and
+    // applying those offsets to the current buffer would rewrite unrelated text
+    // at the same line numbers - silent corruption, not a visible failure.
+    var current = String(currentFile || '');
+    var mine = [];
+    var elsewhere = 0;
+    (edits || []).forEach(function (e) {
+      var path = String(e.uri || '').replace(/^file:\/\/\//, '').replace(/^file:\/\//, '');
+      if (navSameFile(current, path)) mine.push(e);
+      else elsewhere++;
+    });
+    if (!mine.length) return { applied: 0, elsewhere: elsewhere };
     var lines = ta.value.split(NLc);
     function offset(line, character) {
       var idx = 0;
@@ -212,7 +236,7 @@
     renderEditor();
     updateCaret();
     scheduleCheck();
-    return spans.length;
+    return { applied: spans.length, elsewhere: elsewhere };
   }
 
   function navRename() {
@@ -228,8 +252,17 @@
         navRequest('renameSymbol', {
           language: currentLang, code: ta.value, line: at.line, character: at.character, newName: name,
         }, function (m) {
-          var n = navApplyEdits(m.edits || []);
-          if (!n) navError('Nothing to rename here.');
+          var r = navApplyEdits(m.edits || []);
+          if (!r.applied) {
+            navError(r.elsewhere
+              ? 'This symbol lives in another file - open it and rename there.'
+              : 'Nothing to rename here.');
+            return;
+          }
+          if (r.elsewhere) {
+            navError('Renamed here, but ' + r.elsewhere + ' edit(s) in other files were not applied. '
+              + 'Rename again with those files open, or the project will be inconsistent.');
+          }
         });
       },
     });
@@ -249,7 +282,8 @@
           detail: a.kind || '',
           onPick: function () {
             if (!a.edits || !a.edits.length) { navError('That action has no local edit.'); return; }
-            navApplyEdits(a.edits);
+            var r = navApplyEdits(a.edits);
+            if (!r.applied && r.elsewhere) navError('That fix only touches other files.');
           },
         };
       }));
@@ -294,3 +328,107 @@
     e.stopPropagation();
     navWorkspaceSymbols();
   }, true);
+
+  // ---------- parameter hints ----------
+  // Triggered on '(' and ',' only. The request is debounced because typing
+  // ',,,' would otherwise fire three round trips for one signature.
+  var SIG = { timer: 0, reqId: 0, el: null };
+
+  function sigClose() {
+    if (SIG.el && SIG.el.parentNode) SIG.el.parentNode.removeChild(SIG.el);
+    SIG.el = null;
+  }
+
+  /** Wrap the active parameter so it stands out in the signature line. */
+  function sigMark(label, active) {
+    var open = String(label).indexOf('(');
+    var close = String(label).lastIndexOf(')');
+    if (open < 0 || close <= open) return esc(String(label));
+    var head = String(label).slice(0, open + 1);
+    var body = String(label).slice(open + 1, close);
+    var tail = String(label).slice(close);
+    // Split on top-level commas so 'f(a=(1,2), b)' keeps its groups intact.
+    var parts = [], cur = '', depth = 0;
+    for (var i = 0; i < body.length; i++) {
+      var ch = body.charAt(i);
+      if (ch === '(' || ch === '[' || ch === '{') depth++;
+      else if (ch === ')' || ch === ']' || ch === '}') depth--;
+      if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    parts.push(cur);
+    var out = parts.map(function (p, i) {
+      return i === active ? '<b class="sig-act">' + esc(p) + '</b>' : esc(p);
+    }).join(',');
+    return esc(head) + out + esc(tail);
+  }
+
+  function sigRender(m) {
+    sigClose();
+    var sigs = m.signatures || [];
+    if (!sigs.length) return;
+    var sig = sigs[Math.max(0, Math.min(m.activeSignature || 0, sigs.length - 1))];
+    var el = document.createElement('div');
+    el.id = 'sigTip';
+    el.setAttribute('data-sig', '1');
+    el.innerHTML = sigMark(sig.label, m.activeParameter || 0);
+    el.style.cssText = [
+      'position:fixed', 'z-index:9998', 'padding:3px 8px', 'border-radius:4px',
+      'background:var(--bg2,#252b36)', 'border:1px solid var(--line,#3a4250)',
+      'font:12px/1.5 var(--mono,ui-monospace,monospace)', 'color:var(--fg,#d8dee9)',
+      'pointer-events:none', 'white-space:nowrap',
+    ].join(';');
+
+    var left, top;
+    if (CMEDITOR) {
+      var co = CMEDITOR.cm.cursorCoords(true, 'local');
+      var rect = CMEDITOR.cm.getWrapperElement().getBoundingClientRect();
+      left = rect.left + co.left;
+      top = rect.top + co.top - 24;
+    } else {
+      var box = ta.getBoundingClientRect();
+      left = box.left + 14;
+      top = box.top + 6;
+    }
+    el.style.left = Math.max(4, left) + 'px';
+    el.style.top = Math.max(4, top) + 'px';
+    document.body.appendChild(el);
+    SIG.el = el;
+  }
+
+  function sigRequest() {
+    if (!lspLang()) return;
+    var at = navCaret();
+    var id = navNextId();
+    SIG.reqId = id;
+    BRIDGE.send({
+      kind: 'signatureHelp',
+      language: currentLang,
+      code: ta.value,
+      line: at.line,
+      character: at.character,
+      requestId: id,
+    });
+  }
+
+  function sigTrigger() {
+    clearTimeout(SIG.timer);
+    SIG.timer = setTimeout(sigRequest, 150);
+  }
+
+  /** Called from the message switch in 50-runtime. */
+  function sigOnFrame(m) {
+    // A late answer for an older request must not reopen a closed popup.
+    if (m.requestId !== SIG.reqId) return;
+    if (m.unsupported || !(m.signatures || []).length) { sigClose(); return; }
+    sigRender(m);
+  }
+
+  /** Called from the message switch in 50-runtime. */
+  function cmpOnDetail(m) {
+    if (!m.label) return;
+    // Cache the empty answer too: a server that has no docs must not be asked
+    // again for the same row.
+    CMP.docs[m.label] = m.documentation || '';
+    if (CMP.open && CMP.items[CMP.sel] && CMP.items[CMP.sel].label === m.label) renderCmp();
+  }

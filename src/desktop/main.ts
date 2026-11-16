@@ -40,6 +40,7 @@ import { decideLaunch, launchUrl, type BuildIdentity } from './handshake.js';
 import { APP_VERSION } from '../version.js';
 import { appDataPath } from '../util/appData.js';
 import { bootLog, bootLogError, installBootLog } from '../util/bootLog.js';
+import { recordFatal, showFatalError } from './fatalDialog.js';
 import type { EmbeddedAssetError } from '../assets/embeddedAssets.js';
 import {
   clearSession,
@@ -100,8 +101,12 @@ if (process.argv.includes('--extension-host')) {
   // `main()` opens the window and prints the banner; it loads the server graph
   // lazily, because that graph pulls `node:sqlite` and a CLI invocation must not
   // pay for it (see `main`).
-  main().catch((err: unknown) => {
+  main().catch(async (err: unknown) => {
+    // The window is the only place a GUI build can report a failure: stderr goes
+    // nowhere when the exe is double-clicked. Show it, then exit.
     console.error('Nolanguage desktop failed to start:', err);
+    recordFatal(err);
+    await showFatalError(err, APP_VERSION);
     process.exit(1);
   });
 }
