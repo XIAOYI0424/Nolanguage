@@ -75,6 +75,52 @@ PASS  the reply names the command it ran  — node.exe -e console.log(...) reque
 
 顺带印证了一个设计选择：日志里 javascript 的工具链被解析成 `Nolanguage.exe` 自己（exe 就是 Node 运行时），所以 JS 的安装命令必须是 `npm install` 而不是 `{toolchain} install` —— 后者会变成 `Nolanguage.exe install <pkg>`。
 
+### 把八种语言的服务真的装上，然后测：五个 bug
+
+语义基线原本只覆盖五个语言，其余三个（markdown / c / cpp）是「没装服务」的 SKIP。这一轮把它们装上——用产品自己的 `nlg lang server install`——于是基线变成八种语言，并且**装的过程本身抓到了五个 bug**。
+
+装法（三条路径都走了一遍）：
+
+| 语言 | 服务 | 方式 |
+|---|---|---|
+| python | pyright | `nlg lang server install python`（npm，产品自己的命令） |
+| go | gopls | `lang server install go`（`go install`，装完在 `servers/go/bin/gopls.exe`） |
+| javascript | tsserver | `lang server install javascript`（npm） |
+| markdown | marksman | GitHub release 在本机被代理挡住 → `winget install Artempyanykh.Marksman`，再复制进 `servers/markdown/marksman.exe` |
+| c / cpp | clangd | 同上 → `winget install LLVM.clangd`（独立包，不是整个 LLVM） |
+
+装完 `nlg lang server` 从「4 of 4 missing」变成「2 of 4 missing」再到全部 `managed`——托管根解析是通的。
+
+**五个 bug，全部是「装一下才看得见」：**
+
+| 问题 | 现象 | 修法 |
+|---|---|---|
+| **markdown 的 `lsp.args` 是空的** | marksman 的唯一子命令是 `server`；不给它就打印帮助、什么都不答。**这条语言服务从来没有真正工作过**，而界面上只表现为「markdown 没有补全」 | `builtin/markdown@1.0.0` 加 `"args": ["server"]` |
+| **`go install` 用裸名 `go`** | Go 装在 `D://Go lang\bin`（不在 PATH）时，`lang server install go` 报 `'go' 不是内部或外部命令`。而 `run.discovery` 里明明写着它的路径——discovery 存在的意义就是这个场景 | 安装器用 `discoverBinary(manifest.run.discovery)` 的绝对路径 |
+| **安装器 `shell: true` 拆开带空格的路径** | 上一条修好后立刻撞上：`D:/Go lang/bin/go.exe` 被 cmd 拆成 `D:/Go`。npm 的 `.cmd` 需要 shell，`go.exe` 不需要 | 改用 `planSpawn`（它本来就负责这两件事：`.cmd` 走 shell、参数加引号） |
+| **jdtls 的 `-data` 按插件共享** | 两个项目（或上一个实例没退干净）共用一个 Eclipse workspace 时，第二个 jdtls **握手成功、然后永远不导入工程**——每个请求返回空，没有任何报错。语义基线里 java 就这样从 58 项变成 0 项 | 新增 `{rootHash}` 占位符（根的稳定短哈希），manifest 用 `-data {dataDir}/{rootHash}`；同一项目重开仍复用索引 |
+| **`toolchainEnv('java')` 把 `.` 插进 PATH** | 裸命令名的 `dirname` 是 `.`，于是子进程 PATH 以工作目录开头——既是安全气味，也让 jdtls 的行为变了 | 裸命令名直接返回 `undefined`（它本来就是从 PATH 找到的） |
+| **jdtls 的 workspace 不能复用** | 按根隔离后仍有一半命中：**同一个项目重开**时第二次 jdtls 一样握手成功、什么都不答。`-Dosgi.locking=none` 无效 | `{dataDir}` 由适配器按根分配，插件声明 `lsp.freshDataDir: true` 每次启动前清空。代价是每次重开都要重新导入（小 pom 2–5 s），换「第二次打开不会得到哑服务器」 |
+| **`stop()` 发完 `exit` 立刻 kill** | JVM 来不及走完协议里的干净关闭；日志里一直是 `exited {code: null}`（被信号杀掉） | 先等 1.5 s 让它自己退，退不掉才 kill |
+
+**语义基线现在是八种语言、23 项**（`verify:lsp-semantics`）。python 装上 pyright 后走真后端：补全 8 项、hover `(function) def print(...)`、诊断 `Expected parameter name`；没装 pyright 时仍然落到内置 stub（`builtin` / `SyntaxError`），所以断言写成「任一命中」而不是放宽成非空。markdown 只有两条（marksman 没有链接 hover，如实 SKIP）。
+
+**启动耗时表补全**（同口径，2 次采样）：
+
+| 语言 | 服务 | `initialize` | 首次有结果的补全 |
+|---|---|---|---|
+| c / cpp | clangd | **81–88 ms** | 7–12 ms |
+| rust | rust-analyzer | 77–93 ms | 1032–1036 ms |
+| javascript | tsserver | 246–279 ms | 450–460 ms |
+| python | pyright | 261–265 ms | 796 ms |
+| go | gopls | 340–374 ms | 420–453 ms |
+| markdown | marksman | 914–938 ms | 34 ms |
+| java | jdtls | 2017–3392 ms | 1535–1610 ms |
+
+**装上服务之后，三个套件暴露了自己不隔离环境。** `verify-markdown` 断言「marksman 不存在」、`verify-javascript` 用 PATH-only 的发现去猜工作区会不会有服务、`verify-ide` 断言 stub 才有的「未使用 import」——它们此前是绿的，只因为机器是空的。现在都改成按实际状态断言（或与产品同口径解析），装与不装都成立。
+
+`npm test` 149→**151**（+2：按根隔离的 `{dataDir}`、无法解析的模板拒绝启动）。`verify` **2385/2385 · 52 套件**全绿，且连续跑三次结果一致。
+
 ### LSP 协议与语义基线：把「能跑」拆成「行为对」和「结果对」
 
 启动耗时测完只说明服务器答应了，没说明它答得对。这一轮补三组测试，并把过程中发现的两处漏接修掉。

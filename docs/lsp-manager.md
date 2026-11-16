@@ -59,13 +59,23 @@
     "java.jdt.ls.vmargs": "-Xmx2G -XX:+UseG1GC",
     "java.configuration.updateBuildConfiguration": "disabled" } },
   "idleTtlMs": 1800000, "firstRequestBudgetMs": 500, "navBudgetMs": 5000,
+  "freshDataDir": true,
   "incremental": "git",
   "fallback": { "keywords": ["..."], "types": ["..."],
                 "declarationPattern": "(?:class|interface|enum|record)\\s+([A-Za-z_$][\\w$]*)" }
 }
 ```
 
-**为什么需要 `command` 模板。** jdtls 的 `bin/jdtls.bat` 在本机是 `python jdtls %*` 加一行 `pause`——spawn 它会永久阻塞。真正的服务器是 `java -jar …/equinox.launcher_*.jar`。所以「用发现的二进制启动」这个假设在真实世界里不成立，模板是必需品而不是灵活性。占位符：`{resolved}` `{dist}` `{toolchain}` `{root}` `{dataDir}` `{platform}` `{glob:…}`。
+**为什么需要 `command` 模板。** jdtls 的 `bin/jdtls.bat` 在本机是 `python jdtls %*` 加一行 `pause`——spawn 它会永久阻塞。真正的服务器是 `java -jar …/equinox.launcher_*.jar`。所以「用发现的二进制启动」这个假设在真实世界里不成立，模板是必需品而不是灵活性。占位符：`{resolved}` `{dist}` `{toolchain}` `{root}` `{dataDir}` `{rootHash}` `{platform}` `{glob:…}`。
+
+**`{dataDir}` 是按根分配的，而且 jdtls 每次都从空的开始。** 这一条是踩出来的，不是设计出来的：
+
+1. `{dataDir}` 原本是 `<home>/lsp-data/<plugin>`，**一个插件一份**。jdtls 把 Eclipse workspace 放在 `-data` 下，两个项目共用一个时，第二个 jdtls **握手成功、然后永远不导入工程**——每个请求返回空，没有任何报错。语义基线里 java 就这样从 58 项变成 0 项。
+2. 改成按根哈希分目录后，**同一个项目重开**仍然会坏：第二次启动一样是「握手成功、什么都不答」。`-Dosgi.locking=none` 没用，`LspClient.stop()` 先 kill 再等也没用（现在是先等 1.5 s 让它自己退，退不掉才 kill——这本身也是修掉的一个缺陷）。
+
+所以最终是：`{dataDir}` 由适配器按根分配（`lsp-data/<plugin>/<rootHash>`），插件的 `lsp.freshDataDir: true` 在每次启动前清空它。目录数量有界（一个根一个），启动永远从已知状态开始。**代价是每次启动都要重新导入工程**（小 pom 2–5 s），换来的是「第二次打开不会得到一个哑掉的服务器」——对 jdtls 23.1 在本机的表现，这个交换是值得的。
+
+`{rootHash}` 仍然可用（模板里能引用），只是默认已经体现在 `{dataDir}` 里了。
 
 **为什么 `projectMarkers` 取最外层。** Maven reactor 根和每个 module 都有 `pom.xml`。取最近的那个会让每个 module 各起一个 JVM——正是「进程爆炸」。取 `.git` 边界内最外层的 marker，一个仓库一个服务器；两个独立 checkout 仍是两个。
 
@@ -121,11 +131,17 @@
 
 | 语言 | 补全必须含 | hover 必须含 | 诊断必须含 |
 |---|---|---|---|
-| python（stub） | `print`（30 项） | `builtin` | `SyntaxError` |
+| python（pyright） | `print`（8 项） | `(function) def print` | `Expected parameter name` |
+| python（内置 stub，未装 pyright 时） | `print`（30 项） | `builtin` | `SyntaxError` |
 | go（gopls） | `Println`（`fmt.` → 29 项） | `func fmt.Println` | `undefined` |
 | javascript（tsserver） | `filter`（23 项） | `number[]` | `Expression expected` |
+| markdown（marksman） | `other.md` | —（marksman 没有链接 hover） | `non-existent document` |
 | rust（rust-analyzer） | `as_bytes`（138 项） | `let s: String` | `mismatched types` |
+| c（clangd） | `x` / `y`（结构体字段） | `Type: `struct P`` | `undeclared identifier` |
+| cpp（clangd） | `x` / `y` | `Type: `P`` | `undeclared identifier` |
 | java（jdtls） | `add(`（58 项） | `List<String> names` | `cannot be resolved` |
+
+python 有两行，因为同一个语言可能由两种后端服务，它们对同一件事的措辞不同（pyright 说 `(function) def print`，stub 说 `builtin`）。断言写成「任一命中」，两条都是具体的，没有放宽成「非空即可」。
 
 服务器没装的 SKIP，所以这组基线会随安装的服务变厚，而不是在某台机器上永远红。
 
@@ -155,12 +171,15 @@
 
 | 语言 | 服务 | `initialize` | 首次有结果的补全 |
 |---|---|---|---|
+| c / cpp | clangd | **81–88 ms** | 7–12 ms |
 | rust | rust-analyzer | **77–93 ms** | 1032–1036 ms（索引期间会 1 ms 回空） |
 | javascript | tsserver | 246–279 ms | 450–460 ms |
-| python | 内置 stub | 298–363 ms | 1 ms |
+| python | pyright | 261–265 ms | 796 ms |
 | go | gopls | 340–374 ms | 420–453 ms |
+| markdown | marksman | 914–938 ms | 34 ms |
 | java | jdtls | **2017–3392 ms** | 1535–1610 ms（小 pom；大 reactor 4–5 s） |
-| markdown / c / cpp | 未安装 | 不启动（fallback） | — |
+
+clangd 最快且几乎不用等（81 ms 起，7 ms 出结果）；marksman 慢在 .NET 启动（~930 ms），但一上来就能答（34 ms）。**没有一个语言的 `initialize` 与「首次有结果」是同一天平上的两件事**——rust 是启动最快、可用最晚的那个。
 
 **「启动快」和「可用早」是两件事。** rust-analyzer 的 `initialize` 最快（77 ms），但第一次真正有内容的补全要等 1.0 s——期间它 1 ms 就回一个空列表。所以「首次补全」这一列量的是**等到有 items** 为止，否则会把「还在加载」记成「很快」。
 

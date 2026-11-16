@@ -211,12 +211,27 @@ function testRenderer(): void {
 // ============================================================ discovery
 
 function testDiscovery(): void {
-  // A missing marksman must be a graceful skip, not a failure.
-  const absent = discoverMarksmanServer();
-  check('discovery: absent marksman reports launch:null', absent.launch === null);
-  check('discovery: absent marksman is source "none"', absent.source === 'none');
-  check('discovery: absent marksman explains the degradation',
-    !!absent.note && /preview/.test(absent.note), absent.note?.slice(0, 40) ?? '');
+  // Whether marksman is installed is the machine's business, not this suite's:
+  // a check that asserts "absent" is green only on a bare box and red the moment
+  // someone runs `nlg lang server install markdown`. Both states are meaningful,
+  // so each check states the rule for whichever one holds.
+  const found = discoverMarksmanServer();
+  const installed = found.launch !== null;
+  check(
+    'discovery: marksman is either resolved or reported absent',
+    installed ? typeof found.launch?.command === 'string' : found.source === 'none',
+    installed ? found.launch?.command : found.source,
+  );
+  check(
+    'discovery: the source names where it came from',
+    installed ? found.source !== 'none' : found.source === 'none',
+    found.source,
+  );
+  check(
+    'discovery: the degradation note appears only when it is absent',
+    installed ? !found.note : !!found.note && /preview/.test(found.note),
+    found.note?.slice(0, 40) ?? '(none)',
+  );
 
   // An explicit-but-missing path stays "missing" (a misconfiguration worth
   // reporting), and never quietly falls back to PATH.

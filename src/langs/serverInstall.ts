@@ -31,6 +31,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { discoverBinary } from './discover.js';
+import { planSpawn } from '../util/spawnPlan.js';
 import type { LanguageManifest } from './manifest.js';
 
 export type ServerProviderKind = 'npm' | 'go-install' | 'github';
@@ -107,10 +108,15 @@ export function planFor(manifest: LanguageManifest, home: string): ServerPlan {
   if (provider.kind === 'go-install') {
     const exe = basename(provider.package) + (process.platform === 'win32' ? '.exe' : '');
     const spec = provider.version ? `${provider.package}@${provider.version}` : provider.package;
+    // The toolchain may not be on PATH — that is the whole reason
+    // `run.discovery` exists, and it is the same answer the runner uses. Using
+    // the bare name here made `lang server install` fail on exactly the machines
+    // discovery was written for ("'go' is not recognized as an internal command").
+    const toolchain = discoverBinary(manifest.run?.discovery).bin;
     return {
       root,
       probe: [join('bin', exe)],
-      command: ['go', 'install', spec],
+      command: [toolchain || 'go', 'install', spec],
     };
   }
   const exe = provider.asset ?? basename(provider.package);
@@ -205,7 +211,17 @@ export async function installServer(
       : process.env;
 
   return new Promise<InstallOutcome>((resolve) => {
-    const child = spawn(cmd, args, { cwd: plan.root, env, windowsHide: true, shell: process.platform === 'win32' });
+    // Not `shell: true`: that splits a command path containing a space
+    // (`D://Go lang\bin\go.exe` became `D:/Go`), which is precisely the install
+    // location the discovery list names. `planSpawn` resolves `.cmd` shims the way
+    // a shell would and quotes the arguments that need it.
+    const launch = planSpawn(cmd, args, { PATH: env.PATH ?? process.env.PATH });
+    const child = spawn(launch.command, launch.args, {
+      cwd: plan.root,
+      env,
+      windowsHide: true,
+      shell: launch.shell,
+    });
     let output = '';
     const timer = setTimeout(() => {
       try { child.kill(); } catch { /* gone */ }

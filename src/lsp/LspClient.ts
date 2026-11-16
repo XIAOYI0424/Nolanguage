@@ -614,12 +614,29 @@ export class LspClient extends EventEmitter {
     this.logCollector?.flush();
     this.rpc?.dispose();
     if (this.child && this.child.exitCode === null) {
-      const killed = new Promise<void>((resolve) => {
-        this.child!.once('exit', () => resolve());
-        setTimeout(() => resolve(), 1500);
+      const child = this.child;
+      // `exit` is the protocol's clean shutdown, so give the server the chance to
+      // take it. Killing a JVM mid-shutdown leaves its workspace locked, and the
+      // *next* start then handshakes and never imports anything — every request
+      // answers empty with no error. That is what a second run against a reused
+      // jdtls data directory looked like.
+      const exited = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 1500);
+        child.once('exit', () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
       });
-      this.child.kill();
-      await killed;
+      if (!exited) {
+        child.kill();
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => resolve(), 1500);
+          child.once('exit', () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
     }
     const uptime = Math.round(performance.now() - this.startedAt);
     log?.info('Language server stopped', {

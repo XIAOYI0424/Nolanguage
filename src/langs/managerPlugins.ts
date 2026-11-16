@@ -23,7 +23,8 @@
  * | `{dataDir}` | a persistent per-plugin directory for the server's own state |
  * | `{glob:<pattern>}` | the first match, sorted — for versioned jar names |
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { discoverBinary, probeVersion } from './discover.js';
 import type { LanguageManifest } from './manifest.js';
@@ -55,6 +56,16 @@ interface TemplateContext {
   toolchain: string;
   /** `win` | `linux` | `mac` — distributions name their config dirs this way. */
   platform: string;
+  /**
+   * Stable short hash of the project root.
+   *
+   * Servers that keep their own workspace state (jdtls's Eclipse `.metadata`)
+   * cannot share one directory across roots: the second instance starts, shakes
+   * hands, and then never imports anything — the symptom is a server that
+   * answers every request with nothing. `{dataDir}/{rootHash}` gives each root
+   * its own state and still reuses it when the same project is reopened.
+   */
+  rootHash: string;
 }
 
 const PLATFORM = process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'mac' : 'linux';
@@ -92,7 +103,7 @@ function expandOne(raw: string, ctx: TemplateContext): string | undefined {
   // when the glob is parsed. `{toolchain}` is the one that may genuinely be
   // absent: launching a JVM-based server without a JVM is not something to
   // paper over with an empty string.
-  const substituted = raw.replace(/\{(resolved|dist|root|dataDir|toolchain|platform)\}/g, (_m, key: string) => {
+  const substituted = raw.replace(/\{(resolved|dist|root|dataDir|toolchain|platform|rootHash)\}/g, (_m, key: string) => {
     const v = (ctx as unknown as Record<string, string>)[key];
     if (!v) {
       missing = true;
@@ -201,7 +212,7 @@ export async function buildManagerPlugin(
   const markers = spec.projectMarkers ?? [];
   const extensions = new Set((manifest.file?.extensions ?? []).map((e) => e.toLowerCase()));
   const home = opts.home;
-  const dataDir = join(home, 'lsp-data', manifest.id);
+  const dataRoot = join(home, 'lsp-data', manifest.id);
 
   const resolved = resolveServer(manifest, home, opts.workspaceRoot ? { root: opts.workspaceRoot } : {});
   const bin = resolved.source === 'missing' ? undefined : resolved.bin;
@@ -238,11 +249,33 @@ export async function buildManagerPlugin(
   let launchNote: string | undefined;
 
   const buildConfig = (root: string): LspServerConfig | undefined => {
+    // Per root, not per plugin: a server's own workspace state belongs to one
+    // project, and two projects sharing it is what made the second jdtls answer
+    // nothing at all.
+    const rootHash = createHash('sha1').update(root.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 8);
+    const dataDir = join(dataRoot, rootHash);
+    if (spec.freshDataDir) {
+      // Declared by the plugin, because "start from an empty workspace" is a
+      // property of the server, not a decision the manager can make for it.
+      try {
+        rmSync(dataDir, { recursive: true, force: true });
+      } catch {
+        /* a locked directory will fail the launch and be reported there */
+      }
+    }
     if (!bin) {
       launchNote = spec.degradedNote ?? `${spec.serverName ?? manifest.id} not found`;
       return undefined;
     }
-    const ctx: TemplateContext = { resolved: bin, dist: distOf(bin), root, dataDir, toolchain, platform: PLATFORM };
+    const ctx: TemplateContext = {
+      resolved: bin,
+      dist: distOf(bin),
+      root,
+      dataDir,
+      toolchain,
+      platform: PLATFORM,
+      rootHash,
+    };
     const template = spec.command ?? ['{resolved}'];
     const expanded = expandAll(template, ctx);
     if (!expanded || !expanded.length) {

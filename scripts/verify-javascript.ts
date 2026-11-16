@@ -17,9 +17,20 @@ import { LogLevel } from '../src/log/LogLevel.js';
 import { commandExists } from '../src/lsp/LspClient.js';
 import { ExecService } from '../src/exec/ExecService.js';
 import { resolveNodeBin, discoverJsServer } from '../src/js/discover.js';
+import { managedBinary } from '../src/langs/serverInstall.js';
+import type { LanguageManifest } from '../src/langs/manifest.js';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { JsRunner } from '../src/js/JsRunner.js';
 import { WorkspaceService } from '../src/panel/WorkspaceService.js';
 import { defaultSample } from '../src/panel/samples.js';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+/** The javascript plugin's manifest — the same one the workspace reads. */
+const jsManifest = (): LanguageManifest =>
+  JSON.parse(readFileSync(join(ROOT, 'builtin/javascript@1.0.0/manifest.json'), 'utf8')) as LanguageManifest;
 
 const results: { name: string; ok: boolean; detail: string; skipped?: boolean }[] = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -85,7 +96,14 @@ async function main(): Promise<void> {
   const version = node.source === 'missing' ? null : await nodeVersion(node.bin);
   check('node version reported', !!version, version ?? 'n/a');
 
-  const server = discoverJsServer();
+  // `discoverJsServer` is PATH-only, while the workspace also looks in the
+  // managed root (`<home>/servers/javascript`). Probing with the narrower rule
+  // made the suite assert "no server" on a machine where the workspace had one,
+  // so the branch below tested the opposite of what actually happened. Passing
+  // the managed path as the preferred one keeps the probe and the workspace in
+  // agreement without changing the shape the checks read.
+  const managed = managedBinary(jsManifest(), join(homedir(), '.nolanguage'));
+  const server = discoverJsServer(managed ?? undefined);
   // Like gopls, the server is an *optional* external tool: a machine can have
   // node and no language server, and the platform must keep running code then.
   if (server.launch) {

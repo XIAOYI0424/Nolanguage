@@ -50,6 +50,7 @@ import { FileTransport } from '../src/log/transports/FileTransport';
 import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
 import { resolveBundledFallback } from '../src/lsp/bundledFallback';
 import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/serverInstall';
+import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { JsonRpcConnection } from '../src/lsp/jsonrpc';
 import { PassThrough } from 'node:stream';
@@ -741,6 +742,27 @@ describe('language server providers', () => {
     expect(plan.probe).toEqual([join('bin', process.platform === 'win32' ? 'gopls.exe' : 'gopls')]);
   });
 
+  it('uses the discovered toolchain for go install, not a bare name', () => {
+    // `go` is not always on PATH — that is what `run.discovery` is for, and the
+    // installer must use the same answer the runner does. With a bare `go` the
+    // install failed with "'go' is not recognized" on exactly those machines.
+    // Discovery checks that the path exists, so the fixture has to exist too.
+    const goDir = mkdtempSync(join(tmpdir(), 'nl-go-'));
+    const goPath = join(goDir, 'go.exe');
+    writeFileSync(goPath, '');
+    const plan = planFor(
+      {
+        id: 'demo',
+        lsp: { provider: { kind: 'go-install', package: 'golang.org/x/tools/gopls', version: 'v0.24.0' } },
+        run: { mode: 'template', discovery: { knownPaths: [goPath] } },
+      } as never,
+      home,
+    );
+    expect(plan.command?.[0]).toBe(goPath);
+    expect(plan.command?.slice(1)).toEqual(['install', 'golang.org/x/tools/gopls@v0.24.0']);
+    rmSync(goDir, { recursive: true, force: true });
+  });
+
   it('refuses to auto-download a GitHub release, and says where to put it', () => {
     const plan = planFor(manifest({ provider: { kind: 'github', package: 'artempyanykh/marksman', asset: 'marksman.exe' } }), home);
     expect(plan.command).toBeUndefined();
@@ -844,6 +866,53 @@ describe('lsp manager · the toolchain goes on the server PATH', () => {
 
   it('adds nothing when there is no toolchain', () => {
     expect(toolchainEnv(undefined, base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it('adds nothing for a bare command name', () => {
+    // `java` was resolved through PATH, so `dirname` is `.` — prepending that
+    // would put the workspace first on the child's search path.
+    expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it('adds nothing for a bare command name', () => {
+    // `java` was resolved through PATH, so `dirname` is `.` — prepending that
+    // would put the workspace first on the child's search path.
+    expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('lsp manager · launch templates', () => {
+  const manifest = (command: string[]) =>
+    ({
+      id: 'demo',
+      file: { extensions: ['demo'] },
+      lsp: { manager: true, discovery: { knownPaths: [process.execPath] }, command },
+    }) as never;
+
+  it('gives each project root its own data dir', async () => {
+    // jdtls keeps an Eclipse workspace under `-data`. Sharing one across roots
+    // means the second instance handshakes and then never imports anything, so
+    // every request comes back empty - a silent failure, not an error.
+    const plugin = await buildManagerPlugin(manifest(['{resolved}', '-data', '{dataDir}/{rootHash}']), {
+      home: join(tmpdir(), 'nl-tpl'),
+    });
+    const rootA = join(tmpdir(), 'root-a');
+    const rootB = join(tmpdir(), 'root-b');
+    const a = plugin!.lspConfig(rootA)!.args[1];
+    const b = plugin!.lspConfig(rootB)!.args[1];
+    expect(a).not.toBe(b);
+    // Same root twice must reuse its state, or every reopen re-imports.
+    expect(plugin!.lspConfig(rootA)!.args[1]).toBe(a);
+    expect(a.startsWith(join(tmpdir(), 'nl-tpl', 'lsp-data', 'demo'))).toBe(true);
+  });
+
+  it('refuses to launch when a template placeholder cannot be resolved', async () => {
+    const plugin = await buildManagerPlugin(manifest(['{glob:' + join(tmpdir(), 'nope', '*.jar') + '}']), {
+      home: join(tmpdir(), 'nl-tpl'),
+    });
+    expect(plugin!.lspConfig(join(tmpdir(), 'root-a'))).toBeUndefined();
   });
 });
 

@@ -97,6 +97,7 @@
       "-Dosgi.bundles.defaultStartLevel=4",
       "-Declipse.product=org.eclipse.jdt.ls.core.product",
       "-Dlog.level=ERROR",
+      "-Dosgi.locking=none",
       "-Xmx2G",
       "-XX:+UseG1GC",
       "-jar",
@@ -214,7 +215,8 @@
     "languageId": "java",
     "serverName": "jdtls",
     "memoryHint": "400MB",
-    "degradedNote": "jdtls not installed - Run works, Check and completion do not"
+    "degradedNote": "jdtls not installed - Run works, Check and completion do not",
+    "freshDataDir": true
   },
   "run": {
     "mode": "template",

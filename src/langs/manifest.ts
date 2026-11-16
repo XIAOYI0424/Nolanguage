@@ -122,6 +122,15 @@ export interface LspSpec {
   projectMarkers?: string[];
   /** Passed to `initialize.initializationOptions` verbatim. */
   initializationOptions?: Record<string, unknown>;
+  /**
+   * Wipe this plugin's per-root data directory before each launch.
+   *
+   * For servers that keep their own workspace state and cannot reopen one
+   * reliably (jdtls 23.1 in this environment: the second start handshakes and
+   * then never imports anything). The directory count stays bounded because it
+   * is per root, and a start always begins from a known state.
+   */
+  freshDataDir?: boolean;
   /** Idle milliseconds before the pooled server is stopped. */
   idleTtlMs?: number;
   /** How long one request may wait for a cold server before the fallback answers. */
@@ -533,6 +542,9 @@ export function validateManifest(raw: unknown): ManifestValidation {
     // ---- pooled manager fields ----
     if (lsp.manager !== undefined && typeof lsp.manager !== 'boolean') {
       add('lsp.manager', 'must be a boolean');
+    }
+    if (lsp.freshDataDir !== undefined && typeof lsp.freshDataDir !== 'boolean') {
+      add('lsp.freshDataDir', 'must be a boolean');
     }
     if (lsp.projectMarkers !== undefined) {
       const m2 = lsp.projectMarkers;
