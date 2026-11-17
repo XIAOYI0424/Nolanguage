@@ -300,6 +300,30 @@ try {
   const sym = (await cdp.eval("(document.getElementById('dlgRoot').textContent||'')")).value;
   check('Ctrl+T opens the symbol search', String(sym ?? '').includes('Symbol'), String(sym ?? '').slice(0, 40));
 
+  // ---- typing cost ----
+  // `renderEditor()` runs on every change; it used to call
+  // `cm.setOption('mode', …)` unconditionally, which rebuilds the mode and
+  // re-highlights the viewport. That was 9.5 ms per character — 95x a bare
+  // CodeMirror with the same mode — and no gate noticed. 500 lines, 30 inserts:
+  // the fixed code is 1-2 ms each, the old code 9.5, so the bound sits between.
+  const typing = await cdp.eval(`(function(){
+    var cm = document.querySelector('.CodeMirror').CodeMirror;
+    var body = [];
+    for (var i = 0; i < 500; i++) body.push('x' + i + ' = ' + i + '  # a line of python, roughly 40 chars');
+    cm.setValue(body.join(String.fromCharCode(10)));
+    cm.setCursor({ line: 250, ch: 5 });
+    cm.focus();
+    var t0 = performance.now();
+    for (var k = 0; k < 30; k++) cm.replaceRange('z', cm.getCursor());
+    return Math.round(performance.now() - t0);
+  })()`);
+  const typingMs = Number(typing.value ?? -1);
+  check(
+    '30 keystrokes on a 500-line file stay under 150 ms',
+    typingMs >= 0 && typingMs < 150,
+    `${typingMs} ms total · ${(typingMs / 30).toFixed(1)} ms per character`,
+  );
+
   cdp.close();
 } catch (err) {
   check('the live UI run completed', false, (err as Error).message);

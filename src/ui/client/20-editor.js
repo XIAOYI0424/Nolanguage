@@ -23,6 +23,8 @@
   // of this file, written against a textarea, keeps working unchanged. jsdom
   // has no layout, so the test harness stays on the textarea.
   var CMEDITOR = null;
+  /** The language the CM mode was last set for; see renderEditor. */
+  var CM_MODE_LANG = null;
   // Breakpoints are painted into a dedicated CodeMirror gutter column while CM
   // is active (the app's own #gutter is hidden in that mode). Markers track
   // their lines as the user types, but cm.setValue() — which every file switch
@@ -459,7 +461,13 @@
   function renderEditor() {
     if (CMEDITOR) {
       // CM renders itself; keep its language in step with the tab's language.
-      CMEDITOR.cm.setOption('mode', cmModeFor(currentLang));
+      // Only when it actually changed: setOption('mode', ...) rebuilds the mode
+      // and re-highlights, and this function runs on *every* keystroke — it cost
+      // ~9 ms per character on an idle page, against ~0.1 ms for a bare CM.
+      if (CM_MODE_LANG !== currentLang) {
+        CMEDITOR.cm.setOption('mode', cmModeFor(currentLang));
+        CM_MODE_LANG = currentLang;
+      }
       // A file switch lands here right after the adapter's value setter ran
       // cm.setValue(), which drops every gutter marker. Repaint this file's
       // breakpoints once — not on every keystroke, since markers follow lines.
@@ -478,8 +486,19 @@
     var cl = $('curline'); if (cl) cl.style.transform = 'translateY(' + (-ta.scrollTop) + 'px)';
   }
   function updateCaret() {
-    var pos = ta.selectionStart, before = ta.value.slice(0, pos);
-    var line = before.split('\n').length, col = pos - before.lastIndexOf('\n');
+    var line, col;
+    if (CMEDITOR) {
+      // O(1): the cursor knows its line. Slicing the buffer and splitting it
+      // here is O(document) per keystroke, which showed up as 3.8 ms at 20k
+      // lines versus 1.3 ms at 500.
+      var c = CMEDITOR.cm.getCursor();
+      line = c.line + 1;
+      col = c.ch + 1;
+    } else {
+      var pos = ta.selectionStart, before = ta.value.slice(0, pos);
+      line = before.split('\n').length;
+      col = pos - before.lastIndexOf('\n');
+    }
     $('stPos').textContent = 'Ln ' + line + ', Col ' + col;
     var gl = glines.children[line - 1];
     Array.prototype.forEach.call(glines.children, function (c) { c.classList.remove('cur'); });

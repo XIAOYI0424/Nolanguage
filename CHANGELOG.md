@@ -12,6 +12,17 @@
 
 `perf-baseline.json` 记录每个语言的三个阈值（握手 / 首次有内容 / 结果稳定），门禁 `verify:startup` **只看 `stable`**：握手快不代表能答，rust-analyzer 1.0 s 回 16 项、4.7 s 才到 138 项，用握手当门禁等于用最不可控的那个数当门禁。
 
+**一次击键 9.5 ms，95 倍于裸 CodeMirror——修好后 1.2 ms。** 用 CDP 在真实页面上对比
+「app 的编辑器」与「同版本裸 CM5 + 同 mode」：500 行文本、30 次插入，app 286 ms、裸 3 ms，
+而且**与文件大小无关**（20k 行也是 263 ms）——说明不是编辑器、也不是渲染，是我们自己的
+输入回调。原因：`renderEditor()` 在每次 change 里无条件 `cm.setOption('mode', …)`，CM5 会
+因此重建模式并重跑高亮。改成只在语言真的变了才设置（`CM_MODE_LANG`），286 → 38 ms。
+顺带把 `updateCaret()` 在 CM 激活时的 `value.slice(0,pos).split('\n')` 换成 `cm.getCursor()`，
+不再每次击键扫全文。
+
+`verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
+修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
+
 **`verify:ui-live` 的 5 条红是测试坏，不是产品坏。** 手动驱动真实 app（CDP）复现：
 套件把光标放在第 13 行的 `"hello from fib(10) = "`——**字符串字面量里**的 `fib`，因为
 `indexOf('fib')` 先命中引号内那个。goto 一个字符串自然什么也不返回。改成 `lastIndexOf('fib(')`
