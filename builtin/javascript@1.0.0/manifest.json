@@ -128,5 +128,60 @@
       "npm",
       "install"
     ]
+  },
+  "scaffold": {
+    "templates": [
+      {
+        "id": "node-cli",
+        "name": "Node CLI",
+        "description": "package.json + 可执行入口",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          {
+            "key": "name",
+            "label": "包名",
+            "kind": "text",
+            "default": "demo-cli",
+            "required": true,
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "hint": "小写字母开头，只能含小写字母、数字、连字符",
+            "group": "项目坐标"
+          },
+          {
+            "key": "module",
+            "label": "模块格式",
+            "kind": "select",
+            "default": "esm",
+            "options": [
+              {
+                "value": "esm",
+                "label": "ESM (import)"
+              },
+              {
+                "value": "cjs",
+                "label": "CommonJS (require)"
+              }
+            ],
+            "group": "技术栈"
+          }
+        ],
+        "files": [
+          {
+            "path": "package.json",
+            "template": "{\n  \"name\": \"{{name}}\",\n  \"version\": \"0.1.0\",\n  \"type\": \"{{module}}\",\n  \"bin\": { \"{{name}}\": \"./index.js\" }\n}\n"
+          },
+          {
+            "path": "index.js",
+            "template": "#!/usr/bin/env node\n\nfunction main(argv) {\n  console.log('hello from {{name}}', argv.slice(2).join(' '));\n}\n\nmain(process.argv);\n"
+          },
+          {
+            "path": "README.md",
+            "template": "# {{name}}\n\n```\nnode index.js\n```\n"
+          }
+        ]
+      }
+    ]
   }
 }

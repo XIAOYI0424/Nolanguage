@@ -54,6 +54,8 @@ import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
 import { windowUsable } from '../src/desktop/handshake';
+import { TemplateRegistry } from '../src/scaffold/registry';
+import { safeRelativePath } from '../src/scaffold/types';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
 import { UsageLog } from '../src/perf/usageLog';
 import { JsonRpcConnection } from '../src/lsp/jsonrpc';
@@ -884,6 +886,72 @@ describe('lsp manager · the toolchain goes on the server PATH', () => {
     // would put the workspace first on the child's search path.
     expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
     expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('scaffold · templates', () => {
+  const spec = {
+    id: 'pkg',
+    name: 'Package',
+    suggestedDir: '{{name}}',
+    params: [
+      { key: 'name', label: 'Name', kind: 'text' as const, default: 'demo', required: true, pattern: '^[a-z]+$', hint: 'lowercase only' },
+      { key: 'tests', label: 'Tests', kind: 'boolean' as const, default: true },
+    ],
+    files: [
+      { path: '{{name}}/README.md', template: '# {{name}}' },
+      { path: '{{name}}/test.py', when: 'tests', template: 'assert "{{name}}"' },
+    ],
+  };
+
+  it('expands placeholders and skips files whose condition is false', () => {
+    const reg = new TemplateRegistry();
+    reg.setLanguage({ language: 'python', templates: [spec] });
+    const dir = mkdtempSync(join(tmpdir(), 'nl-tpl-'));
+    const out = reg.generate('python', 'pkg', { name: 'demo' }, dir);
+    expect(out.files.map((f) => f.path).sort()).toEqual(['demo/README.md', 'demo/test.py']);
+    expect(readFileSync(join(dir, 'demo/README.md'), 'utf8')).toBe('# demo');
+
+    const off = join(mkdtempSync(join(tmpdir(), 'nl-tpl2-')), 'x');
+    const out2 = reg.generate('python', 'pkg', { name: 'demo', tests: false }, off);
+    expect(out2.files.map((f) => f.path)).toEqual(['demo/README.md']);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(off, { recursive: true, force: true });
+  });
+
+  it('rejects a value that does not match the declared pattern', () => {
+    const reg = new TemplateRegistry();
+    reg.setLanguage({ language: 'python', templates: [spec] });
+    expect(() => reg.generate('python', 'pkg', { name: 'NotValid' }, mkdtempSync(join(tmpdir(), 'nl-tpl3-')))).toThrow(/lowercase/);
+  });
+
+  it('refuses a non-empty target unless told otherwise', () => {
+    const reg = new TemplateRegistry();
+    reg.setLanguage({ language: 'python', templates: [spec] });
+    const dir = mkdtempSync(join(tmpdir(), 'nl-tpl4-'));
+    writeFileSync(join(dir, 'busy.txt'), 'x');
+    expect(() => reg.generate('python', 'pkg', { name: 'demo' }, dir)).toThrow(/不是空/);
+    expect(() => reg.generate('python', 'pkg', { name: 'demo' }, dir, { allowNonEmpty: true })).not.toThrow();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a path that would escape the target directory', () => {
+    expect(() => safeRelativePath('../etc/passwd')).toThrow();
+    expect(() => safeRelativePath('C:/Windows/system32')).toThrow();
+    expect(safeRelativePath('src/main.py')).toBe('src/main.py');
+  });
+
+  it('lists unavailable templates with their reason instead of hiding them', () => {
+    const reg = new TemplateRegistry();
+    reg.setLanguage({
+      language: 'java',
+      label: 'Initializr',
+      availability: () => ({ ok: false, reason: 'network unreachable' }),
+      templates: [{ ...spec, id: 'spring', name: 'Spring Boot' }],
+    });
+    const [item] = reg.list();
+    expect(item.available).toBe(false);
+    expect(item.reason).toBe('network unreachable');
   });
 });
 

@@ -171,10 +171,10 @@ const CLIENT_DIR = join(ROOT, 'src', 'ui', 'client');
 const fragmentFiles = readdirSync(CLIENT_DIR).filter((f) => f.endsWith('.js')).sort();
 // The band keeps the client from collapsing back into one 4,200-line literal
 // (the old shape) or splintering into dozens of files. It was 6-9 until the five
-// navigation capabilities arrived; that is a coherent feature and earned its own
-// shard, so the ceiling moved by one rather than merging it into a file it does
-// not belong to.
-check('client: split into 6-10 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 10, fragmentFiles.join(','));
+// navigation capabilities arrived, then 6-10; the project wizard is the same kind
+// of coherent feature and earned its own shard too. Moving the ceiling beats
+// merging it into a file it does not belong to.
+check('client: split into 6-11 fragments', fragmentFiles.length >= 6 && fragmentFiles.length <= 11, fragmentFiles.join(','));
 check(
   'client: every fragment on disk is wired into the assembler',
   fragmentFiles.length === CLIENT_FRAGMENTS.length &&

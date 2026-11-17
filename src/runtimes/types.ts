@@ -12,6 +12,8 @@
  * of execution* (say, a WASM host) adds exactly one file here.
  */
 
+import type { ProjectTemplateSpec } from '../scaffold/types.js';
+
 /** One step of a template/directory run: a command with placeholders. */
 export interface RunStep {
   /**
@@ -37,6 +39,13 @@ export interface ScaffoldFile {
 export interface ScaffoldSpec {
   /** True when the language cannot run without these files at all. */
   required?: boolean;
+  /**
+   * Parameterised templates the project wizard offers for this language.
+   *
+   * They live in the manifest for the same reason the scaffold files do: adding
+   * a template should not be a code change. See `src/scaffold/types.ts`.
+   */
+  templates?: ProjectTemplateSpec[];
   /** Written once, before the first run of a session, when missing. */
   onFirstRun?: ScaffoldFile[];
   /** Files whose presence makes the LSP "fully capable". */

@@ -28,7 +28,8 @@
     "debugtool": 15,
     "(root)": 16,
     "commands": 10,
-    "ui": 1
+    "ui": 1,
+    "scaffold": 3
   },
   "products": {
     "debugtool": [
@@ -43,7 +44,9 @@
     "maxFileLines": 1200,
     "maxSliceFiles": 25
   },
-  "budgetExceptions": {},
+  "budgetExceptions": {
+    "panel/WorkspaceService.ts": "the workspace facade: every language slot, LSP lifecycle and panel command passes through it. Splitting it is a planned refactor; until then the wizard adds two thin methods rather than a fourth place that knows how to reach a slot."
+  },
   "purity": {
     "debugtool/protocol.ts": "the wire format itself: a collector in another process, or another language, has to implement it from this file alone",
     "debugtool/serializer.ts": "turns live objects into wire nodes; pure so a test can check the output without a debuggee",

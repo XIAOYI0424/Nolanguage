@@ -66,6 +66,81 @@
     ],
     "projectFiles": [
       "go.mod"
+    ],
+    "templates": [
+      {
+        "id": "module",
+        "name": "Go module",
+        "description": "go.mod + main.go",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{dir}}",
+        "params": [
+          {
+            "key": "module",
+            "label": "模块路径",
+            "kind": "text",
+            "default": "example.com/demo",
+            "required": true,
+            "pattern": "^[a-z0-9.-]+(/[a-z0-9._-]+)+$",
+            "hint": "形如 example.com/你的模块",
+            "group": "项目坐标"
+          },
+          {
+            "key": "dir",
+            "label": "目录名",
+            "kind": "text",
+            "default": "demo",
+            "required": true,
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "hint": "小写字母开头",
+            "group": "项目坐标"
+          },
+          {
+            "key": "goVersion",
+            "label": "Go 版本",
+            "kind": "select",
+            "default": "1.22",
+            "options": [
+              {
+                "value": "1.21",
+                "label": "1.21"
+              },
+              {
+                "value": "1.22",
+                "label": "1.22"
+              },
+              {
+                "value": "1.23",
+                "label": "1.23"
+              }
+            ],
+            "group": "技术栈"
+          },
+          {
+            "key": "withTest",
+            "label": "生成测试",
+            "kind": "boolean",
+            "default": true,
+            "group": "选项"
+          }
+        ],
+        "files": [
+          {
+            "path": "go.mod",
+            "template": "module {{module}}\n\ngo {{goVersion}}\n"
+          },
+          {
+            "path": "main.go",
+            "template": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello from {{module}}\")\n}\n"
+          },
+          {
+            "path": "main_test.go",
+            "when": "withTest",
+            "template": "package main\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {\n\tif 2+2 != 4 {\n\t\tt.Fatal(\"math is broken\")\n\t}\n}\n"
+          }
+        ]
+      }
     ]
   },
   "lsp": {

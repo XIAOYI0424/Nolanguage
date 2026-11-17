@@ -57,6 +57,7 @@ const LIVE = [
   'docs/ARCHITECTURE.md',
   'docs/添加新语言指南.md',
   'docs/lsp-manager.md',
+  'docs/project-wizard.md',
 ];
 
 /** A snapshot with a date. Allowed to be old, not allowed to be undated. */

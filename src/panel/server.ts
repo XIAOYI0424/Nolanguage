@@ -604,6 +604,37 @@ export async function main(
           reply({ kind: 'pong', at: Date.now() });
           break;
 
+        // ---------- project wizard (templates) ----------
+        case 'templatesList':
+          reply({ kind: 'templates', reqId: msg.reqId, root: workspace.root, items: workspace.templates() });
+          break;
+
+        case 'templatesGenerate': {
+          // The registry owns validation and the directory rules; this only
+          // turns a frame into a call and a result into a frame.
+          const params = (msg.params && typeof msg.params === 'object' ? msg.params : {}) as Record<string, unknown>;
+          try {
+            const result = workspace.generateTemplate(
+              String(msg.language ?? ''),
+              String(msg.templateId ?? ''),
+              params,
+              String(msg.dir ?? ''),
+              { allowNonEmpty: msg.allowNonEmpty === true },
+            );
+            reply({ kind: 'templateGenerated', reqId: msg.reqId, ok: true, dir: result.dir, files: result.files });
+          } catch (err) {
+            // The provider's own message: "包名 格式不正确" is actionable.
+            reply({
+              kind: 'templateGenerated',
+              reqId: msg.reqId,
+              ok: false,
+              message: (err as Error).message,
+              field: (err as { field?: string }).field ?? null,
+            });
+          }
+          break;
+        }
+
         // ---------- project explorer (file system) ----------
         case 'fsList':
         case 'fsRead':

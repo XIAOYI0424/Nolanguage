@@ -35,6 +35,7 @@ import docks from './client/40-docks.js?raw';
 import preview from './client/45-preview.js?raw';
 import runtime from './client/50-runtime.js?raw';
 import menus from './client/60-menus.js?raw';
+import wizard from './client/69-wizard.js?raw';
 import shell from './client/70-shell.js?raw';
 import nav from './client/68-nav.js?raw';
 
@@ -58,5 +59,6 @@ export const CLIENT_FRAGMENTS: ClientFragment[] = [
   // line, and a shard appended after that would define its functions in the
   // global scope where 30-panels' key handler cannot see them.
   { file: '68-nav.js', text: nav },
+  { file: '69-wizard.js', text: wizard },
   { file: '70-shell.js', text: shell },
 ];

@@ -47,6 +47,8 @@ import { buildManagerPlugins } from '../langs/managerPlugins.js';
 import { LspManager } from '../lsp/manager/LspManager.js';
 import { scheduleLspUpgrade, startSlotLsp, waitForUpgrade } from '../langs/lspLaunch.js';
 import { UsageLog } from '../perf/usageLog.js';
+import { templatesFor } from '../langs/templateRegistry.js';
+import type { GenerateResult, TemplateSummary } from '../scaffold/types.js';
 import { ProfileManager, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
   bufferName,
@@ -922,6 +924,21 @@ export class WorkspaceService {
    * shape as the navigation requests so "no server" stays distinguishable from
    * "nothing to change".
    */
+  /** Templates from every enabled manifest; the registry owns the rules. */
+  templates(): TemplateSummary[] {
+    return templatesFor(this.registry.all()).list();
+  }
+
+  generateTemplate(
+    language: string,
+    id: string,
+    params: Record<string, unknown>,
+    dir: string,
+    opts: { allowNonEmpty?: boolean } = {},
+  ): GenerateResult {
+    return templatesFor(this.registry.all()).generate(language, id, params, dir, opts);
+  }
+
   /** Every nav request in one place: ensure, time, record — so none goes unmeasured. */
   private async navRequest<T>(
     method: string,

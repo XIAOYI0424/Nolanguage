@@ -398,6 +398,89 @@ function validateInterpreters(value: unknown, field: string, add: (f: string, m:
   }
 }
 
+/**
+ * Template declarations, checked where the manifest is loaded.
+ *
+ * A `{{placeholder}}` that no parameter declares used to fail at generation time,
+ * on the user's screen; here it fails at install, on the person who wrote it.
+ */
+function validateTemplates(list: unknown, add: (field: string, message: string) => void): void {
+  if (!Array.isArray(list)) {
+    add('scaffold.templates', 'must be an array');
+    return;
+  }
+  const ids = new Set<string>();
+  for (const [i, raw] of list.entries()) {
+    const where = `scaffold.templates[${i}]`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      add(where, 'must be an object');
+      continue;
+    }
+    const t = raw as Record<string, unknown>;
+    const id = typeof t.id === 'string' ? t.id : '';
+    if (!id || !/^[a-z0-9][a-z0-9-]*$/.test(id)) add(`${where}.id`, 'must be a lowercase id (a-z, 0-9, -)');
+    else if (ids.has(id)) add(`${where}.id`, `duplicate template id "${id}"`);
+    else ids.add(id);
+    if (typeof t.name !== 'string' || !t.name) add(`${where}.name`, 'must be a non-empty string');
+    if (t.kind !== undefined && t.kind !== 'project' && t.kind !== 'file') add(`${where}.kind`, 'must be "project" or "file"');
+
+    const declared = new Set<string>();
+    const params = Array.isArray(t.params) ? t.params : [];
+    for (const [j, p] of params.entries()) {
+      const at = `${where}.params[${j}]`;
+      if (!p || typeof p !== 'object') {
+        add(at, 'must be an object');
+        continue;
+      }
+      const param = p as Record<string, unknown>;
+      const key = typeof param.key === 'string' ? param.key : '';
+      if (!key || !/^[a-z][a-zA-Z0-9]*$/.test(key)) add(`${at}.key`, 'must be a camelCase identifier');
+      else if (declared.has(key)) add(`${at}.key`, `duplicate param "${key}"`);
+      else declared.add(key);
+      if (typeof param.label !== 'string' || !param.label) add(`${at}.label`, 'must be a non-empty string');
+      const kind = param.kind;
+      if (kind !== 'text' && kind !== 'select' && kind !== 'boolean' && kind !== 'multiselect') {
+        add(`${at}.kind`, 'must be text | select | boolean | multiselect');
+      }
+      if ((kind === 'select' || kind === 'multiselect') && !Array.isArray(param.options)) {
+        add(`${at}.options`, 'is required for select and multiselect');
+      }
+      if (param.pattern !== undefined) {
+        try {
+          new RegExp(String(param.pattern));
+        } catch {
+          add(`${at}.pattern`, 'must be a valid regular expression');
+        }
+      }
+    }
+
+    const files = Array.isArray(t.files) ? t.files : [];
+    if (!files.length) add(`${where}.files`, 'must contain at least one file');
+    for (const [j, f] of files.entries()) {
+      const at = `${where}.files[${j}]`;
+      if (!f || typeof f !== 'object') {
+        add(at, 'must be an object');
+        continue;
+      }
+      const file = f as Record<string, unknown>;
+      if (typeof file.path !== 'string' || !file.path) add(`${at}.path`, 'must be a non-empty string');
+      if (typeof file.template !== 'string') add(`${at}.template`, 'must be a string');
+      if (file.when !== undefined) {
+        const param = params.find((p) => (p as Record<string, unknown> | undefined)?.key === file.when) as
+          | Record<string, unknown>
+          | undefined;
+        if (!param || param.kind !== 'boolean') add(`${at}.when`, 'must name a declared boolean param');
+      }
+      for (const text of [file.path, file.template]) {
+        if (typeof text !== 'string') continue;
+        for (const m of text.matchAll(/\{\{(\w+)\}\}/g)) {
+          if (!declared.has(m[1])) add(at, `uses {{${m[1]}}} but no such param is declared`);
+        }
+      }
+    }
+  }
+}
+
 export function validateManifest(raw: unknown): ManifestValidation {
   const issues: ValidationIssue[] = [];
   const add = (field: string, message: string): void => {
@@ -539,6 +622,9 @@ export function validateManifest(raw: unknown): ManifestValidation {
         }
       }
     }
+    const scaffold = m.scaffold as Record<string, unknown> | undefined;
+    if (scaffold && scaffold.templates !== undefined) validateTemplates(scaffold.templates, add);
+
     // ---- pooled manager fields ----
     if (lsp.manager !== undefined && typeof lsp.manager !== 'boolean') {
       add('lsp.manager', 'must be a boolean');

@@ -23,6 +23,19 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**项目向导：模板写在 manifest 里，UI 不认识任何语言。** 三栏（语言/来源筛选 → 模板卡片 →
+schema 表单），`Ctrl+Alt+N` 或 File 菜单打开。`scaffold.templates` 声明参数
+（`text | select | boolean | multiselect`）、`pattern` 校验、`suggestedDir`、以及 `when` 条件文件；
+装载时校验占位符与选项，写模板的人在安装插件时就知道写错了。
+
+服务端强制目录规则（绝对路径、非根、非空目录需显式允许、路径不许 `..` 或盘符、写前再算
+`relative()` 防符号链接逃逸），参数只保留 schema 声明过的键。不可用的模板**置灰不隐藏**，
+并写明原因——和 LSP 里 SKIP 必须归因是同一条原则。
+
+`scaffold` 是新的第 3 层（只依赖 node 内置），`npm test` 169 → **174**；CDP 冒烟验证了
+「打开 → 选卡片 → 创建 → 文件出现在工作区」。外部 provider（Initializr / cookiecutter）
+的形状已定，尚未接入。
+
 **长期使用数据落盘：`logs/usage.jsonl`。** 调 TTL、判断要不要换编辑器，都需要真实的一周，
 而 app.log 会滚动、混着调试输出。新文件是 append-only JSONL、一行一事件、带 schema 版本，
 按 8 MiB 轮转保留 4 份；只记语言 id / 时长 / 计数 / 尺寸，**不记源码、路径、用户名**。

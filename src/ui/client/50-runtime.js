@@ -776,6 +776,12 @@
       case 'workspaceSymbolResult':
         navOnFrame(m);
         break;
+      case 'templates':
+        wizOnTemplates(m);
+        break;
+      case 'templateGenerated':
+        wizOnGenerated(m);
+        break;
       case 'completionItemDetail':
         cmpOnDetail(m);
         break;

@@ -29,6 +29,8 @@
   // ---------- menus ----------
   var MENUS = {
     'File': [
+      { label: 'New Project from Template...', sc: 'Ctrl+Alt+N', act: function () { wizOpen(); } },
+      { sep: true },
       { label: 'Open...', sc: 'Ctrl+O', act: openNativeFile },
       { label: 'Open Folder...', act: openNativeFolder },
       { label: 'Save', sc: 'Ctrl+S', act: saveFile },
