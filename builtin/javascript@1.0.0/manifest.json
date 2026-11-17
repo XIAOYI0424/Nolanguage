@@ -181,6 +181,32 @@
             "template": "# {{name}}\n\n```\nnode index.js\n```\n"
           }
         ]
+      },
+      {
+        "id": "module-file",
+        "name": "JS 模块文件",
+        "description": "<模块>.js，导出一个函数",
+        "source": "builtin",
+        "kind": "file",
+        "suggestedDir": "",
+        "params": [
+          {
+            "key": "name",
+            "label": "模块名",
+            "kind": "text",
+            "default": "util",
+            "required": true,
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "hint": "小写字母开头，只能含小写字母、数字、连字符",
+            "group": "文件"
+          }
+        ],
+        "files": [
+          {
+            "path": "{{name}}.js",
+            "template": "export function {{name}}() {\n  return 'hello from {{name}}';\n}\n"
+          }
+        ]
       }
     ]
   }

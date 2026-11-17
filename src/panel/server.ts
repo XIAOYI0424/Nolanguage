@@ -606,7 +606,7 @@ export async function main(
 
         // ---------- project wizard (templates) ----------
         case 'templatesList':
-          reply({ kind: 'templates', reqId: msg.reqId, root: workspace.root, items: workspace.templates() });
+          reply({ kind: 'templates', reqId: msg.reqId, root: workspace.projectRoot(), items: workspace.templates() });
           break;
 
         case 'templatesGenerate': {

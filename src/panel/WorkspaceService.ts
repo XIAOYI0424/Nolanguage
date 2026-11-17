@@ -924,6 +924,16 @@ export class WorkspaceService {
    * shape as the navigation requests so "no server" stays distinguishable from
    * "nothing to change".
    */
+  /**
+   * Where the user's project lives.
+   *
+   * Not `root`: that is the temp directory the language buffers are written to,
+   * and a project generated there disappears with the session.
+   */
+  projectRoot(): string {
+    return this.opts.projectDir ?? this.rootDir ?? process.cwd();
+  }
+
   /** Templates from every enabled manifest; the registry owns the rules. */
   templates(): TemplateSummary[] {
     return templatesFor(this.registry.all()).list();

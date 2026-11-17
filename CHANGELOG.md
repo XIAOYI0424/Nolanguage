@@ -23,6 +23,14 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**文件模板：同一套机制，`kind: "file"`。** 在已有项目里新建一个文件（pytest 测试、Rust 模块、
+JS 模块、Go 测试），路径自带子目录（`tests/test_{{name}}.py`），所以表单只问文件名，生成后
+直接打开它。左侧多了「类型」筛选（全部 / 新项目 / 新文件）——**这不是新概念，只是 `kind` 的过滤**。
+
+顺带修掉一个会毁掉生成物的错误：向导的目标根原来取 `workspace.root`，那是**语言缓冲区的临时
+目录**（`nolanguage-ide-<pid>`），项目生成在那儿会随会话消失。改成 `projectRoot()`
+（`projectDir ?? rootDir ?? cwd`）。冒烟测试正是靠「生成后工作区是空的」暴露了它。
+
 **项目向导：模板写在 manifest 里，UI 不认识任何语言。** 三栏（语言/来源筛选 → 模板卡片 →
 schema 表单），`Ctrl+Alt+N` 或 File 菜单打开。`scaffold.templates` 声明参数
 （`text | select | boolean | multiselect`）、`pattern` 校验、`suggestedDir`、以及 `when` 条件文件；

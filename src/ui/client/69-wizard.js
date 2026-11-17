@@ -13,7 +13,7 @@
   //  - the target directory is a decision shown *outside* the form, because it is
   //    about the workspace, not about the template.
 
-  var WIZ = { open: false, items: [], root: '', lang: 'all', sources: null, search: '', pick: null, values: {}, error: '', busy: false };
+  var WIZ = { open: false, items: [], root: '', lang: 'all', mode: 'all', sources: null, search: '', pick: null, values: {}, error: '', busy: false };
 
   function wizStyle() {
     if ($('nlWizStyle')) return;
@@ -58,6 +58,7 @@
     WIZ.error = '';
     WIZ.search = '';
     WIZ.lang = 'all';
+    WIZ.mode = 'all';
     WIZ.sources = null;
     WIZ.items = [];
     if (!WIZ.root) WIZ.root = (typeof STATE !== 'undefined' && STATE && STATE.projectDir) || '';
@@ -97,6 +98,7 @@
     var q = WIZ.search.toLowerCase();
     return WIZ.items.filter(function (t) {
       if (WIZ.lang !== 'all' && t.language !== WIZ.lang) return false;
+      if (WIZ.mode !== 'all' && (t.kind || 'project') !== WIZ.mode) return false;
       if (WIZ.sources && !WIZ.sources[t.source || 'builtin']) return false;
       if (q && (t.name + ' ' + (t.description || '') + ' ' + t.language).toLowerCase().indexOf(q) < 0) return false;
       return true;
@@ -181,7 +183,11 @@
     var srcs = wizSources();
     var visible = wizVisible();
 
-    var left = '<div class="wiz-sec">语言</div>';
+    var left = '<div class="wiz-sec">类型</div>';
+    left += '<label class="wiz-opt"><input type="radio" name="wizMode" value="all"' + (WIZ.mode === 'all' ? ' checked' : '') + '> 全部</label>';
+    left += '<label class="wiz-opt"><input type="radio" name="wizMode" value="project"' + (WIZ.mode === 'project' ? ' checked' : '') + '> 新项目</label>';
+    left += '<label class="wiz-opt"><input type="radio" name="wizMode" value="file"' + (WIZ.mode === 'file' ? ' checked' : '') + '> 新文件</label>';
+    left += '<div class="wiz-sec">语言</div>';
     left += '<label class="wiz-opt"><input type="radio" name="wizLang" value="all"' + (WIZ.lang === 'all' ? ' checked' : '') + '> 全部</label>';
     for (var i = 0; i < langs.length; i++) {
       left += '<label class="wiz-opt"><input type="radio" name="wizLang" value="' + esc(langs[i]) + '"' + (WIZ.lang === langs[i] ? ' checked' : '') + '> ' + esc(langs[i]) + '</label>';
@@ -206,6 +212,7 @@
           + '<span class="wiz-badge">' + esc(it.source) + '</span>'
           + '<span class="wiz-badge">' + esc(it.language) + '</span></div>'
           + (it.description ? '<div class="wiz-muted">' + esc(it.description) + '</div>' : '')
+          + ((it.kind || 'project') === 'file' ? '<div class="wiz-muted">生成一个文件</div>' : '')
           + (it.available ? '' : '<div class="wiz-muted" style="color:var(--error)">不可用：' + esc(it.reason || '缺少依赖') + '</div>')
           + '</div>';
       }
@@ -218,7 +225,7 @@
       + '<input type="text" id="wizDir" value="' + esc(dir) + '">'
       + '<label class="wiz-muted" style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="wizNonEmpty"> 允许非空</label>'
       + '<button class="wiz-btn" id="wizCancel">取消</button>'
-      + '<button class="wiz-btn primary" id="wizCreate"' + (t && t.available && !WIZ.busy ? '' : ' disabled') + '>' + (WIZ.busy ? '生成中…' : '创建') + '</button>';
+      + '<button class="wiz-btn primary" id="wizCreate"' + (t && t.available && !WIZ.busy ? '' : ' disabled') + '>' + (WIZ.busy ? '生成中…' : (t && t.kind === 'file' ? '创建文件' : '创建')) + '</button>';
 
     mask.innerHTML = '<div class="wiz-box">'
       + '<div class="wiz-head"><span class="wiz-title">新建项目</span><span class="wiz-muted">Ctrl+Alt+N</span></div>'
@@ -255,6 +262,9 @@
     if (!mask) return;
     mask.querySelectorAll('input[name=wizLang]').forEach(function (r) {
       r.addEventListener('change', function () { WIZ.lang = r.value; wizPaint(); });
+    });
+    mask.querySelectorAll('input[name=wizMode]').forEach(function (r) {
+      r.addEventListener('change', function () { WIZ.mode = r.value; WIZ.pick = null; WIZ.dir = ''; wizPaint(); });
     });
     mask.querySelectorAll('input[data-src]').forEach(function (c) {
       c.addEventListener('change', function () {
@@ -397,6 +407,11 @@
     if (m && m.ok) {
       var count = (m.files || []).length;
       toast('已生成 ' + count + ' 个文件 · ' + (m.dir || ''));
+      // A single generated file is what the user wants to see: a project is not.
+      var first = (m.files || [])[0];
+      if (count === 1 && first && first.path && WIZ.root && String(m.dir || '') === String(WIZ.root).replace(/[\\/]+$/, '')) {
+        openFile(first.path);
+      }
       WIZ.dir = '';
       wizClose();
       BRIDGE.send({ kind: 'fsList', path: '.' });

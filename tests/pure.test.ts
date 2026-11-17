@@ -919,6 +919,27 @@ describe('scaffold · templates', () => {
     rmSync(off, { recursive: true, force: true });
   });
 
+  it('writes a single file for a file template, under the given directory', () => {
+    const reg = new TemplateRegistry();
+    reg.setLanguage({
+      language: 'python',
+      templates: [
+        {
+          id: 'test-file',
+          name: 'test',
+          kind: 'file' as const,
+          params: [{ key: 'name', label: 'Name', kind: 'text' as const, default: 'demo', required: true }],
+          files: [{ path: 'tests/test_{{name}}.py', template: 'import {{name}}\n' }],
+        },
+      ],
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'nl-tpl-file-'));
+    const out = reg.generate('python', 'test-file', { name: 'demo' }, dir);
+    expect(out.files.map((f) => f.path)).toEqual(['tests/test_demo.py']);
+    expect(readFileSync(join(dir, 'tests/test_demo.py'), 'utf8')).toBe('import demo\n');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('rejects a value that does not match the declared pattern', () => {
     const reg = new TemplateRegistry();
     reg.setLanguage({ language: 'python', templates: [spec] });

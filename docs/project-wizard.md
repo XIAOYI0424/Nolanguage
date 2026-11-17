@@ -1,7 +1,8 @@
 # 项目向导：manifest 声明模板，UI 不认识任何语言
 
-> 状态：P0 + 部分 P1 已实现（三栏、语言/来源筛选、schema 表单、条件文件、目标目录校验）。
-> 外部 provider（Initializr / cookiecutter / cargo-generate）尚未接入——它们的**形状**已经定好。
+> 状态：P0 + 部分 P1 已实现（三栏、类型/语言/来源筛选、schema 表单、条件文件、目标目录校验、
+> 文件模板）。外部 provider（Initializr / cookiecutter / cargo-generate）尚未接入——它们的
+> **形状**已经定好。
 
 ## 一、为什么是三栏
 
@@ -11,7 +12,7 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 | 列 | 问题 | 数据来源 |
 |---|---|---|
-| 左 | 哪门语言、哪个来源 | `TemplateSummary.language` / `.source` |
+| 左 | 新建项目还是单个文件、哪门语言、哪个来源 | `TemplateSummary.kind` / `.language` / `.source` |
 | 中 | 哪个模板 | `TemplateSummary[]` |
 | 右 | 这个模板要什么参数 | `TemplateSummary.params`（schema） |
 
@@ -41,6 +42,20 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 `kind` 支持 `text | select | boolean | multiselect`；`when` 指向一个 boolean 参数，为 false 时
 该文件不写。**加一个模板 = 改 manifest，UI 一行不动。**
+
+## 二点五、两种模板：`project` 与 `file`
+
+同一个 registry、同一套 schema，区别只在 `kind` 和「写到哪」：
+
+| | `project` | `file` |
+|---|---|---|
+| 目标 | 一个目录（工作区根 + 子目录） | 工作区根，路径由模板自己带 |
+| 例子 | `pyproject.toml` + `src/…` | `tests/test_{{name}}.py` |
+| 按钮 | 创建 | 创建文件 |
+| 生成后 | 打开资源管理器 | 直接打开那个文件 |
+
+文件模板的**子目录写在路径里**（`tests/test_x.py`），所以表单只需要问文件名，底部位置条就是
+工作区根——不再多一个「放到哪个目录」的决策。左侧「类型」筛选就是 `kind` 的过滤。
 
 ## 三、代码分层
 
@@ -74,8 +89,8 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 | 层 | 位置 |
 |---|---|
-| 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出 |
-| 端到端 | CDP 冒烟：Ctrl+Alt+N 打开 → 选卡片 → 创建 → 文件出现在工作区 |
+| 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出、文件模板只写一个文件 |
+| 端到端 | CDP 冒烟：Ctrl+Alt+N → 选卡片 → 创建 → 文件出现在工作区；文件模式 7 张卡片筛到 3 张，生成 `main_test.go` |
 | 架构 | `scaffold` 层 = 3，只能被更高层引用 |
 
 ## 七、还没做
