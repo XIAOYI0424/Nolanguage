@@ -126,6 +126,9 @@
   /** Open a location: same file → caret, other file → switch then caret. */
   function navOpen(loc) {
     var path = String(loc.uri || '').replace(/^file:\/\/\//, '').replace(/^file:\/\//, '');
+    // pyright sends a percent-encoded colon (c%3A/tmp/a.py). Used as a path that
+    // is a file which does not exist, and the jump silently does nothing.
+    try { path = decodeURIComponent(path); } catch (e) { /* keep the raw form */ }
     if (!navSameFile(currentFile, path)) {
       openFile(path);
       // The buffer loads asynchronously; place the caret once it is there.

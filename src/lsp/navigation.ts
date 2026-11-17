@@ -17,6 +17,8 @@
  * otherwise need all four branches, so the branching lives here once.
  */
 
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
 /** 0-based line/character, as LSP counts them. */
 export interface Position {
   line: number;
@@ -122,6 +124,24 @@ export const SYMBOL_KINDS: Record<number, string> = {
 };
 
 /** `Location | Location[] | LocationLink[] | null` → `Location[]`. */
+/**
+ * A `file:` URI in the form the rest of the app can open.
+ *
+ * Servers disagree: pyright sends `file:///c%3A/tmp/a.py` (percent-encoded
+ * colon, lowercase drive), the bundled stub sends `file:///C:/tmp/a.py`. A
+ * client that treats the encoded form as a path silently fails to open the file
+ * — the jump does nothing and says nothing. Normalising here gives every
+ * consumer (overlay labels, the caret jump, the tests) one shape.
+ */
+function normalizeUri(uri: string): string {
+  if (!/^file:/i.test(uri)) return uri;
+  try {
+    return pathToFileURL(fileURLToPath(uri)).href;
+  } catch {
+    return uri;
+  }
+}
+
 export function normalizeLocations(raw: unknown): Location[] {
   if (!raw) return [];
   const items = Array.isArray(raw) ? raw : [raw];
@@ -133,7 +153,7 @@ export function normalizeLocations(raw: unknown): Location[] {
     const uri = typeof o.uri === 'string' ? o.uri : typeof o.targetUri === 'string' ? o.targetUri : undefined;
     const range = (o.range ?? o.targetSelectionRange ?? o.targetRange) as Range | undefined;
     if (!uri || !range || !range.start) continue;
-    out.push({ uri, range });
+    out.push({ uri: normalizeUri(uri), range });
   }
   return out;
 }

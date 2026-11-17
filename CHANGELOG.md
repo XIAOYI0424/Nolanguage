@@ -12,6 +12,23 @@
 
 `perf-baseline.json` 记录每个语言的三个阈值（握手 / 首次有内容 / 结果稳定），门禁 `verify:startup` **只看 `stable`**：握手快不代表能答，rust-analyzer 1.0 s 回 16 项、4.7 s 才到 138 项，用握手当门禁等于用最不可控的那个数当门禁。
 
+**`verify:ui-live` 的 5 条红是测试坏，不是产品坏。** 手动驱动真实 app（CDP）复现：
+套件把光标放在第 13 行的 `"hello from fib(10) = "`——**字符串字面量里**的 `fib`，因为
+`indexOf('fib')` 先命中引号内那个。goto 一个字符串自然什么也不返回。改成 `lastIndexOf('fib(')`
+之后：Ctrl+B 从 Ln 13 跳到 **Ln 5（`def fib`）**、Alt+F7 **4 行**、焦点回到编辑器。
+剩下两条 quick fix 改成如实 SKIP——pyright 1.1.414 对 `undefined_thing()` **带不带诊断
+上下文都返回 0 个 code action**（直接对服务器验证过），这是它的能力边界。
+
+**顺带修掉一个跨文件跳转的隐患：** pyright 返回 `file:///c%3A/tmp/a.py`（冒号百分号编码、
+盘符小写），客户端把它当路径用就会打开一个不存在的文件、而且**不报错**。`normalizeLocations`
+现在统一成 `file:///c:/tmp/a.py`，`navOpen` 再兜一层 `decodeURIComponent`。协议层用假服务器
+把这条钉住：`nav: file URIs are decoded before they reach the UI`。
+
+**协议层进 CI（不依赖真实服务）：** 假服务器新增 `textDocument/references` 与
+`textDocument/codeAction`（故意返回 pyright 那种编码形式的 URI），`verify:lsp-protocol`
+20→**24**：references 三个位置、请求确实到达、URI 已解码、code action 保留 edit。
+`verify:ui-live` 里那两条 SKIP 的 plumbing 因此仍被覆盖。
+
 **击键不等，提问要等。** stub 没有 references、没有 quick fix、goto 只是文件内启发式，所以会话
 第一秒里的 Ctrl+B / Alt+F7 / Alt+Enter 会得到「没找到」。这类**显式动作**现在会等接管完成
 （`waitForUpgrade`，上限 10s），并且会提前放行那 300 ms 延迟（`startUpgradeNow`）——它本来

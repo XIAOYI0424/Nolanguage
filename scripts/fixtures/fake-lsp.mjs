@@ -80,6 +80,8 @@ function handle(msg) {
         completionProvider: { triggerCharacters: ['.'] },
         hoverProvider: true,
         definitionProvider: true,
+        referencesProvider: true,
+        codeActionProvider: true,
         // Formatting is deliberately absent: the fallback path for it is
         // exercised by the client's own indenter.
         documentFormattingProvider: false,
@@ -157,6 +159,34 @@ function handle(msg) {
       if (HANG.has('textDocument/definition')) return;
       reply(msg.id, [
         { uri: msg.params?.textDocument?.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } },
+      ]);
+      return;
+    // The next three exist so the *plumbing* is covered in CI: the request goes
+    // out, the result is normalised, the frame carries what the UI needs. They
+    // deliberately return URIs in the form pyright uses (percent-encoded drive,
+    // lowercase) — that is the shape that broke navigation in the live suite.
+    case 'textDocument/references':
+      if (HANG.has('textDocument/references')) return;
+      reply(msg.id, [
+        { uri: 'file:///c%3A/tmp/fake-a.py', range: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 } } },
+        { uri: 'file:///c%3A/tmp/fake-a.py', range: { start: { line: 5, character: 4 }, end: { line: 5, character: 7 } } },
+        { uri: 'file:///c%3A/tmp/fake-b.py', range: { start: { line: 2, character: 0 }, end: { line: 2, character: 3 } } },
+      ]);
+      return;
+    case 'textDocument/codeAction':
+      if (HANG.has('textDocument/codeAction')) return;
+      reply(msg.id, [
+        {
+          title: 'Replace with alpha',
+          kind: 'quickfix',
+          edit: {
+            changes: {
+              'file:///c%3A/tmp/fake-a.py': [
+                { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: 'alpha' },
+              ],
+            },
+          },
+        },
       ]);
       return;
     case '$/cancelRequest': {

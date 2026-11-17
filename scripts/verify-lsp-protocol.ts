@@ -232,6 +232,36 @@ async function main(): Promise<void> {
     await manager.close();
   }
 
+  // ================================================================ navigation
+  // The plumbing the live UI needs: request out, result normalised, frame
+  // carrying what the overlay and the caret jump use. This runs in CI because it
+  // needs no real server — and it is where the URI shape is pinned.
+  {
+    const log = join(SANDBOX, 'nav.log');
+    const { manager, entry, uri } = await setup({ id: 'nav', log }, 'nav');
+
+    const refs = await entry.references(uri, { line: 0, character: 1 }, true);
+    check(
+      'nav: references come back as locations',
+      refs.ok && refs.value.length === 3,
+      refs.ok ? `${refs.value.length} location(s)` : refs.reason,
+    );
+    check('nav: the request reached the server', frames(log, 'textDocument/references') === 1);
+
+    // pyright sends `file:///c%3A/…`; a client that uses that as a path opens
+    // nothing at all. The engine hands over a decoded form.
+    const firstUri = refs.ok && refs.value[0] ? refs.value[0].uri : '';
+    check('nav: file URIs are decoded before they reach the UI', !!firstUri && !/%3A/i.test(firstUri), firstUri);
+
+    const actions = await entry.codeActions(uri, { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, []);
+    check(
+      'nav: a code action keeps its edit',
+      actions.ok && actions.value.length === 1 && !!actions.value[0]?.edits,
+      actions.ok ? `${actions.value.length} action(s)` : actions.reason,
+    );
+    await manager.close();
+  }
+
   // ====================================================== initializationOptions
   // The manifest field was silently dropped before; a plugin could declare it and
   // have nothing reach the server.

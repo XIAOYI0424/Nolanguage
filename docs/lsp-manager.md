@@ -219,6 +219,11 @@ clangd 最快且几乎不用等（81 ms 起，7 ms 出结果）；marksman 慢�
 击键。这类显式动作走 `waitForUpgrade`（上限 10 s），并提前放行那 300 ms 延迟
 （`startUpgradeNow`）；补全与 hover 仍然由 stub 立刻回答，不等。
 
+**导航结果里的 URI 只有一种形状。** pyright 返回 `file:///c%3A/tmp/a.py`（冒号编码、盘符
+小写），bundled stub 返回 `file:///C:/tmp/a.py`。客户端把前者当路径用，会打开一个不存在的
+文件而且不报错——跳转「什么也没发生」。`normalizeLocations` 统一成 `pathToFileURL(fileURLToPath(uri))`
+的形式，`navOpen` 再兜一层 `decodeURIComponent`；`verify:lsp-protocol` 用假服务器钉住这条。
+
 **接管要靠内容证明，不能靠状态字段。** 门禁对同一个位置做两次同样的请求：stub 的 `pri` 返回 30 项（`Exception` / `False` / `None`…）、hover 是 `**builtin** print`；接管后同一个 `pri` 返回 8 项（`copyright` / `StopIteration`…）、hover 是 `(function) def print(...)`。两条断言都要求**两个方向都有差异**（新增的候选、消失的候选），所以「`slot.lsp` 换成 pyright 了、但请求还落在 stub 上」这种 bug 会红。只断言 `serverName === 'pyright'` 的话，它永远不会红——用户会一直看到内置名补全，而 pyright 在后台空转。
 
 ### 7.2 版本探测：缓存 + 签名失效
