@@ -53,6 +53,7 @@ import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/s
 import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
+import { windowUsable } from '../src/desktop/handshake';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
 import { UsageLog } from '../src/perf/usageLog';
 import { JsonRpcConnection } from '../src/lsp/jsonrpc';
@@ -883,6 +884,29 @@ describe('lsp manager · the toolchain goes on the server PATH', () => {
     // would put the workspace first on the child's search path.
     expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
     expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('desktop · is the running window usable', () => {
+  it('a handle with no connected page is not usable', () => {
+    // The bug this exists for: an Edge tree whose page never loaded shows a blank
+    // frame, every later launch says "already running", and the installer cannot
+    // replace the exe — the user has no way out except Task Manager.
+    expect(windowUsable(true, 0)).toBe(false);
+  });
+
+  it('a handle with a connected page is usable', () => {
+    expect(windowUsable(true, 1)).toBe(true);
+    expect(windowUsable(true, 3)).toBe(true);
+  });
+
+  it('no handle is never usable, whatever the server says', () => {
+    expect(windowUsable(false, 2)).toBe(false);
+  });
+
+  it('an old server that does not report clients is trusted', () => {
+    // Otherwise every launch against a pre-clients build would take the port over.
+    expect(windowUsable(true, undefined)).toBe(true);
   });
 });
 

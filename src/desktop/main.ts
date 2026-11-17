@@ -36,7 +36,7 @@ process.env.PANEL_NO_DEMO ??= '1';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { openSystemBrowser, openWebView, webViewProfileDir, type WebViewHandle } from './WebViewHost.js';
-import { decideLaunch, launchUrl, type BuildIdentity } from './handshake.js';
+import { decideLaunch, launchUrl, windowUsable, type BuildIdentity } from './handshake.js';
 import { APP_VERSION } from '../version.js';
 import { appDataPath } from '../util/appData.js';
 import { bootLog, bootLogError, installBootLog } from '../util/bootLog.js';
@@ -208,6 +208,8 @@ interface RunningServer {
   base: string;
   /** `/health` build block; absent on builds older than 0.7.1. */
   build?: BuildIdentity;
+  /** Connected pages; absent on builds that did not report it. */
+  clients?: number;
 }
 
 /**
@@ -225,12 +227,12 @@ async function runningInstance(): Promise<RunningServer | undefined> {
   try {
     const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1200) });
     if (!res.ok) return undefined;
-    const body = (await res.json()) as { status?: string; build?: BuildIdentity };
+    const body = (await res.json()) as { status?: string; build?: BuildIdentity; clients?: number };
     if (body?.status !== 'ok') return undefined;
     // `build` is absent on servers older than 0.7.1. Reporting it as
     // `undefined` (rather than assuming a match) is what lets the handshake
     // notice that the answering instance cannot prove it is this build.
-    return { base, build: body.build };
+    return { base, build: body.build, clients: typeof body.clients === 'number' ? body.clients : undefined };
   } catch {
     return undefined;
   }
@@ -274,9 +276,13 @@ async function main(): Promise<void> {
     // its app window used to make this branch exit silently, so the second
     // double-click did nothing at all ("有进程，没窗口"). Confirm a handle.
     const recorded = session?.browserPid;
-    const windowAlive = recorded
+    const handleAlive = recorded
       ? (await findVisibleWindows([recorded])).length > 0
       : (await findVisibleWindows(await findWindowProcesses(webViewProfileDir()))).length > 0;
+    // A handle is not a page: an Edge tree whose page never connected renders
+    // nothing, and treating it as alive is what left "有进程，没窗口" with no way
+    // out except Task Manager.
+    const windowAlive = windowUsable(handleAlive, running.clients);
 
     // Liveness is not identity. The instance that answers may be the *previous*
     // build — the freshly installed exe then exits and the user keeps looking

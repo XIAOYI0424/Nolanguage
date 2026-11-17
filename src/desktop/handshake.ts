@@ -76,6 +76,20 @@ export function sameBuild(a: BuildIdentity | null | undefined, b: BuildIdentity 
   return true;
 }
 
+/**
+ * Is the running instance's window worth keeping?
+ *
+ * A visible handle is not enough: if the page never connected, the frame is
+ * blank (or stale) and the user has nothing to look at — yet every later launch
+ * would report "already running" and open nothing, and the installer could not
+ * replace the exe. `clients` is absent on servers older than this field; treat
+ * "unknown" as alive so an old instance is not taken over on every launch.
+ */
+export function windowUsable(handleAlive: boolean, clients: number | undefined): boolean {
+  if (!handleAlive) return false;
+  return clients === undefined || clients > 0;
+}
+
 /** Decide what a launch should do about an instance that already answers. */
 export function decideLaunch(input: HandshakeInput): LaunchDecision {
   const running = input.runningBuild ?? null;
