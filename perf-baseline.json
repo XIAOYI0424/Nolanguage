@@ -162,7 +162,7 @@
         4481
       ],
       "items": 58,
-      "note": "pooled manager path; the 2 s handshake is the JVM starting, not the manager. `freshDataDir` wipes the Eclipse workspace per launch, so every run pays a full import — 4.5 s quiet, 16 s on a host running three other builds.",
+      "note": "pooled manager path; the 2 s handshake is the JVM starting, not the manager. `freshDataDir` wipes the Eclipse workspace per launch, so every run pays a full import. Measured: 1/3/6 trivial modules with a fresh workspace all land at 6.3-7.0 s stable, i.e. the cost is fixed (JVM + LS init + first request), not proportional to module count.",
       "gateMs": 30000
     }
   }
