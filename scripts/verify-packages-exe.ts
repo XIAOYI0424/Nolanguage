@@ -30,7 +30,10 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 // release candidate, a machine with the exe somewhere else entirely. Defaults
 // to the build output so `npm run verify:packages-exe` just works.
 const EXE = process.env.NOLANGUAGE_EXE ?? join(ROOT, 'dist', 'Nolanguage.exe');
-const SANDBOX = join(ROOT, '.tmp', 'verify-packages-exe');
+// Per-process: a shared directory makes the start-up `rmSync` hit the sandbox's
+// bulk-delete guard after a few runs, which shows up as a suite that dies
+// before its first check.
+const SANDBOX = join(ROOT, '.tmp', 'verify-packages-exe', String(process.pid));
 const PROJECT = join(SANDBOX, 'project');
 const HOME = join(SANDBOX, 'home');
 const TMP = join(SANDBOX, 'tmp');

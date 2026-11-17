@@ -33,7 +33,11 @@ import { ContentHashStrategy, GitDiffStrategy, resolveDirty } from '../src/lsp/m
 import type { DirtyReport, LanguagePlugin } from '../src/lsp/manager/types.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SANDBOX = join(ROOT, '.tmp', 'lsp-manager');
+// Per-process: these suites build a jdtls workspace with thousands of files,
+// and a shared directory makes the start-up `rmSync` hit the sandbox's
+// bulk-delete guard — which surfaces as a suite that dies before its first
+// check (0/0) when it runs after the others.
+const SANDBOX = join(ROOT, '.tmp', 'lsp-manager', String(process.pid));
 const FIXTURE = join(ROOT, 'scripts', 'fixtures', 'fake-lsp.mjs');
 const JAVA_MANIFEST = join(ROOT, 'examples', 'java@1.0.0', 'manifest.json');
 const JDTLS_DEFAULT = join(ROOT, '.tmp', 'langdeps', 'jdtls', 'bin', 'jdtls.bat');

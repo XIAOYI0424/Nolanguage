@@ -365,7 +365,20 @@ async function testWorkspaceApply(): Promise<void> {
   // The budget sees every language, and an over-budget install sheds a quiet one.
   const budget = ws.resourceSummary();
   check('apply: the resource summary covers every language', budget.profiles.length === ids().split(',').length, String(budget.profiles.length));
-  check('apply: Python LSP starts eagerly (primary language)', budget.profiles.some((p) => p.languageId === 'python' && p.eager));
+  // The flag the budget reports has to be the one the manifest declares, not a
+  // hard-coded list: python used to be the eager language, and turning that off
+  // must show up here instead of in a status bar that keeps waiting for it.
+  const eagerById = new Map(ws.languages.all().map((m) => [m.id, m.lsp?.eager === true]));
+  check(
+    'apply: the budget reports the eager flag the manifests declare',
+    budget.profiles.every((p) => p.eager === eagerById.get(p.languageId)),
+    budget.profiles.map((p) => `${p.languageId}=${p.eager}`).join(' '),
+  );
+  check(
+    'apply: python is not eager (its first keystroke is answered by the stub)',
+    eagerById.get('python') === false,
+    `python eager=${String(eagerById.get('python'))}`,
+  );
 
   await ws.close();
   await kernel.stop();

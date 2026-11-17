@@ -40,11 +40,12 @@ import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { setExtensionManifests } from '../langs/extensionIndex.js';
 import { unsupported, type CodeAction, type Location, type NavResult, type SignatureHelp, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
-import { discoverBinary, probeVersion, type BinaryResolution } from '../langs/discover.js';
+import { discoverBinary, type BinaryResolution } from '../langs/discover.js';
+import { cachedVersion } from '../langs/versionCache.js';
 import { resolveServer } from '../langs/serverInstall.js';
 import { buildManagerPlugins } from '../langs/managerPlugins.js';
 import { LspManager } from '../lsp/manager/LspManager.js';
-import { startSlotLsp } from '../langs/lspLaunch.js';
+import { scheduleLspUpgrade, startSlotLsp } from '../langs/lspLaunch.js';
 import { ProfileManager, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
   bufferName,
@@ -341,10 +342,16 @@ export class WorkspaceService {
       queue: Promise.resolve(),
     };
     // Resolve the version now: it needs a process, and status() must stay
-    // synchronous for the UI.
+    // synchronous for the UI. Cached by binary signature, so only an install
+    // that actually changed pays for the spawn.
     const versionArgs = manifest.run?.versionArgs;
     if (versionArgs && toolchain.bin && toolchain.source !== 'missing') {
-      slot.version = (await probeVersion(toolchain.bin, versionArgs)) ?? undefined;
+      slot.version = (await cachedVersion({
+        home: this.registry.home,
+        id,
+        bin: toolchain.bin,
+        args: versionArgs,
+      })) ?? undefined;
     }
     this.slots.set(id, slot);
     this.resources.noteUse(id);
@@ -613,7 +620,23 @@ export class WorkspaceService {
       },
       slot,
     );
+    // A manifest that ships a stub got its answer from it; the real server starts
+    // just after (see `scheduleLspUpgrade` for why it is not the same tick).
+    if (slot.upgrade) {
+      scheduleLspUpgrade({ kernel: this.kernel, rootDir: this.rootDir }, slot, () => this.slots.get(slot.id) === slot);
+    }
   }
+
+  /**
+   * Swap the stub for the real server, once it is up.
+   *
+   * Everything here is about not clobbering someone else's work: the slot may
+   * have been released or restarted while this server was starting, in which
+   * case the new client is stopped instead of installed. Without that check a
+   * "restart language server" during pyright's startup would leave an orphan
+   * process holding 400 MB and no one pointing at it.
+   */
+
 
   // ---------------- public API ----------------
 
@@ -1101,6 +1124,10 @@ export class WorkspaceService {
     if (slot.manifest.lsp?.manager) await this.lspManager.release(id).catch(() => undefined);
     await slot.lsp?.stop().catch(() => undefined);
     slot.lsp = undefined;
+    // A server that was still starting when this ran checks `slot.lsp` before
+    // installing itself, so clearing the descriptor is enough: it will see that
+    // it no longer owns the slot and stop itself.
+    slot.upgrade = undefined;
     slot.lspStarting = undefined;
     slot.lspPending = true;
     if (!wasUp) return; // Already down; nothing to announce.

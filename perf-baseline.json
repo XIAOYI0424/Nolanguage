@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "measuredAt": "2026-11-17",
+  "machine": "Windows 11 · Node 22 · JDK 25.0.2 · go1.27.2 · rustc 1.99.1 · clangd 23.1.0 · pyright 1.1.414",
+  "policy": "Gate on `stableMs`. `handshakeMs` and `firstMs` are recorded, not gated: they move with the JVM, the disk cache and the project's import, so a gate on them goes red for reasons the product does not control. `stableMs` is the first moment the answer stopped growing — the server is done loading, which is what a user waits for.",
+  "tolerance": "stable must stay within its `gateMs`; entries without one default to max * 2 + 1000 ms. The gate is a regression alarm, not a stopwatch: the reference numbers were taken on a quiet host, and a busy one moves every server by 2-4x. `gateMs` is set explicitly where the cold cost is known to be large and host-dependent (jdtls re-imports its Eclipse workspace on every launch; rust-analyzer indexes from scratch).",
+  "app": {
+    "coldMs": 3025,
+    "warmMs": [
+      593,
+      634
+    ],
+    "panelMs": 3,
+    "note": "spawn -> /health 200 for the packaged exe. warm = every launch after the first, with the toolchain-version cache present: 593-634 ms after `eager: false` (was 1055-1118 ms while `workspace.init()` waited for the python server). coldMs is the first run after a rebuild, dominated by reading the 85 MiB image rather than by init."
+  },
+  "firstKeystroke": {
+    "python": {
+      "targetMs": 500,
+      "gateMs": 900,
+      "answeredBy": "bundled stub (nolanguage-py)",
+      "measuredMs": [
+        415,
+        417
+      ],
+      "note": "With `eager: false` nothing starts at boot, so the first key pays for a server. The stub answers while the real one handshakes; pyright takes over afterwards. 500 ms is the target and is what the product does on an idle machine (415-417 ms measured). The hard gate is 900 ms because the stub's own process start is 400-450 ms on Windows: a 500 ms limit would fail the same code on a busy host (532 ms observed), which measures the machine rather than the product. A real regression doubles both numbers, so 900 still catches it."
+    }
+  },
+  "languages": {
+    "c": {
+      "server": "clangd",
+      "handshakeMs": [
+        76,
+        91
+      ],
+      "firstMs": [
+        128,
+        157
+      ],
+      "stableMs": [
+        508,
+        539
+      ],
+      "items": 2
+    },
+    "cpp": {
+      "server": "clangd",
+      "handshakeMs": [
+        75,
+        91
+      ],
+      "firstMs": [
+        128,
+        157
+      ],
+      "stableMs": [
+        516,
+        526
+      ],
+      "items": 2
+    },
+    "rust": {
+      "server": "rust-analyzer",
+      "handshakeMs": [
+        73,
+        88
+      ],
+      "firstMs": [
+        1044,
+        1218
+      ],
+      "stableMs": [
+        4677,
+        5010
+      ],
+      "items": 138,
+      "note": "answers 16 items at ~1.2 s and 138 at ~5 s: the gap between `first` and `stable` is the whole point of having both. The index is rebuilt whenever the cache directory is new.",
+      "gateMs": 15000
+    },
+    "javascript": {
+      "server": "tsserver",
+      "handshakeMs": [
+        245,
+        284
+      ],
+      "firstMs": [
+        746,
+        753
+      ],
+      "stableMs": [
+        1786,
+        1913
+      ],
+      "items": 40
+    },
+    "python": {
+      "server": "pyright",
+      "handshakeMs": [
+        230,
+        238
+      ],
+      "firstMs": [
+        897,
+        926
+      ],
+      "stableMs": [
+        1143,
+        1172
+      ],
+      "items": 9
+    },
+    "go": {
+      "server": "gopls",
+      "handshakeMs": [
+        94,
+        97
+      ],
+      "firstMs": [
+        560,
+        1134
+      ],
+      "stableMs": [
+        694,
+        1259
+      ],
+      "items": 29
+    },
+    "markdown": {
+      "server": "marksman",
+      "handshakeMs": [
+        893,
+        1039
+      ],
+      "firstMs": [
+        960,
+        1116
+      ],
+      "stableMs": [
+        1098,
+        1269
+      ],
+      "items": 1
+    },
+    "java": {
+      "server": "jdtls",
+      "handshakeMs": [
+        1950,
+        2056
+      ],
+      "firstMs": [
+        3228,
+        3691
+      ],
+      "stableMs": [
+        4137,
+        4481
+      ],
+      "items": 58,
+      "note": "pooled manager path; the 2 s handshake is the JVM starting, not the manager. `freshDataDir` wipes the Eclipse workspace per launch, so every run pays a full import — 4.5 s quiet, 16 s on a host running three other builds.",
+      "gateMs": 30000
+    }
+  }
+}

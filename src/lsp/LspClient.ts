@@ -14,6 +14,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { planSpawn } from '../util/spawnPlan.js';
+import { killTree } from '../util/killTree.js';
 import { performance } from 'node:perf_hooks';
 import { existsSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -628,9 +629,14 @@ export class LspClient extends EventEmitter {
         });
       });
       if (!exited) {
-        child.kill();
+        // `child.kill()` is TerminateProcess on one pid. pyright and tsserver
+        // launch through a `.cmd` shim (`cmd /d /s /c node …`), so killing the
+        // wrapper leaves the real server running — and it still holds the stdio
+        // pipes, which means this process never sees the child exit and never
+        // exits either. `taskkill /T /F` walks the tree.
+        killTree(child.pid);
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => resolve(), 1500);
+          const timer = setTimeout(() => resolve(), 2000);
           child.once('exit', () => {
             clearTimeout(timer);
             resolve();

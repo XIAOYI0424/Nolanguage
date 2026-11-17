@@ -24,16 +24,16 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Kernel } from '../src/kernel/Kernel.js';
-import { buildManagerPlugin } from '../src/langs/managerPlugins.js';
-import { discoverBinary } from '../src/langs/discover.js';
 import type { LanguageManifest } from '../src/langs/manifest.js';
-import { resolveServer } from '../src/langs/serverInstall.js';
-import { toolchainEnv } from '../src/langs/toolchainEnv.js';
-import { resolveBundledFallback } from '../src/lsp/bundledFallback.js';
-import { LspClient, fileUri, type LspLaunchSpec } from '../src/lsp/LspClient.js';
+import { LspClient, fileUri } from '../src/lsp/LspClient.js';
+import { launchFor, targets } from './lib/lspProbe.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SANDBOX = join(ROOT, '.tmp', 'lsp-semantics');
+// Per-process: these suites build a jdtls workspace with thousands of files,
+// and a shared directory makes the start-up `rmSync` hit the sandbox's
+// bulk-delete guard — which surfaces as a suite that dies before its first
+// check (0/0) when it runs after the others.
+const SANDBOX = join(ROOT, '.tmp', 'lsp-semantics', String(process.pid));
 /** The product's own home, so a `nlg lang server install` is picked up here. */
 const HOME = process.env.NOLANGUAGE_HOME ?? join(homedir(), '.nolanguage');
 
@@ -54,156 +54,6 @@ function skip(name: string, why: string): void {
   console.log(`SKIP  ${name}  — ${why}`);
 }
 const sleep = (ms: number): Promise<void> => new Promise((ok) => setTimeout(ok, ms));
-
-interface Probe {
-  file: string;
-  line: number;
-  character: number;
-  /** Any one of these must appear. */
-  expect: string[];
-}
-
-interface Target {
-  id: string;
-  manifest: string;
-  files: Record<string, string>;
-  complete: Probe;
-  /** Omitted when the server has nothing to say at that position. */
-  hover?: Probe;
-  broken: { file: string; text: string; expect: string[] };
-}
-
-const targets: Target[] = [
-  {
-    id: 'python',
-    manifest: 'builtin/python@1.0.0/manifest.json',
-    files: { 'main.py': 'print("x")\n' },
-    // `pri|nt` completes; `pr|int` hovers. pyright says "(function) def print",
-    // the bundled stub says "builtin" — both are specific, so both are accepted.
-    complete: { file: 'main.py', line: 0, character: 3, expect: ['print'] },
-    hover: { file: 'main.py', line: 0, character: 2, expect: ['builtin', '(function) def print'] },
-    broken: { file: 'main.py', text: 'def broken(:\n    pass\n', expect: ['SyntaxError', 'Expected parameter name'] },
-  },
-  {
-    id: 'go',
-    manifest: 'builtin/go@1.0.0/manifest.json',
-    files: {
-      'go.mod': 'module demo\n\ngo 1.21\n',
-      'main.go': 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi")\n\tfmt.\n}\n',
-    },
-    complete: { file: 'main.go', line: 6, character: 5, expect: ['Println'] },
-    hover: { file: 'main.go', line: 5, character: 6, expect: ['func fmt.Println'] },
-    broken: { file: 'main.go', text: 'package main\n\nfunc main() {\n\tundefinedThing()\n}\n', expect: ['undefined'] },
-  },
-  {
-    id: 'javascript',
-    manifest: 'builtin/javascript@1.0.0/manifest.json',
-    files: { 'package.json': '{"name":"demo"}\n', 'main.js': 'const nums = [1, 2, 3];\nnums.\n' },
-    complete: { file: 'main.js', line: 1, character: 5, expect: ['filter'] },
-    hover: { file: 'main.js', line: 0, character: 7, expect: ['number[]'] },
-    broken: { file: 'main.js', text: 'const x = ;\n', expect: ['expected'] },
-  },
-  {
-    id: 'markdown',
-    manifest: 'builtin/markdown@1.0.0/manifest.json',
-    files: {
-      'README.md': '# Demo\n\nLink to [](other.md).\n',
-      'other.md': '# Other\n\nText.\n',
-      '.marksman.toml': '',
-    },
-    // marksman completes link targets inside `](`, and reports a link whose
-    // target does not exist. It has no hover for links, so that probe is omitted.
-    complete: { file: 'README.md', line: 2, character: 12, expect: ['other.md'] },
-    broken: { file: 'README.md', text: '# Demo\n\nSee [gone](./nope.md).\n', expect: ['non-existent document'] },
-  },
-  {
-    id: 'rust',
-    manifest: 'examples/rust@1.0.0/manifest.json',
-    files: {
-      'Cargo.toml': '[package]\nname = "demo"\nversion = "0.0.0"\nedition = "2021"\n\n[[bin]]\nname = "demo"\npath = "main.rs"\n',
-      'main.rs': 'fn main() {\n    let s = String::new();\n    s.\n}\n',
-    },
-    complete: { file: 'main.rs', line: 2, character: 6, expect: ['as_bytes'] },
-    hover: { file: 'main.rs', line: 1, character: 9, expect: ['String'] },
-    broken: { file: 'main.rs', text: 'fn main() {\n    let x: i32 = "s";\n}\n', expect: ['mismatched'] },
-  },
-  {
-    id: 'c',
-    manifest: 'examples/c@1.0.0/manifest.json',
-    files: { 'main.c': 'struct P { int x; int y; };\n\nint main(void) {\n    struct P p;\n    p.\n}\n' },
-    // No `#include` on purpose: clangd without a compile database cannot find the
-    // platform's libc headers, and a header error would drown the assertion.
-    complete: { file: 'main.c', line: 4, character: 6, expect: ['x', 'y'] },
-    hover: { file: 'main.c', line: 3, character: 14, expect: ['Type: `struct P`'] },
-    broken: { file: 'main.c', text: 'int main(void) {\n    return undefined_var;\n}\n', expect: ['undeclared identifier'] },
-  },
-  {
-    id: 'cpp',
-    manifest: 'examples/cpp@1.0.0/manifest.json',
-    files: { 'main.cpp': 'struct P { int x; int y; };\n\nint main() {\n    P p;\n    p.\n}\n' },
-    complete: { file: 'main.cpp', line: 4, character: 6, expect: ['x', 'y'] },
-    hover: { file: 'main.cpp', line: 3, character: 6, expect: ['Type: `P`'] },
-    broken: { file: 'main.cpp', text: 'int main() {\n    return undefined_var;\n}\n', expect: ['undeclared identifier'] },
-  },
-  {
-    id: 'java',
-    manifest: 'examples/java@1.0.0/manifest.json',
-    files: {
-      'pom.xml':
-        '<project><modelVersion>4.0.0</modelVersion><groupId>d</groupId><artifactId>d</artifactId><version>1.0.0</version></project>\n',
-      'src/main/java/demo/App.java':
-        'package demo;\n\nimport java.util.ArrayList;\nimport java.util.List;\n\npublic class App {\n    public static void main(String[] args) {\n        List<String> names = new ArrayList<>();\n        names.add("a");\n        names.\n    }\n}\n',
-    },
-    complete: { file: 'src/main/java/demo/App.java', line: 9, character: 14, expect: ['add('] },
-    hover: { file: 'src/main/java/demo/App.java', line: 8, character: 12, expect: ['List<String>'] },
-    broken: {
-      file: 'src/main/java/demo/App.java',
-      text: 'package demo;\n\npublic class App {\n    public static void main(String[] args) {\n        int x = undefinedThing;\n    }\n}\n',
-      expect: ['cannot be resolved'],
-    },
-  },
-];
-
-/** The launch spec the product would build for this manifest. */
-async function launchFor(manifest: LanguageManifest, root: string): Promise<LspLaunchSpec | undefined> {
-  const spec = manifest.lsp;
-  if (!spec) return undefined;
-  const toolchain = discoverBinary(manifest.run?.discovery, { root }).bin;
-  const env = toolchainEnv(toolchain);
-
-  if (spec.manager) {
-    const plugin = await buildManagerPlugin(manifest, { home: HOME, workspaceRoot: root });
-    const cfg = plugin?.lspConfig(root);
-    if (!cfg) return undefined;
-    return {
-      languageId: cfg.languageId,
-      serverName: cfg.serverName,
-      command: cfg.command,
-      args: cfg.args,
-      cwd: cfg.cwd,
-      ...(cfg.env ? { env: cfg.env } : {}),
-      ...(cfg.initializationOptions ? { initializationOptions: cfg.initializationOptions } : {}),
-    };
-  }
-
-  const found = resolveServer(manifest, HOME, { root });
-  if (found.source !== 'missing' && found.bin) {
-    return {
-      languageId: spec.languageId ?? manifest.id,
-      serverName: spec.serverName ?? manifest.id,
-      command: found.bin,
-      args: spec.args ?? [],
-      cwd: root,
-      ...(env ? { env } : {}),
-      ...(spec.initializationOptions ? { initializationOptions: spec.initializationOptions } : {}),
-    };
-  }
-  if (spec.bundledFallback) {
-    const fb = resolveBundledFallback(spec.bundledFallback, { languageId: manifest.id, toolchain });
-    if (fb) return { ...fb, cwd: root };
-  }
-  return undefined;
-}
 
 function hoverText(hover: { contents: unknown } | null): string {
   if (!hover) return '';
@@ -231,7 +81,7 @@ for (const t of targets) {
     writeFileSync(full, text);
   }
 
-  const launch = await launchFor(manifest, root);
+  const { launch } = await launchFor(manifest, root, HOME);
   if (!launch) {
     skip(`${t.id}: semantic baseline`, `${manifest.lsp?.serverName ?? t.id} is not installed`);
     continue;

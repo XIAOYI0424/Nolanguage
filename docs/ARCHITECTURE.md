@@ -2,7 +2,7 @@
 
 > 版本 0.7.24 · 由 `scripts/verify-architecture.ts` 机械执行，不是建议。
 
-这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`185 files · 549 imports · 18/18`，**零个已声明环**。
+这份文档描述**约束**，不是描述现状。现状由 `npm run verify:arch` 打印：`187 files · 554 imports · 18/18`，**零个已声明环**。
 
 ---
 

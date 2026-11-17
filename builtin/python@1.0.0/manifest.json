@@ -92,7 +92,7 @@
     "args": [
       "--stdio"
     ],
-    "eager": true,
+    "eager": false,
     "bundledFallback": {
       "languageId": "python",
       "serverName": "nolanguage-py",

@@ -42,6 +42,23 @@ export interface LaunchSlot {
   lsp?: LspLike;
   lspError?: string;
   lspNote?: string;
+  /** Set when the fast tier answered and a real server is still coming up. */
+  upgrade?: LspUpgrade;
+}
+
+/**
+ * A real server that is still starting behind a stub that already answered.
+ *
+ * `stub` is kept so the caller can tell "the slot still holds the fast tier"
+ * from "someone restarted it while I was starting" — swapping in that case would
+ * clobber a newer client and leak a process.
+ */
+export interface LspUpgrade {
+  launch: LspLaunchSpec;
+  stub: LspLike;
+  /** Buffer text at start time; the next request re-syncs the real content. */
+  text: string;
+  note: string;
 }
 
 export interface LaunchDeps {
@@ -64,6 +81,8 @@ export async function startSlotLsp(deps: LaunchDeps, slot: LaunchSlot): Promise<
 
   let launch: LspLaunchSpec | undefined = deps.launchOverride?.[slot.id];
   let note: string | undefined;
+  /** True when `launch` is the bundled stub, not a real server. */
+  let fromStub = false;
 
   if (!launch) {
     if (spec?.manager) {
@@ -123,6 +142,9 @@ export async function startSlotLsp(deps: LaunchDeps, slot: LaunchSlot): Promise<
       const fallback = resolveBundledFallback(spec.bundledFallback, { languageId: slot.id, toolchain });
       if (fallback) {
         launch = fallback;
+        // The stub *is* the server here. Two tiers would mean starting it twice:
+        // once as the fast answer, once as the "real" server it is upgrading to.
+        fromStub = true;
         note = `bundled ${fallback.serverName}`;
       } else {
         slot.lspError = spec.degradedNote ?? `bundled fallback for "${slot.id}" could not be resolved`;
@@ -144,10 +166,53 @@ export async function startSlotLsp(deps: LaunchDeps, slot: LaunchSlot): Promise<
   }
   if (!launch) return;
 
+  const text = await readText(slot.docPath);
+
+  // ---- two tiers, when the manifest ships a stub -------------------------
+  //
+  // Python is the case: pyright takes ~1.1 s to answer its first completion, and
+  // the manifest already carries a stub (`bundledFallback`) that answers in
+  // ~0.4 s. Starting the stub first and letting pyright take over in the
+  // background is what keeps the first keystroke inside 500 ms *with pyright
+  // installed* — otherwise removing `eager` would just move the wait from boot
+  // to the first key, which is the worse place for it.
+  //
+  // `eager: true` keeps the old behaviour: a language that asked to be ready at
+  // boot is not going to be answered by a stub while it warms up.
+  if (spec?.bundledFallback && spec.eager !== true && !fromStub) {
+    const toolchain = slot.toolchain ?? slot.manifest.run?.discovery?.commands?.[0];
+    const fast = resolveBundledFallback(spec.bundledFallback, { languageId: slot.id, toolchain });
+    if (fast) {
+      const stub = new LspClient({ launch: fast });
+      try {
+        await stub.start(deps.kernel, fileUri(join(deps.rootDir, slot.id)));
+        await stub.openDocument(slot.docUri, text, slot.id);
+        slot.lsp = stub;
+        slot.lspNote = `${fast.serverName} (bundled) — ${launch.serverName} starting`;
+        slot.upgrade = { launch, stub, text, note: note ?? `${launch.serverName}` };
+        deps.noteUse(slot.id);
+        log.info('Bundled server answered first', {
+          language: slot.id,
+          stub: fast.serverName,
+          starting: launch.serverName,
+        });
+        return;
+      } catch (err) {
+        // The stub failing is not a reason to fail the slot: fall through and
+        // start the real server the old way.
+        await stub.stop().catch(() => undefined);
+        log.warn('Bundled server did not start — starting the real one directly', {
+          language: slot.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+  }
+
   const client = new LspClient({ launch });
   try {
     const caps = await client.start(deps.kernel, fileUri(join(deps.rootDir, slot.id)));
-    await client.openDocument(slot.docUri, await readText(slot.docPath), slot.id);
+    await client.openDocument(slot.docUri, text, slot.id);
     slot.lsp = client;
     slot.lspNote = note;
     deps.noteUse(slot.id);
@@ -162,4 +227,66 @@ export async function startSlotLsp(deps: LaunchDeps, slot: LaunchSlot): Promise<
     await client.stop().catch(() => undefined);
     log.error('Language server unavailable — Check/completion disabled', { language: slot.id }, err as Error);
   }
+}
+
+/**
+ * Swap the stub for the real server, once it is up.
+ *
+ * Everything here is about not clobbering someone else's work: the slot may have
+ * been released or restarted while this server was starting, so `isCurrent` gets
+ * the last word. Without that check a "restart language server" during startup
+ * would leave an orphan holding hundreds of megabytes and nothing pointing at it.
+ */
+export async function finishLspUpgrade(
+  deps: { kernel: Kernel; rootDir: string },
+  slot: LaunchSlot,
+  upgrade: LspUpgrade,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const log = deps.kernel.logger.forComponent(`ide.workspace.${slot.id}`);
+  const client = new LspClient({ launch: upgrade.launch });
+  try {
+    await client.start(deps.kernel, fileUri(join(deps.rootDir, slot.id)));
+    await client.openDocument(slot.docUri, upgrade.text, slot.id);
+  } catch (err) {
+    await client.stop().catch(() => undefined);
+    log.warn('Real language server did not start — the bundled one keeps answering', {
+      language: slot.id,
+      error: (err as Error).message,
+    });
+    return;
+  }
+  if (!isCurrent()) {
+    await client.stop().catch(() => undefined);
+    return;
+  }
+  slot.lsp = client;
+  slot.lspNote = upgrade.note;
+  await upgrade.stub.stop().catch(() => undefined);
+  log.info('Real language server took over from the bundled one', {
+    language: slot.id,
+    server: client.serverName,
+  });
+}
+
+/**
+ * Start the real server just after the first answer, not in the same tick.
+ *
+ * `stillOwner` answers "is this slot still mine?" — the workspace passes a check
+ * against its slot map, so a release or restart during startup wins.
+ */
+export function scheduleLspUpgrade(
+  deps: { kernel: Kernel; rootDir: string },
+  slot: LaunchSlot,
+  stillOwner: () => boolean,
+  delayMs = 300,
+): void {
+  const upgrade = slot.upgrade;
+  if (!upgrade) return;
+  slot.upgrade = undefined;
+  // The delay is deliberate: starting a 400 MB server in the same millisecond as
+  // the first keystroke makes that keystroke compete with the thing that exists
+  // to stay out of its way.
+  const timer = setTimeout(() => void finishLspUpgrade(deps, slot, upgrade, () => slot.lsp === upgrade.stub && stillOwner()), delayMs);
+  timer.unref?.();
 }

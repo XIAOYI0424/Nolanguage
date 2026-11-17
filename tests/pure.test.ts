@@ -52,6 +52,7 @@ import { resolveBundledFallback } from '../src/lsp/bundledFallback';
 import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/serverInstall';
 import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
+import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
 import { JsonRpcConnection } from '../src/lsp/jsonrpc';
 import { PassThrough } from 'node:stream';
 import { CacheValidator } from '../src/lsp/manager/CacheValidator';
@@ -880,6 +881,85 @@ describe('lsp manager · the toolchain goes on the server PATH', () => {
     // would put the workspace first on the child's search path.
     expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
     expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('langs · toolchain version cache', () => {
+  const home = mkdtempSync(join(tmpdir(), 'nl-ver-'));
+  const bin = join(home, 'python.exe');
+  writeFileSync(bin, 'x');
+
+  afterAll(() => rmSync(home, { recursive: true, force: true }));
+
+  it('probes once and answers from the cache afterwards', async () => {
+    let probes = 0;
+    const probe = async (): Promise<string> => {
+      probes++;
+      return 'Python 3.13.14';
+    };
+    const first = await cachedVersion({ home, id: 'python', bin, args: ['--version'], probe });
+    const second = await cachedVersion({ home, id: 'python', bin, args: ['--version'], probe });
+    expect(first).toBe('Python 3.13.14');
+    expect(second).toBe('Python 3.13.14');
+    expect(probes).toBe(1);
+    // Written where a later launch will find it.
+    expect(existsSync(versionCachePath(home))).toBe(true);
+    expect(JSON.parse(readFileSync(versionCachePath(home), 'utf8')).entries.python.version).toBe('Python 3.13.14');
+  });
+
+  it('re-probes when the binary changed, and only then', async () => {
+    let probes = 0;
+    const probe = async (): Promise<string> => {
+      probes++;
+      return `build ${probes}`;
+    };
+    await cachedVersion({ home, id: 'go', bin, args: ['version'], probe });
+    expect(probes).toBe(1);
+    // Same file, different content: an upgrade. The signature has to notice.
+    writeFileSync(bin, 'xx');
+    const after = await cachedVersion({ home, id: 'go', bin, args: ['version'], probe });
+    expect(probes).toBe(2);
+    expect(after).toBe('build 2');
+  });
+
+  it('treats a different argument list as a different question', async () => {
+    let probes = 0;
+    const probe = async (_bin: string, args: string[]): Promise<string> => {
+      probes++;
+      return args.join(' ');
+    };
+    await cachedVersion({ home, id: 'rust', bin, args: ['--version'], probe });
+    await cachedVersion({ home, id: 'rust', bin, args: ['-V'], probe });
+    expect(probes).toBe(2);
+  });
+
+  it('does not cache a failed probe', async () => {
+    // A binary that cannot answer today might answer after the user fixes their
+    // PATH; remembering "broken" would hide the fix they just made.
+    let probes = 0;
+    const probe = async (): Promise<string | null> => {
+      probes++;
+      return probes === 1 ? null : 'fixed';
+    };
+    expect(await cachedVersion({ home, id: 'broken', bin, args: [], probe })).toBeNull();
+    expect(await cachedVersion({ home, id: 'broken', bin, args: [], probe })).toBe('fixed');
+    expect(probes).toBe(2);
+  });
+
+  it('marks a missing binary as missing, which never matches', () => {
+    expect(toolchainSignature(join(home, 'nope.exe'))).toBe('missing');
+    expect(toolchainSignature(bin)).not.toBe('missing');
+  });
+
+  it('ignores a corrupt cache file instead of failing the launch', async () => {
+    const other = mkdtempSync(join(tmpdir(), 'nl-ver-bad-'));
+    const otherBin = join(other, 'node.exe');
+    writeFileSync(otherBin, 'x');
+    mkdirSync(join(other, 'cache'), { recursive: true });
+    writeFileSync(versionCachePath(other), '{ not json');
+    const version = await cachedVersion({ home: other, id: 'node', bin: otherBin, args: ['-v'], probe: async () => 'v22' });
+    expect(version).toBe('v22');
+    rmSync(other, { recursive: true, force: true });
   });
 });
 

@@ -27,7 +27,11 @@ import type { ManagedLsp } from '../src/lsp/manager/ManagedLsp.js';
 import type { LanguagePlugin } from '../src/lsp/manager/types.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SANDBOX = join(ROOT, '.tmp', 'lsp-protocol');
+// Per-process: these suites build a jdtls workspace with thousands of files,
+// and a shared directory makes the start-up `rmSync` hit the sandbox's
+// bulk-delete guard — which surfaces as a suite that dies before its first
+// check (0/0) when it runs after the others.
+const SANDBOX = join(ROOT, '.tmp', 'lsp-protocol', String(process.pid));
 const FIXTURE = join(ROOT, 'scripts', 'fixtures', 'fake-lsp.mjs');
 
 const results: Array<{ name: string; ok: boolean; detail: string; skipped?: boolean }> = [];

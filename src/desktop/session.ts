@@ -23,6 +23,7 @@
  * The file lives next to the telemetry database (`appDataDir()`), never in the
  * install directory — see `src/util/appData.ts` for why.
  */
+import { isAlive, killTree } from '../util/killTree.js';
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { appDataPath } from '../util/appData.js';
@@ -131,43 +132,11 @@ export function clearSession(): void {
   }
 }
 
-/** True when *pid* names a live process (signal 0 is a pure existence probe). */
-export function isAlive(pid: number | undefined): boolean {
-  if (!pid || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Kill a process **and its children**.
- *
- * `child.kill()` on Windows is `TerminateProcess` on one pid: Edge keeps its
- * renderer/GPU/crashpad processes alive, so a killed launcher leaves a window's
- * worth of processes behind and the profile stays locked. `taskkill /T /F` walks
- * the tree instead. Fire-and-forget on purpose — the caller is usually on the
- * exit path and has nothing left to do with the result.
- */
-export function killTree(pid: number | undefined): void {
-  if (!isAlive(pid)) return;
-  try {
-    if (process.platform === 'win32') {
-      const child = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.on('error', () => undefined);
-      child.unref();
-    } else {
-      process.kill(pid!, 'SIGKILL');
-    }
-  } catch {
-    /* already gone, or not ours to kill */
-  }
-}
+// Moved to `util` so the language client can use it too: a `.cmd` shim leaves
+// the real server holding the pipes, and killing only the wrapper keeps the
+// parent alive. Re-exported here because every desktop caller imports it from
+// this module, and that is a public surface of its own.
+export { isAlive, killTree };
 
 /**
  * End the window recorded by the previous session, without querying anything.

@@ -22,6 +22,7 @@ import type { ProfileManager } from '../langs/ProfileManager.js';
 import { parseMemoryHint, runtimeMemoryBytes, type ResourceProfile } from '../langs/ProfileManager.js';
 import type { CompletionItem } from '../lsp/LspClient.js';
 import type { LspLike } from '../lsp/lspLike.js';
+import type { LspUpgrade } from '../langs/lspLaunch.js';
 import type { Runner } from '../runtimes/types.js';
 import type { LanguageId } from './samples.js';
 
@@ -108,6 +109,14 @@ export interface Slot {
   lsp?: LspLike;
   lspError?: string;
   lspNote?: string;
+  /**
+   * A real server still starting behind the stub that already answered.
+   *
+   * `startSlotLsp` fills this in when the manifest ships a bundled fallback; the
+   * service swaps it in when it is up. Cleared by `releaseLsp`, so a restart
+   * during startup does not get overwritten by the client it just abandoned.
+   */
+  upgrade?: LspUpgrade;
   /** True until the LSP has been started (or attempted) for the first time. */
   lspPending: boolean;
   /** In-flight start, so concurrent Check/Complete share one launch. */

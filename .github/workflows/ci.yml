@@ -126,6 +126,12 @@ jobs:
       - name: Verify LSP semantics baseline
         run: npm run verify:lsp-semantics
 
+      # Shape and coverage of perf-baseline.json always run; the measurements
+      # SKIP every language whose server is absent, so a bare runner still gets
+      # the contract checks (no eager python, baseline covers every language).
+      - name: Verify startup baseline
+        run: npm run verify:startup
+
       # The whole regression: kernel, panel, Python/Go loops, baseline,
       # extension host, explorer, WebView host, PyCharm shell, Dev Panel DOM,
       # packaged-exe smoke. The pure suites run again here on purpose — they are

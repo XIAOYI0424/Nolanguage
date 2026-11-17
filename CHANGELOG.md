@@ -2,6 +2,30 @@
 
 ## 0.7.24 — 2026-11-15
 
+### 启动：不再等一个语言服务，版本探测改为缓存
+
+启动耗时测出来之后（`npm run verify:startup` 之前是一组一次性探针），最大的一块不是内核，是**等 python 的服务**：`builtin/python@1.0.0` 是唯一 `lsp.eager: true` 的语言，`workspace.init()` 里同步等它握手。把它关掉，`init()` 从 **439–518 ms 掉到 138–150 ms**。
+
+代价是首次 Python 击键要自己付这笔钱（pyright 约 1.0–2.3 s），所以同时做了**两段式启动**：manifest 声明了 `bundledFallback` 且 `eager` 为假时，先起 stub（`nolanguage-py`，约 400 ms），由它回答第一次补全；真服务 300 ms 后开始握手，就绪后接管并停掉 stub。实测首次击键 **415–417 ms**，随后 pyright 接管（8 项成员）。
+
+版本探测（`--version`，每语言 58–149 ms，九个 manifest 串行 607 ms）改为**按签名缓存**（`src/langs/versionCache.ts`）：签名 = 二进制路径 + size + mtime + 参数。命中时 `init()` **189 → 19 ms**；二进制换了、参数换了自动重探；**失败不缓存**（用户修好 PATH 之后不该被"记得是坏的"挡住）。
+
+`perf-baseline.json` 记录每个语言的三个阈值（握手 / 首次有内容 / 结果稳定），门禁 `verify:startup` **只看 `stable`**：握手快不代表能答，rust-analyzer 1.0 s 回 16 项、4.7 s 才到 138 项，用握手当门禁等于用最不可控的那个数当门禁。
+
+**三个只有跑起来才会遇到的 bug：**
+
+| 问题 | 现象 | 修法 |
+|---|---|---|
+| **只有 stub 可用时两段式会起两个 stub** | `launch` 本身就是 fallback，两段式把它当"真服务"再起一次——多一个进程、多一份内存 | 记录 `fromStub`，只有真服务存在时才分两层 |
+| **`.cmd` 包装器杀不掉** | pyright / tsserver 是 `cmd /d /s /c node …`；`child.kill()` 只杀 cmd，真服务继续持有管道，**父进程因此永不退出**（套件打印完摘要就挂住） | `killTree`（`taskkill /T /F`）下沉到 `src/util/killTree.ts`，`LspClient.stop()` 在优雅退出超时后走它 |
+| **"稳定"被平台期骗过** | 计数 1.5 s 不变就判定 stable，于是 rust 的 16 项被当成终值 | `measureStartup` 接受 `expectItems`（来自基线），等到基线的项数再判稳定 |
+
+`verify:startup` 22–23 项：基线形状与覆盖率（每个声明了服务的语言必须有条目，加了语言不写基线会红）、python 的三条契约（启动不起服务 / 首次击键由 stub 答 / 真服务接管）、以及每个语言的 `stable`。宿主繁忙时绝对数字会整体漂移 2–4 倍，所以门禁取**多次独立冷启动里最好的一次**，并对已知冷成本大的语言（java 每次清空 Eclipse workspace、rust 每次重建索引）用显式 `gateMs`。
+
+端到端：装好的 exe 启动到 `/health` 从 **1055–1118 ms 降到 593–634 ms**，而且那一刻**没有任何语言服务子进程**。
+
+`npm test` 151→**157**（+6：缓存命中、签名失效、参数不同、失败不缓存、缺失二进制、损坏缓存文件）。
+
 ### 补全质量：短字段、签名提示、按需文档
 
 补全之前只回 `label` 和 `kind`，所以客户端拿不到「服务端想让你插入什么」「该排在哪」「文档是什么」。三处改动，都是透传而不是自造：

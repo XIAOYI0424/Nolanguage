@@ -23,6 +23,10 @@ const NODE_FLAGS = [
 ];
 
 const stages = [
+  // First, before anything else spawns a server: the numbers this gate compares
+  // are sensitive to whatever else is running, and a latency gate that measures
+  // the suite order is not a gate.
+  { name: 'Startup · baseline, first keystroke, stable', script: 'scripts/verify-startup.ts' },
   { name: 'Stage 1 · minimal kernel', script: 'scripts/verify-stage1.ts' },
   { name: 'Stage 2 · dev panel (WebSocket + UI)', script: 'scripts/verify-panel.ts' },
   { name: 'Stage 2 · panel UI self-containment', script: 'scripts/check-panel-html.ts', pure: true },

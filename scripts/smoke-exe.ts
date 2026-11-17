@@ -265,10 +265,18 @@ async function main(): Promise<void> {
 
   try {
     const wsStatus = health.workspace as {
-      lsp: { available: boolean; serverName: string };
+      lsp: { available: boolean; running: boolean; serverName: string };
       languages: Array<{ id: string; available: boolean; binary: string; binarySource: string; version?: string }>;
     };
-    check(wsStatus.lsp.available === true, 'python LSP is ready', wsStatus.lsp.serverName);
+    // python is no longer eager: the server is configured but not started until
+    // the first request, so "ready at boot" is exactly what changed. What must
+    // still hold is that the slot knows which server it would start.
+    check(wsStatus.lsp.serverName !== 'none', 'python LSP is configured', wsStatus.lsp.serverName);
+    check(
+      wsStatus.lsp.running === false,
+      'python LSP is not started at boot (eager: false)',
+      `available=${String(wsStatus.lsp.available)} running=${String(wsStatus.lsp.running)}`,
+    );
     const go = wsStatus.languages.find((l) => l.id === 'go');
     check(!!go?.available !== false, 'go slot present');
     // Portable on purpose: the toolchain may live in a known directory
