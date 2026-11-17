@@ -186,6 +186,7 @@ const pythonProbes: PythonProbe[] = [
 const stubFirstMs: Record<string, number> = {};
 for (const probe of pythonProbes) {
   mkdirSync(probe.home, { recursive: true });
+  const installed0 = pythonManifest ? resolveServer(pythonManifest, probe.home, { root: SANDBOX }) : { source: 'missing' as const };
 
   // One fresh workspace per attempt: a warm one would answer from an already
   // running server and prove nothing about the first keystroke.
@@ -244,6 +245,34 @@ for (const probe of pythonProbes) {
     /builtin/i.test(stubHover) && !/\(function\) def print/.test(stubHover),
     stubHover.replace(/\s+/g, ' ').slice(0, 60) || 'empty',
   );
+
+  // A question asked during the takeover window must wait for the real server.
+  // `list.append` is the discriminator: its definition lives in pyright's
+  // typeshed, not in this file, so the stub's in-file heuristic cannot fake it.
+  if (probe.expectUpgrade && installed0.source !== 'missing') {
+    const navDir = join(SANDBOX, `ws-${probe.label}-nav`);
+    const navWs = new WorkspaceService(kernel, {
+      home: probe.home,
+      pluginRoots: languageRoots(),
+      projectDir: navDir,
+      workspaceDir: navDir,
+    });
+    await navWs.init();
+    // First keystroke starts the stub and schedules the real server; the goto
+    // arrives while the real server is still starting.
+    await navWs.complete('python', 'nums = []\nnum\n', 1, 3);
+    const navT = Date.now();
+    const nav = await navWs.definition('python', 'nums = []\nnums.append(1)\n', 1, 6);
+    const where = nav.ok && nav.value.length ? nav.value[0].uri : '';
+    check(
+      `python (${probe.label}): goto during the takeover waits for the real server`,
+      nav.ok && nav.value.length > 0 && !where.endsWith('/main.py'),
+      `${Date.now() - navT} ms · ${where.split('/').pop() || 'no location'}`,
+    );
+    await navWs.close();
+  } else {
+    skip(`python (${probe.label}): goto during the takeover waits for the real server`, 'no real server installed');
+  }
 
   // The real server, if this machine has one, must take over by itself.
   const installed = pythonManifest ? resolveServer(pythonManifest, probe.home, { root: SANDBOX }) : { source: 'missing' as const };

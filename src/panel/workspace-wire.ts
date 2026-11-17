@@ -117,6 +117,8 @@ export interface Slot {
    * during startup does not get overwritten by the client it just abandoned.
    */
   upgrade?: LspUpgrade;
+  /** The upgrade in flight; explicit actions wait for it, keystrokes do not. */
+  upgrading?: Promise<void>;
   /** True until the LSP has been started (or attempted) for the first time. */
   lspPending: boolean;
   /** In-flight start, so concurrent Check/Complete share one launch. */

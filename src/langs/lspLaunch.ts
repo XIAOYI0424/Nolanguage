@@ -44,6 +44,23 @@ export interface LaunchSlot {
   lspNote?: string;
   /** Set when the fast tier answered and a real server is still coming up. */
   upgrade?: LspUpgrade;
+  /**
+   * The upgrade in flight, so an explicit action can wait for it.
+   *
+   * A keystroke must not wait — that is the whole point of the stub — but
+   * "go to definition" is a question, and the stub has no references and only a
+   * heuristic goto. Answering "nothing found" there is worse than waiting.
+   */
+  upgrading?: Promise<void>;
+  /**
+   * Start the upgrade now instead of after the delay.
+   *
+   * The delay exists so the first keystroke does not compete with a 400 MB
+   * server starting. An explicit action is already waiting, so that trade does
+   * not apply — and skipping the wait is what keeps "go to definition" from
+   * costing stub + delay + handshake.
+   */
+  startUpgradeNow?: () => void;
 }
 
 /**
@@ -280,13 +297,60 @@ export function scheduleLspUpgrade(
   slot: LaunchSlot,
   stillOwner: () => boolean,
   delayMs = 300,
-): void {
+): Promise<void> {
   const upgrade = slot.upgrade;
-  if (!upgrade) return;
+  if (!upgrade) return Promise.resolve();
   slot.upgrade = undefined;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   // The delay is deliberate: starting a 400 MB server in the same millisecond as
   // the first keystroke makes that keystroke compete with the thing that exists
-  // to stay out of its way.
-  const timer = setTimeout(() => void finishLspUpgrade(deps, slot, upgrade, () => slot.lsp === upgrade.stub && stillOwner()), delayMs);
+  // to stay out of its way. An explicit action calls `startUpgradeNow` and opens
+  // the gate early — it is waiting anyway.
+  const timer = setTimeout(release, delayMs);
   timer.unref?.();
+  slot.startUpgradeNow = () => {
+    clearTimeout(timer);
+    release();
+  };
+  const run = (async () => {
+    await gate;
+    slot.startUpgradeNow = undefined;
+    await finishLspUpgrade(deps, slot, upgrade, () => slot.lsp === upgrade.stub && stillOwner());
+  })();
+  slot.upgrading = run;
+  void run.then(
+    () => {
+      if (slot.upgrading === run) slot.upgrading = undefined;
+    },
+    () => {
+      if (slot.upgrading === run) slot.upgrading = undefined;
+    },
+  );
+  return run;
+}
+
+/**
+ * Wait for a pending upgrade, bounded.
+ *
+ * A keystroke must never wait for the real server — that is what the stub is
+ * for. But goto/references/quick fix are questions the stub cannot answer (it
+ * has no references at all), so during the first second of a session they would
+ * report "nothing found" for a symbol defined two lines above. Ten seconds is
+ * the ceiling: a server that never comes up must not hang the editor.
+ */
+export async function waitForUpgrade(slot: LaunchSlot, timeoutMs = 10_000): Promise<void> {
+  const pending = slot.upgrading;
+  if (!pending) return;
+  // An action that waits is an action that can afford the server to start now.
+  slot.startUpgradeNow?.();
+  await Promise.race([
+    pending.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+    }),
+  ]);
 }

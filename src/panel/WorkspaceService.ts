@@ -45,7 +45,7 @@ import { cachedVersion } from '../langs/versionCache.js';
 import { resolveServer } from '../langs/serverInstall.js';
 import { buildManagerPlugins } from '../langs/managerPlugins.js';
 import { LspManager } from '../lsp/manager/LspManager.js';
-import { scheduleLspUpgrade, startSlotLsp } from '../langs/lspLaunch.js';
+import { scheduleLspUpgrade, startSlotLsp, waitForUpgrade } from '../langs/lspLaunch.js';
 import { ProfileManager, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
   bufferName,
@@ -908,10 +908,22 @@ export class WorkspaceService {
    * shape as the navigation requests so "no server" stays distinguishable from
    * "nothing to change".
    */
-  async format(id: LanguageId, code: string): Promise<NavResult<TextEdit[]>> {
+  /**
+   * Slot for an action that asks a question.
+   *
+   * Explicit actions (goto, references, quick fix, format) wait out a takeover;
+   * keystrokes do not — see `waitForUpgrade`.
+   */
+  private async ensureAction(id: LanguageId): Promise<Slot> {
     const slot = this.requireSlot(id);
     this.touch(id);
     await this.ensureLsp(id);
+    await waitForUpgrade(slot);
+    return slot;
+  }
+
+  async format(id: LanguageId, code: string): Promise<NavResult<TextEdit[]>> {
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<TextEdit[]>(slot.lspError ?? `${id} has no language server`);
       slot.lsp.changeDocument(slot.docUri, code, id);
@@ -920,9 +932,7 @@ export class WorkspaceService {
   }
 
   async definition(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<Location[]>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<Location[]>(slot.lspError ?? `${id} has no language server`);
       slot.lsp.changeDocument(slot.docUri, code, id);
@@ -937,9 +947,7 @@ export class WorkspaceService {
     character: number,
     includeDeclaration = true,
   ): Promise<NavResult<Location[]>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<Location[]>(slot.lspError ?? `${id} has no language server`);
       slot.lsp.changeDocument(slot.docUri, code, id);
@@ -954,9 +962,7 @@ export class WorkspaceService {
     character: number,
     newName: string,
   ): Promise<NavResult<TextEdit[]>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<TextEdit[]>(slot.lspError ?? `${id} has no language server`);
       slot.lsp.changeDocument(slot.docUri, code, id);
@@ -970,9 +976,7 @@ export class WorkspaceService {
     line: number,
     character: number,
   ): Promise<NavResult<CodeAction[]>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<CodeAction[]>(slot.lspError ?? `${id} has no language server`);
       slot.lsp.changeDocument(slot.docUri, code, id);
@@ -982,9 +986,7 @@ export class WorkspaceService {
   }
 
   async resolveCompletion(id: LanguageId, label: string): Promise<NavResult<{ documentation?: string; detail?: string }>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<{ documentation?: string; detail?: string }>(slot.lspError ?? `${id} has no language server`);
       return slot.lsp.resolveCompletionItem({ label });
@@ -992,9 +994,7 @@ export class WorkspaceService {
   }
 
   async signatureHelp(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<SignatureHelp>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<SignatureHelp>(slot.lspError ?? `${id} has no language server`);
       slot.lsp.changeDocument(slot.docUri, code, id);
@@ -1003,9 +1003,7 @@ export class WorkspaceService {
   }
 
   async workspaceSymbols(id: LanguageId, query: string): Promise<NavResult<SymbolInformation[]>> {
-    const slot = this.requireSlot(id);
-    this.touch(id);
-    await this.ensureLsp(id);
+    const slot = await this.ensureAction(id);
     return this.serialize(slot, async () => {
       if (!slot.lsp) return unsupported<SymbolInformation[]>(slot.lspError ?? `${id} has no language server`);
       return slot.lsp.workspaceSymbols(query);

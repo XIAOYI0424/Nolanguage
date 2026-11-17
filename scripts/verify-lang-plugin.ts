@@ -28,7 +28,9 @@ import { RawWsClient } from './lib/RawWsClient.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const EXE = process.env.NOLANGUAGE_EXE ?? join(ROOT, 'dist', 'Nolanguage.exe');
-const SANDBOX = join(ROOT, '.tmp', 'verify-lang-plugin');
+// Per-process: a shared directory makes the start-up `rmSync` hit the sandbox's
+// bulk-delete guard after a few runs, which turns a green suite red in cleanup.
+const SANDBOX = join(ROOT, '.tmp', 'verify-lang-plugin', String(process.pid));
 const HOME = join(SANDBOX, 'home');
 const TMP = join(SANDBOX, 'tmp');
 const PORT = 7818;
@@ -170,7 +172,13 @@ async function waitHealth(): Promise<boolean> {
 }
 
 async function main(): Promise<void> {
-  rmSync(SANDBOX, { recursive: true, force: true });
+  // Cleanup is best effort and must never change the verdict: a sandbox that
+  // refuses a bulk delete is a property of the machine, not of the product.
+  try {
+    rmSync(SANDBOX, { recursive: true, force: true });
+  } catch (err) {
+    console.log(`  (cleanup left ${SANDBOX}: ${(err as Error).message.split('\n')[0]})`);
+  }
   for (const d of [HOME, TMP]) mkdirSync(d, { recursive: true });
 
   // ---- 1. the CLI sees the built-ins, and none of the four ----
@@ -343,7 +351,14 @@ async function main(): Promise<void> {
     check('the listing no longer has it', !/^rust\s/m.test(cli(['lang', 'ls', '--home', HOME]).out));
   }
 
-  rmSync(SANDBOX, { recursive: true, force: true });
+  // Cleanup is best effort and must never change the verdict: a sandbox that
+  // refuses a bulk delete is a property of the machine, not of the product. This
+  // suite printed its whole result and then exited 1 on the last line.
+  try {
+    rmSync(SANDBOX, { recursive: true, force: true });
+  } catch (err) {
+    console.log(`  (cleanup left ${SANDBOX}: ${(err as Error).message.split('\n')[0]})`);
+  }
 
   const failed = results.filter((r) => !r.ok);
   const skipped = results.filter((r) => r.skipped).length;

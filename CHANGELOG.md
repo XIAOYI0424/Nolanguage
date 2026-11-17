@@ -12,6 +12,12 @@
 
 `perf-baseline.json` 记录每个语言的三个阈值（握手 / 首次有内容 / 结果稳定），门禁 `verify:startup` **只看 `stable`**：握手快不代表能答，rust-analyzer 1.0 s 回 16 项、4.7 s 才到 138 项，用握手当门禁等于用最不可控的那个数当门禁。
 
+**击键不等，提问要等。** stub 没有 references、没有 quick fix、goto 只是文件内启发式，所以会话
+第一秒里的 Ctrl+B / Alt+F7 / Alt+Enter 会得到「没找到」。这类**显式动作**现在会等接管完成
+（`waitForUpgrade`，上限 10s），并且会提前放行那 300 ms 延迟（`startUpgradeNow`）——它本来
+就在等。补全与 hover 仍然走 stub，不等。门禁用 `list.append` 做判据：它的定义在 pyright 的
+typeshed 里，stub 的文件内启发式不可能答对，实测 1743 ms 返回 `builtins.pyi`。
+
 **接管是被内容证明的，不是被状态字段证明的。** 对同一个位置做两次同样的请求：stub 的 `pri` 补全 30 项（`Exception` / `False` / `None`…）、hover 是 `**builtin** print`；接管后同一个 `pri` 是 8 项（`copyright` / `StopIteration`…）、hover 是 `(function) def print(...)`。断言要求**两个方向都有差异**（`+copyright −Exception`），所以「`slot.lsp` 换成 pyright、请求还落在 stub 上」这种 bug 会让门禁红——只断言 `serverName === 'pyright'` 是永远看不出来的。
 
 **三个只有跑起来才会遇到的 bug：**
