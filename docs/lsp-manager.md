@@ -214,6 +214,8 @@ clangd 最快且几乎不用等（81 ms 起，7 ms 出结果）；marksman 慢�
 
 **只有真服务存在时才分两层。** 如果解析结果本身就是 stub（没装 pyright），`launch` 就是 fallback，两段式会把它当"真服务"再起一次——多一个进程。`fromStub` 标记就是为了这个。
 
+**接管要靠内容证明，不能靠状态字段。** 门禁对同一个位置做两次同样的请求：stub 的 `pri` 返回 30 项（`Exception` / `False` / `None`…）、hover 是 `**builtin** print`；接管后同一个 `pri` 返回 8 项（`copyright` / `StopIteration`…）、hover 是 `(function) def print(...)`。两条断言都要求**两个方向都有差异**（新增的候选、消失的候选），所以「`slot.lsp` 换成 pyright 了、但请求还落在 stub 上」这种 bug 会红。只断言 `serverName === 'pyright'` 的话，它永远不会红——用户会一直看到内置名补全，而 pyright 在后台空转。
+
 ### 7.2 版本探测：缓存 + 签名失效
 
 `status()` 必须同步（UI 会轮询），所以版本在 `addSlot` 里就解析好——代价是每个语言一次 `--version` spawn（58–149 ms；九个 manifest 串行 607 ms）。

@@ -259,3 +259,12 @@ export function loadTarget(t: Target, root: string): { manifest: LanguageManifes
   const manifest = JSON.parse(readFileSync(join(process.cwd(), t.manifest), 'utf8')) as LanguageManifest;
   return { manifest, code: t.files[t.complete.file] ?? '' };
 }
+
+/** Hover contents as one string: servers disagree on string vs MarkupContent vs array. */
+export function hoverText(hover: { contents: unknown } | null): string {
+  if (!hover) return '';
+  const one = (v: unknown): string =>
+    typeof v === 'string' ? v : typeof v === 'object' && v && 'value' in v ? String((v as { value: unknown }).value) : '';
+  const c = hover.contents as unknown;
+  return Array.isArray(c) ? c.map(one).join('\n') : one(c);
+}

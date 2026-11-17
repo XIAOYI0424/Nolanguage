@@ -26,7 +26,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Kernel } from '../src/kernel/Kernel.js';
 import type { LanguageManifest } from '../src/langs/manifest.js';
 import { LspClient, fileUri } from '../src/lsp/LspClient.js';
-import { launchFor, targets } from './lib/lspProbe.js';
+import { hoverText, launchFor, targets } from './lib/lspProbe.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 // Per-process: these suites build a jdtls workspace with thousands of files,
@@ -54,14 +54,6 @@ function skip(name: string, why: string): void {
   console.log(`SKIP  ${name}  — ${why}`);
 }
 const sleep = (ms: number): Promise<void> => new Promise((ok) => setTimeout(ok, ms));
-
-function hoverText(hover: { contents: unknown } | null): string {
-  if (!hover) return '';
-  const one = (v: unknown): string =>
-    typeof v === 'string' ? v : typeof v === 'object' && v && 'value' in v ? String((v as { value: unknown }).value) : '';
-  const c = hover.contents as unknown;
-  return Array.isArray(c) ? c.map(one).join('\n') : one(c);
-}
 
 const hit = (text: string, expect: string[]): boolean => expect.some((e) => text.includes(e));
 

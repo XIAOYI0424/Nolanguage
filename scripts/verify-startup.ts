@@ -38,7 +38,7 @@ import { resolveServer } from '../src/langs/serverInstall.js';
 import { LspClient } from '../src/lsp/LspClient.js';
 import { WorkspaceService } from '../src/panel/WorkspaceService.js';
 import { languageRoots } from '../src/panel/handlers/plugins.js';
-import { launchFor, measureStartup, targets } from './lib/lspProbe.js';
+import { hoverText, launchFor, measureStartup, targets } from './lib/lspProbe.js';
 
 const ROOT = process.cwd();
 // Per-process: a shared directory grows past the sandbox's bulk-delete guard
@@ -189,7 +189,7 @@ for (const probe of pythonProbes) {
 
   // One fresh workspace per attempt: a warm one would answer from an already
   // running server and prove nothing about the first keystroke.
-  const attempts: Array<{ ms: number; items: number; server: string; init: number; running: boolean }> = [];
+  const attempts: Array<{ ms: number; items: number; labels: string[]; server: string; init: number; running: boolean }> = [];
   let lastWs: WorkspaceService | undefined;
   for (let i = 0; i < KEYSTROKE_ATTEMPTS; i++) {
     const dir = join(SANDBOX, `ws-${probe.label}-${i}`);
@@ -207,7 +207,7 @@ for (const probe of pythonProbes) {
     const out = await ws.complete('python', 'pri\n', 0, 3);
     const ms = Date.now() - t0;
     const server = (ws.languageStatus('python') as unknown as { lsp?: { serverName?: string } }).lsp?.serverName ?? '?';
-    attempts.push({ ms, items: out.items.length, server, init, running: runningBefore });
+    attempts.push({ ms, items: out.items.length, labels: out.items.map((i) => i.label), server, init, running: runningBefore });
     lastWs = ws;
     if (i < KEYSTROKE_ATTEMPTS - 1) await ws.close();
   }
@@ -233,6 +233,18 @@ for (const probe of pythonProbes) {
     `${best.server} · ${best.items} item(s)`,
   );
 
+  // What the stub says, recorded before anything takes over. Same request, same
+  // position: if these do not change afterwards, nothing took over — a status
+  // field saying "pyright" while the stub keeps answering is exactly the bug
+  // this pair of checks exists for.
+  const stubLabels = attempts[attempts.length - 1]?.labels ?? [];
+  const stubHover = hoverText(await lastWs?.hover('python', 'print("x")\n', 0, 2) ?? null);
+  check(
+    `python (${probe.label}): the stub's hover is the stub's`,
+    /builtin/i.test(stubHover) && !/\(function\) def print/.test(stubHover),
+    stubHover.replace(/\s+/g, ' ').slice(0, 60) || 'empty',
+  );
+
   // The real server, if this machine has one, must take over by itself.
   const installed = pythonManifest ? resolveServer(pythonManifest, probe.home, { root: SANDBOX }) : { source: 'missing' as const };
   if (!probe.expectUpgrade || installed.source === 'missing' || !lastWs) {
@@ -254,6 +266,27 @@ for (const probe of pythonProbes) {
       `python (${probe.label}): the real server takes over`,
       server === (pythonManifest?.lsp?.serverName ?? 'pyright') && after.items.length > 0,
       `${server} after ${Date.now() - t0} ms · ${after.items.length} item(s)`,
+    );
+
+    // Content, not the status field. The stub answers `pri` with 30 builtins;
+    // pyright answers with its own list. A takeover that only renamed the server
+    // would leave these identical.
+    const afterLabels = after.items.map((i) => i.label);
+    const gained = afterLabels.filter((l) => !stubLabels.includes(l));
+    const lost = stubLabels.filter((l) => !afterLabels.includes(l));
+    check(
+      `python (${probe.label}): the takeover changes the answers, not just the name`,
+      gained.length > 0 && lost.length > 0,
+      `+${gained.slice(0, 3).join('/')} −${lost.slice(0, 3).join('/')} (stub ${stubLabels.length} → real ${afterLabels.length})`,
+    );
+
+    // Hover is the sharper witness: the stub says `builtin`, pyright returns the
+    // signature. A stub left running in the background cannot fake this.
+    const realHover = hoverText(await lastWs.hover('python', 'print("x")\n', 0, 2));
+    check(
+      `python (${probe.label}): hover after takeover is the real server's`,
+      /\(function\) def print/.test(realHover),
+      realHover.replace(/\s+/g, ' ').slice(0, 70) || 'empty',
     );
   }
   await lastWs?.close();
