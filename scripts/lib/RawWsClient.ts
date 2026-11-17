@@ -27,6 +27,14 @@ export class RawWsClient {
   private expected = '';
   private closed = false;
   /**
+   * Resolved on arrival, not on a poll.
+   *
+   * `waitForWhere` used to scan `received` every 50 ms, which put a 0-50 ms bias
+   * on every round trip measured through this client — enough to make a 2 ms
+   * completion look like 54 ms and blame the wrong layer.
+   */
+  private waiters: Array<(m: WsMessage) => void> = [];
+  /**
    * The last socket error seen. Retained because a failed write/read must not
    * tear down the process; callers diagnose from `ready` or from a missing
    * reply instead.
@@ -41,6 +49,11 @@ export class RawWsClient {
     private extraHeaders: Record<string, string> = {},
   ) {
     this.socket = connect(port, host);
+    // Without this, the *client's* Nagle holds a small request frame until the
+    // previous one is acked: a probe measures ~60 ms for a round trip the server
+    // answered in 1-2 ms, and blames the wrong side. Browsers set TCP_NODELAY on
+    // WebSockets, so a probe that does not is measuring itself.
+    this.socket.setNoDelay(true);
     // The socket can fail at any moment — during the handshake, while a command
     // is in flight, or after the server has already gone. `EventEmitter` throws
     // on an `'error'` with no listener, which would abort the whole suite with
@@ -106,6 +119,7 @@ export class RawWsClient {
           const parsed = JSON.parse(f.payload.toString('utf8')) as WsMessage;
           this.received.push(parsed);
           this.history.push(parsed);
+          for (const notify of this.waiters) notify(parsed);
         } catch {
           /* ignore malformed frames */
         }
@@ -186,13 +200,20 @@ export class RawWsClient {
     pred: (m: WsMessage) => boolean,
     timeoutMs = 15_000,
   ): Promise<WsMessage | undefined> {
-    const t0 = Date.now();
-    for (;;) {
-      const found = this.received.find((m) => m.kind === kind && pred(m));
-      if (found) return found;
-      if (Date.now() - t0 > timeoutMs) return undefined;
-      await delay(50);
-    }
+    const found = this.received.find((m) => m.kind === kind && pred(m));
+    if (found) return found;
+    return new Promise((resolve) => {
+      const done = (value: WsMessage | undefined): void => {
+        clearTimeout(timer);
+        this.waiters = this.waiters.filter((w) => w !== onFrame);
+        resolve(value);
+      };
+      const timer = setTimeout(() => done(undefined), timeoutMs);
+      const onFrame = (m: WsMessage): void => {
+        if (m.kind === kind && pred(m)) done(m);
+      };
+      this.waiters.push(onFrame);
+    });
   }
 
   find(kind: string): WsMessage | undefined {

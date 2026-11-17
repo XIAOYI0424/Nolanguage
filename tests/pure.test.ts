@@ -11,7 +11,7 @@
  * not a replacement.
  */
 // Test functions are supplied by the active Vitest collector (see globals in vitest.config.ts).
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -54,6 +54,7 @@ import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
+import { UsageLog } from '../src/perf/usageLog';
 import { JsonRpcConnection } from '../src/lsp/jsonrpc';
 import { PassThrough } from 'node:stream';
 import { CacheValidator } from '../src/lsp/manager/CacheValidator';
@@ -882,6 +883,55 @@ describe('lsp manager · the toolchain goes on the server PATH', () => {
     // would put the workspace first on the child's search path.
     expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
     expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('perf · usage log', () => {
+  const home = mkdtempSync(join(tmpdir(), 'nl-usage-'));
+  afterAll(() => rmSync(home, { recursive: true, force: true }));
+
+  it('writes one JSON line per event, with a session and a schema version', () => {
+    const log = new UsageLog({ home, appVersion: '9.9.9', sessionId: 'sid-1' });
+    log.record('request', { language: 'python', method: 'completion', ms: 3 });
+    log.close();
+    const rows = readFileSync(log.path, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { event: string; sid: string; v: string; appVersion?: string });
+    expect(rows.map((r) => r.event)).toEqual(['session.start', 'request', 'session.end']);
+    expect(rows.every((r) => r.sid === 'sid-1' && r.v === '1')).toBe(true);
+    expect(rows[0].appVersion).toBe('9.9.9');
+  });
+
+  it('rotates instead of growing without bound', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-usage-rot-'));
+    const log = new UsageLog({ home: dir, appVersion: '1', sessionId: 's', maxBytes: 400, keep: 2 });
+    // Flush explicitly: rotation is checked when a batch is written, and the
+    // buffer only spills on its own at 64 KiB.
+    for (let i = 0; i < 40; i++) {
+      log.record('request', { language: 'go', method: 'completion', ms: i, pad: 'x'.repeat(40) });
+      log.flush();
+    }
+    log.close();
+    expect(existsSync(join(dir, 'logs', 'usage.1.jsonl'))).toBe(true);
+    // The current file is still readable, and every line in every file parses.
+    const files = readdirSync(join(dir, 'logs')).filter((f) => f.endsWith('.jsonl'));
+    expect(files.length).toBeGreaterThan(1);
+    for (const f of files) {
+      for (const line of readFileSync(join(dir, 'logs', f), 'utf8').trim().split('\n')) {
+        expect(() => JSON.parse(line)).not.toThrow();
+      }
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('never takes the app down when the log cannot be written', () => {
+    // A home that is a file, not a directory: mkdir fails, recording must not.
+    const file = join(home, 'not-a-dir');
+    writeFileSync(file, 'x');
+    const log = new UsageLog({ home: file, appVersion: '1', sessionId: 's' });
+    expect(() => log.record('request', { ms: 1 })).not.toThrow();
+    expect(() => log.close()).not.toThrow();
   });
 });
 

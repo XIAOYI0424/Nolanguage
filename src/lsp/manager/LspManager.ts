@@ -10,6 +10,7 @@
  * pooling and fallback, and this file decides *which* `ManagedLsp` a request
  * goes to.
  */
+import type { UsageRecorder } from '../../perf/usageLog.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -26,6 +27,11 @@ import { ContentHashStrategy, GitDiffStrategy, resolveDirty, headCommit } from '
 import type { DirtyReport, IndexMetadata, LanguagePlugin, ManagerStats } from './types.js';
 
 export interface ManagerOptions {
+  /**
+   * Long-term usage data. Optional: the manager is also constructed by tests that
+   * have no home to write to, and a missing recorder must not change behaviour.
+   */
+  usage?: UsageRecorder;
   kernel: Kernel;
   /** `<home>`; index metadata lives under `<home>/index`. */
   home: string;
@@ -91,7 +97,11 @@ export class LspManager {
           // The TTL is a trade between a resident server and a restart. This is
           // the cost side of it: what a restart actually took, per start.
           this.log?.('lsp.server.started', { startMs: Math.round(info.startMs) });
-        } else this.counters.startFailures++;
+          this.opts.usage?.record('lsp.start', { startMs: Math.round(info.startMs) });
+        } else {
+          this.counters.startFailures++;
+          this.opts.usage?.record('lsp.start', { ok: false, startMs: Math.round(info.startMs) });
+        }
       },
       onCache: (rebuilt) => {
         if (rebuilt) this.counters.cacheMisses++;
@@ -144,11 +154,9 @@ export class LspManager {
       // The benefit side of the same trade: how long this server had been idle
       // before it was wanted again. `npm run lsp:ttl` turns these into a
       // distribution, which is the only honest input for a TTL.
-      this.log?.('lsp.server.reused', {
-        language: pluginId,
-        idleMs: Math.round(got.entry.describe().idleMs),
-        converged: got.converged,
-      });
+      const idleMs = Math.round(got.entry.describe().idleMs);
+      this.log?.('lsp.server.reused', { language: pluginId, idleMs, converged: got.converged });
+      this.opts.usage?.record('lsp.reuse', { language: pluginId, idleMs, converged: got.converged });
     }
     return got.entry;
   }
@@ -282,7 +290,10 @@ export class LspManager {
   reapNow(now = Date.now()): string[] {
     const reaped = this.pool.reap(now);
     this.counters.reaped += reaped.length;
-    if (reaped.length) this.log?.('lsp.server.reaped', { keys: reaped });
+    if (reaped.length) {
+      this.log?.('lsp.server.reaped', { keys: reaped });
+      this.opts.usage?.record('lsp.reap', { keys: reaped });
+    }
     return reaped;
   }
 

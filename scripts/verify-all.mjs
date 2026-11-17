@@ -155,7 +155,9 @@ function run(script, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [...NODE_FLAGS, script], {
       cwd: root,
-      env: { ...process.env, ...env },
+      // Test runs must not write into the user's real usage log: every line in
+      // there is supposed to be something that actually happened.
+      env: { ...process.env, NOLANGUAGE_USAGE: '0', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';

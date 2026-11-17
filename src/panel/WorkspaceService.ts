@@ -46,6 +46,7 @@ import { resolveServer } from '../langs/serverInstall.js';
 import { buildManagerPlugins } from '../langs/managerPlugins.js';
 import { LspManager } from '../lsp/manager/LspManager.js';
 import { scheduleLspUpgrade, startSlotLsp, waitForUpgrade } from '../langs/lspLaunch.js';
+import { UsageLog } from '../perf/usageLog.js';
 import { ProfileManager, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
   bufferName,
@@ -185,6 +186,8 @@ export class WorkspaceService {
    * manifest line at a time instead of a flag day.
    */
   readonly lspManager: LspManager;
+  /** Long-term usage data (JSONL), kept apart from the rotating app log. */
+  readonly usage: UsageLog;
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
@@ -196,9 +199,11 @@ export class WorkspaceService {
       extraRoots: opts.pluginRoots ?? defaultPluginRoots(),
     });
     this.factory = new RunnerFactory(defaultRuntimeRegistry());
+    this.usage = new UsageLog({ home: this.registry.home, appVersion: kernel.appVersion, sessionId: kernel.sessionId });
     this.lspManager = new LspManager({
       kernel,
       home: this.registry.home,
+      usage: this.usage,
       log: (message, meta) => kernel.logger.forComponent('ide.lsp.manager').debug(message, meta),
     });
     this.resources = new ProfileManager({
@@ -305,6 +310,8 @@ export class WorkspaceService {
     await mkdir(langDir, { recursive: true });
     const docPath = join(langDir, bufferName(manifest));
     if (!existsSync(docPath)) await writeFile(docPath, code, 'utf8');
+    // Sizes only: enough to know what a document looks like, not to rebuild one.
+    this.usage.record('editor.open', { language: manifest.id, lines: code.split('\n').length, chars: code.length });
 
     // Project files a language server needs (a Go module, a Cargo manifest).
     for (const f of manifest.scaffold?.onFirstRun ?? []) {
@@ -872,9 +879,11 @@ export class WorkspaceService {
     line: number,
     character: number,
   ): Promise<CompletionResult> {
+    const entered = performance.now();
     const slot = this.requireSlot(id);
     this.touch(id);
     await this.ensureLsp(id);
+    const readyMs = Math.round(performance.now() - entered);
     return this.serialize(slot, async () => {
       // "No server" used to be reported as an empty list, which is
       // indistinguishable from "the server had no suggestions" — the same lie
@@ -884,9 +893,14 @@ export class WorkspaceService {
         return { items: [], unsupported: slot.lspError ?? `${id} has no language server` };
       }
       slot.lsp.changeDocument(slot.docUri, code, id);
+      const t0 = performance.now();
       try {
-        return { items: await slot.lsp.completion(slot.docUri, { line, character }) };
+        const items = await slot.lsp.completion(slot.docUri, { line, character });
+        const ms = Math.round(performance.now() - t0);
+        this.usage.record('request', { language: id, method: 'completion', ms, readyMs, items: items.length, ok: true });
+        return { items };
       } catch (err) {
+        this.usage.record('request', { language: id, method: 'completion', ms: Math.round(performance.now() - t0), readyMs, ok: false });
         return { items: [], unsupported: `completion failed: ${(err as Error).message}` };
       }
     });
@@ -908,6 +922,24 @@ export class WorkspaceService {
    * shape as the navigation requests so "no server" stays distinguishable from
    * "nothing to change".
    */
+  /** Every nav request in one place: ensure, time, record — so none goes unmeasured. */
+  private async navRequest<T>(
+    method: string,
+    id: LanguageId,
+    code: string | undefined,
+    run: (lsp: NonNullable<Slot['lsp']>, uri: string) => Promise<NavResult<T>>,
+  ): Promise<NavResult<T>> {
+    const slot = await this.ensureAction(id);
+    const t0 = performance.now();
+    const result = await this.serialize(slot, async () => {
+      if (!slot.lsp) return unsupported<T>(slot.lspError ?? `${id} has no language server`);
+      if (code !== undefined) slot.lsp.changeDocument(slot.docUri, code, id);
+      return run(slot.lsp, slot.docUri);
+    });
+    this.usage.record('request', { language: id, method, ms: Math.round(performance.now() - t0), ok: result.ok });
+    return result;
+  }
+
   /**
    * Slot for an action that asks a question.
    *
@@ -923,21 +955,11 @@ export class WorkspaceService {
   }
 
   async format(id: LanguageId, code: string): Promise<NavResult<TextEdit[]>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<TextEdit[]>(slot.lspError ?? `${id} has no language server`);
-      slot.lsp.changeDocument(slot.docUri, code, id);
-      return slot.lsp.formatting(slot.docUri);
-    });
+    return this.navRequest('format', id, code, (lsp, uri) => lsp.formatting(uri));
   }
 
   async definition(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<Location[]>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<Location[]>(slot.lspError ?? `${id} has no language server`);
-      slot.lsp.changeDocument(slot.docUri, code, id);
-      return slot.lsp.definition(slot.docUri, { line, character });
-    });
+    return this.navRequest('definition', id, code, (lsp, uri) => lsp.definition(uri, { line, character }));
   }
 
   async references(
@@ -947,12 +969,9 @@ export class WorkspaceService {
     character: number,
     includeDeclaration = true,
   ): Promise<NavResult<Location[]>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<Location[]>(slot.lspError ?? `${id} has no language server`);
-      slot.lsp.changeDocument(slot.docUri, code, id);
-      return slot.lsp.references(slot.docUri, { line, character }, includeDeclaration);
-    });
+    return this.navRequest('references', id, code, (lsp, uri) =>
+      lsp.references(uri, { line, character }, includeDeclaration),
+    );
   }
 
   async renameSymbol(
@@ -962,12 +981,7 @@ export class WorkspaceService {
     character: number,
     newName: string,
   ): Promise<NavResult<TextEdit[]>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<TextEdit[]>(slot.lspError ?? `${id} has no language server`);
-      slot.lsp.changeDocument(slot.docUri, code, id);
-      return slot.lsp.renameSymbol(slot.docUri, { line, character }, newName);
-    });
+    return this.navRequest('renameSymbol', id, code, (lsp, uri) => lsp.renameSymbol(uri, { line, character }, newName));
   }
 
   async codeActions(
@@ -976,13 +990,9 @@ export class WorkspaceService {
     line: number,
     character: number,
   ): Promise<NavResult<CodeAction[]>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<CodeAction[]>(slot.lspError ?? `${id} has no language server`);
-      slot.lsp.changeDocument(slot.docUri, code, id);
-      const position = { line, character };
-      return slot.lsp.codeActions(slot.docUri, { start: position, end: position }, []);
-    });
+    return this.navRequest('codeActions', id, code, (lsp, uri) =>
+      lsp.codeActions(uri, { start: { line, character }, end: { line, character } }),
+    );
   }
 
   async resolveCompletion(id: LanguageId, label: string): Promise<NavResult<{ documentation?: string; detail?: string }>> {
@@ -994,20 +1004,11 @@ export class WorkspaceService {
   }
 
   async signatureHelp(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<SignatureHelp>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<SignatureHelp>(slot.lspError ?? `${id} has no language server`);
-      slot.lsp.changeDocument(slot.docUri, code, id);
-      return slot.lsp.signatureHelp(slot.docUri, { line, character });
-    });
+    return this.navRequest('signatureHelp', id, code, (lsp, uri) => lsp.signatureHelp(uri, { line, character }));
   }
 
   async workspaceSymbols(id: LanguageId, query: string): Promise<NavResult<SymbolInformation[]>> {
-    const slot = await this.ensureAction(id);
-    return this.serialize(slot, async () => {
-      if (!slot.lsp) return unsupported<SymbolInformation[]>(slot.lspError ?? `${id} has no language server`);
-      return slot.lsp.workspaceSymbols(query);
-    });
+    return this.navRequest('workspaceSymbols', id, undefined, (lsp) => lsp.workspaceSymbols(query));
   }
 
   async hover(id: LanguageId, code: string, line: number, character: number): Promise<Hover | null> {
@@ -1156,6 +1157,7 @@ export class WorkspaceService {
       await slot.runner?.close().catch(() => undefined);
     }
     await this.lspManager.close().catch(() => undefined);
+    this.usage.close();
   }
 
   // ---------------- internals ----------------

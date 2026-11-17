@@ -364,6 +364,51 @@ OBSERVE cm6-trigger · 100000 lines / 5277779 chars · setValue 30 ms · first k
 这一项已经压在线上（500 行时是 1.0 ms），所以真正的结论是：**如果用户会打开十万行级别的文件，
 CM6 已经不是「假设中的需要」，而是「刚好够用」。** 500 行的门禁是 `< 150 ms / 30 次`（现在 31 ms）。
 
+## 十、长期使用数据：`logs/usage.jsonl`
+
+调 TTL、判断要不要换编辑器，都需要「真实的一周长什么样」。app.log 会滚动、混着调试输出，
+不适合当长期数据，所以另开一个文件：**append-only JSONL，一行一个事件，带 schema 版本**。
+
+### 10.1 记录什么，不记录什么
+
+| 事件 | 字段 | 用途 |
+|---|---|---|
+| `session.start` / `session.end` | `appVersion` / `uptimeMs` | 会话长度分布 |
+| `editor.open` | `language` / `lines` / `chars` | 真实文档规模（CM6 触发条件） |
+| `request` | `language` / `method` / `ms` / `readyMs` / `items` / `ok` | 每个请求的耗时，`readyMs` 单独记「等服务器就绪」 |
+| `lsp.start` | `startMs` / `ok` | 重启成本 |
+| `lsp.reuse` | `language` / `idleMs` / `converged` | 闲置多久又被需要（TTL 的输入） |
+| `lsp.reap` | `keys` | TTL 或内存预算真的停掉了谁 |
+
+**不记录**源码、路径、用户名、主机名。只有语言 id、时长、计数、尺寸——够用来决定一个 TTL，
+不够用来还原任何人在写什么。
+
+### 10.2 轮转与代价
+
+- 默认 8 MiB 一个文件，保留 4 个（`usage.jsonl` → `usage.1.jsonl` …），轮转在写批次时检查。
+- 缓冲 + 2 s 刷盘（`unref`，不会拖住进程退出）；写失败只丢一行，不抛。
+- 一次补全大约 120 字节；一天几千次是几百 KB。**这是可以开几个月的量级。**
+- 测试跑（`npm run verify`）会设 `NOLANGUAGE_USAGE=0`，不写这个文件——**里面的每一行都应该真的发生过**。手动关：`NOLANGUAGE_USAGE=0`。
+
+### 10.3 怎么看
+
+```
+npm run usage                 # ~/.nolanguage/logs
+npm run usage -- <dir>        # 指定目录
+npm run usage -- --json       # 给表格/脚本用
+```
+
+输出四块：`requests`（按语言×方法，n / median / p90 / max / 失败数）、`servers`（启动次数与
+成本、每种语言的闲置分布 + TTL 判定）、`documents opened`（行数中位/p90/max，直接对照 CM6 的
+100k 触发线）。
+
+### 10.4 一个教训：探针本身会被量进去
+
+`RawWsClient.waitForWhere` 原来每 50 ms 轮询一次，于是「补全往返」量出来是 **54–63 ms**，
+而引擎侧只记到 1–2 ms。换成事件驱动之后是 **3 ms**——**那 60 ms 一直是探针自己的轮询粒度**。
+在此之前，同一份数据被用来论证「管道不是瓶颈」：结论对，理由错。教训是量完要看一眼
+「被测的东西和测量的东西是不是同一个」。
+
 ## 九、后续
 
 1. 给 pyright / gopls / tsserver 打开 `manager`，删掉旧路径（预计省 200 行）。
