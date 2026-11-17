@@ -118,7 +118,7 @@
         "progressReportProvider": false
       }
     },
-    "idleTtlMs": 1800000,
+    "idleTtlMs": 7200000,
     "firstRequestBudgetMs": 500,
     "startTimeoutMs": 120000,
     "incremental": "git",

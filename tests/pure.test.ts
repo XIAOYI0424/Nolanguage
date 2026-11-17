@@ -53,6 +53,7 @@ import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/s
 import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
+import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
 import { JsonRpcConnection } from '../src/lsp/jsonrpc';
 import { PassThrough } from 'node:stream';
 import { CacheValidator } from '../src/lsp/manager/CacheValidator';
@@ -881,6 +882,42 @@ describe('lsp manager · the toolchain goes on the server PATH', () => {
     // would put the workspace first on the child's search path.
     expect(toolchainEnv('java', base as NodeJS.ProcessEnv)).toBeUndefined();
     expect(toolchainEnv('go', base as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+describe('lsp · idle TTL statistics', () => {
+  it('says nothing rather than guessing when there is no data', () => {
+    const s = summarizeIdle([]);
+    expect(s.count).toBe(0);
+    expect(s.medianMs).toBe(0);
+    expect(judgeTtl(s, 60_000)).toBe('no-data');
+  });
+
+  it('reports nearest-rank percentiles, so every answer is a real sample', () => {
+    const s = summarizeIdle([300, 100, 200]);
+    expect(s.count).toBe(3);
+    expect(s.medianMs).toBe(200);
+    expect(s.p90Ms).toBe(300);
+    expect(s.maxMs).toBe(300);
+  });
+
+  it('counts the share that came back inside a window', () => {
+    const s = summarizeIdle([10, 20, 30, 1000]);
+    expect(s.shareWithin(30)).toBeCloseTo(0.75);
+    expect(s.shareWithin(5)).toBe(0);
+  });
+
+  it('ignores values that are not measurements', () => {
+    const s = summarizeIdle([Number.NaN, -1, 50, Number.POSITIVE_INFINITY]);
+    expect(s.count).toBe(1);
+    expect(s.medianMs).toBe(50);
+  });
+
+  it('calls a TTL generous only when most reuses land well inside it', () => {
+    const ttl = 60_000;
+    expect(judgeTtl(summarizeIdle([1_000, 2_000, 3_000, 4_000, 5_000]), ttl)).toBe('ttl-is-generous');
+    // Every reuse arrives at 55 s: the server was still there, but barely.
+    expect(judgeTtl(summarizeIdle([55_000, 56_000, 57_000]), ttl)).toBe('ttl-is-tight');
   });
 });
 

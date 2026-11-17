@@ -324,6 +324,32 @@ try {
     `${typingMs} ms total · ${(typingMs / 30).toFixed(1)} ms per character`,
   );
 
+  // ---- observation: the 100k-line case (recorded, never gated) ----
+  // CM5 -> CM6 is not a question until a document this size costs something. The
+  // migration triggers are setValue > 100 ms or a keystroke > 5 ms; until one of
+  // them trips, this stays an observation and nothing here can fail the run.
+  const big = await cdp.eval(`(function(){
+    var cm = document.querySelector('.CodeMirror').CodeMirror;
+    var body = [];
+    for (var i = 0; i < 100000; i++) body.push('x' + i + ' = ' + i + '  # a line of python, roughly 40 chars');
+    var text = body.join(String.fromCharCode(10));
+    var t0 = performance.now();
+    cm.setValue(text);
+    var set = performance.now() - t0;
+    cm.setCursor({ line: 50000, ch: 5 });
+    cm.focus();
+    var t1 = performance.now();
+    cm.replaceRange('z', cm.getCursor());
+    var first = performance.now() - t1;
+    var t2 = performance.now();
+    for (var k = 0; k < 30; k++) cm.replaceRange('z', cm.getCursor());
+    return { set: Math.round(set), first: Math.round(first), typed: Math.round(performance.now() - t2), chars: text.length };
+  })()`);
+  const bigV = (big.value ?? {}) as { set?: number; first?: number; typed?: number; chars?: number };
+  console.log(
+    `OBSERVE cm6-trigger · 100000 lines / ${bigV.chars ?? 0} chars · setValue ${bigV.set ?? -1} ms · first keystroke ${bigV.first ?? -1} ms · 30 keystrokes ${bigV.typed ?? -1} ms · thresholds setValue>100 / keystroke>5`,
+  );
+
   cdp.close();
 } catch (err) {
   check('the live UI run completed', false, (err as Error).message);

@@ -315,6 +315,55 @@ rust-analyzer 是最好的例子：1.0 s 回 16 项，4.7 s 才到 138 项。用
 | 迁移其余七种语言 | 每种一行 `"manager": true`，但要逐个验；本轮只做 Java |
 | 索引内容本身 | 管理器只管「什么时候该重建」，不拥有索引数据 |
 
+## 九、TTL：把「重启多贵」和「闲置多久」分开量
+
+`java` 是唯一走池化管理器的语言，它的 `idleTtlMs` 原来是默认的 **5 分钟**。这个数字对 clangd
+（重启 86 ms）无所谓，对 jdtls（重启 6–7 s，见上一节）就是在反复交税。
+
+### 9.1 现在的值：java 2 小时，其余 5 分钟
+
+TTL 挂在 **manifest** 上（`lsp.idleTtlMs`），不是全局常量——因为两边差一个数量级：
+
+| 语言 | 重启成本（`stable`） | TTL | 理由 |
+|---|---|---|---|
+| c / cpp | 0.5–1.3 s | 5 min（默认） | 重启便宜，占内存不值 |
+| go / js / markdown / python | 1.2–2.0 s | 5 min（默认） | 同上 |
+| rust | 4.7 s（热缓存） | 5 min（默认） | **候选上调**，但没走管理器，改了不生效 |
+| **java** | **6.3–7.0 s** | **2 h** | 重启最贵，且真实使用里「改一会儿、停一会儿」是常态 |
+
+2 小时是一个**保守的起始值**，不是结论——下面是拿结论的方法。
+
+### 9.2 埋点：三个事件，够用
+
+管理器在 `logs/app.log` 里写三条结构化记录（`LspManager`）：
+
+| 事件 | 字段 | 回答什么 |
+|---|---|---|
+| `lsp.server.reused` | `language` / `idleMs` / `converged` | 服务器闲置多久之后又被需要 |
+| `lsp.server.started` | `startMs` | 重启一次的真实代价 |
+| `lsp.server.reaped` | `keys` | TTL 真的踢掉了谁 |
+
+`npm run lsp:ttl` 读这份日志（默认 `~/.nolanguage/logs/app.log`，可传路径），输出每种语言的
+reuse 次数、median / p90 / max 闲置时长、当前 TTL，以及一句判定：
+
+- `ttl-is-generous`：**80% 的复用发生在 TTL 的 80% 以内** → TTL 在起作用，服务器还在。
+- `ttl-is-tight`：复用时服务器已经不在了 → 该加长。
+- `no-data`：没有样本就不猜——**从零个观测里编一个 TTL，是让 TTL 变成民间传说的方式。**
+
+判定逻辑在 `src/lsp/ttlStats.ts`（纯函数，5 条单测），脚本只负责读日志和打印。
+
+### 9.3 CM5 → CM6 的观察项
+
+`verify:ui-live` 每次跑都会记录一行，**不参与判定**：
+
+```
+OBSERVE cm6-trigger · 100000 lines / 5277779 chars · setValue 30 ms · first keystroke 5 ms · 30 keystrokes 171 ms
+```
+
+触发条件是 **`setValue > 100 ms` 或单次击键 > 5 ms**。当前 100k 行是 **30 ms / 5.7 ms**——击键
+这一项已经压在线上（500 行时是 1.0 ms），所以真正的结论是：**如果用户会打开十万行级别的文件，
+CM6 已经不是「假设中的需要」，而是「刚好够用」。** 500 行的门禁是 `< 150 ms / 30 次`（现在 31 ms）。
+
 ## 九、后续
 
 1. 给 pyright / gopls / tsserver 打开 `manager`，删掉旧路径（预计省 200 行）。

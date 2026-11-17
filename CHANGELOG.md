@@ -23,6 +23,22 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**java 的空闲 TTL 从 5 分钟改到 2 小时，并补上决定它该多长的埋点。** 只有 java 走池化管理器，
+而 jdtls 重启要 6.3–7.0 s——5 分钟 TTL 等于每次离开一会儿就重新交税。TTL 挂在 manifest 的
+`lsp.idleTtlMs` 上而不是全局常量：clangd 重启 86 ms，占两小时内存不值。
+
+但 2 小时是**保守起始值**，不是结论。管理器现在写三条结构化记录：`lsp.server.reused`
+（带 `idleMs`）、`lsp.server.started`（带 `startMs`）、`lsp.server.reaped`；`npm run lsp:ttl`
+把它们变成每种语言的 median/p90/max 闲置时长 + 当前 TTL + 一句判定
+（`ttl-is-generous` / `ttl-is-tight` / `no-data`）。判定逻辑是 `src/lsp/ttlStats.ts` 的纯函数，
+5 条单测——**没有样本时它说 `no-data`，不猜**。
+
+**CM5 → CM6 的观察项上线：** `verify:ui-live` 每次记录 100k 行的三个数，不参与判定。
+第一次实测：**setValue 30 ms · 首次击键 5 ms · 30 次击键 171 ms（5.7 ms/字符）**。触发线是
+setValue > 100 ms 或击键 > 5 ms——**击键这一项已经压在线上**（500 行时 1.0 ms）。
+
+`npm test` 157→**162**。
+
 **`verify:ui-live` 的 5 条红是测试坏，不是产品坏。** 手动驱动真实 app（CDP）复现：
 套件把光标放在第 13 行的 `"hello from fib(10) = "`——**字符串字面量里**的 `fib`，因为
 `indexOf('fib')` 先命中引号内那个。goto 一个字符串自然什么也不返回。改成 `lastIndexOf('fib(')`

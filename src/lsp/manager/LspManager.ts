@@ -86,8 +86,12 @@ export class LspManager {
       cache: this.cache,
       ...(this.log ? { log: this.log } : {}),
       onStart: (info) => {
-        if (info.ok) this.counters.starts++;
-        else this.counters.startFailures++;
+        if (info.ok) {
+          this.counters.starts++;
+          // The TTL is a trade between a resident server and a restart. This is
+          // the cost side of it: what a restart actually took, per start.
+          this.log?.('lsp.server.started', { startMs: Math.round(info.startMs) });
+        } else this.counters.startFailures++;
       },
       onCache: (rebuilt) => {
         if (rebuilt) this.counters.cacheMisses++;
@@ -136,6 +140,16 @@ export class LspManager {
     const got = this.pool.acquire(plugin, root);
     if (got.converged) this.counters.converged++;
     else if (got.reused) this.counters.reused++;
+    if (got.reused || got.converged) {
+      // The benefit side of the same trade: how long this server had been idle
+      // before it was wanted again. `npm run lsp:ttl` turns these into a
+      // distribution, which is the only honest input for a TTL.
+      this.log?.('lsp.server.reused', {
+        language: pluginId,
+        idleMs: Math.round(got.entry.describe().idleMs),
+        converged: got.converged,
+      });
+    }
     return got.entry;
   }
 
@@ -268,6 +282,7 @@ export class LspManager {
   reapNow(now = Date.now()): string[] {
     const reaped = this.pool.reap(now);
     this.counters.reaped += reaped.length;
+    if (reaped.length) this.log?.('lsp.server.reaped', { keys: reaped });
     return reaped;
   }
 

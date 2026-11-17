@@ -82,7 +82,8 @@
     "verify:lsp-manager": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-manager.ts",
     "verify:lsp-protocol": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-protocol.ts",
     "verify:lsp-semantics": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-lsp-semantics.ts",
-    "verify:startup": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-startup.ts"
+    "verify:startup": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/verify-startup.ts",
+    "lsp:ttl": "node --experimental-transform-types --no-warnings --experimental-loader ./resolve-loader.mjs scripts/lsp-ttl-report.ts"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.3",
