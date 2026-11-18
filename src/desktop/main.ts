@@ -280,7 +280,7 @@ async function main(): Promise<void> {
     const recorded = session?.browserPid;
     const handleAlive = recorded
       ? (await findVisibleWindows([recorded])).length > 0
-      : (await findVisibleWindows(await findWindowProcesses(webViewProfileDir()))).length > 0;
+      : (await findVisibleWindows(await findWindowProcesses(webViewProfileDir(), serverPort()))).length > 0;
     // A handle is not a page: an Edge tree whose page never connected renders
     // nothing, and treating it as alive is what left "有进程，没窗口" with no way
     // out except Task Manager.
@@ -455,7 +455,7 @@ async function main(): Promise<void> {
     let candidates: number[] = [];
     let loggedInvisible = false;
     while (Date.now() < deadline) {
-      if (!candidates.length) candidates = await findWindowProcesses(profile);
+      if (!candidates.length) candidates = await findWindowProcesses(profile, serverPort());
       if (candidates.length) {
         // The command line proves a process; only a window handle proves a UI.
         const visible = await findVisibleWindows(candidates);
@@ -499,6 +499,8 @@ async function main(): Promise<void> {
   if (view && view.engine !== 'none') {
     let everConnected = false;
     let quietSeconds = 0;
+    /** Quiet ticks since the last window query; see the rate limit below. */
+    let visibleChecks = 0;
     setInterval(() => {
       if (shuttingDown) return;
       if (server.clientCount() > 0) {
@@ -517,7 +519,14 @@ async function main(): Promise<void> {
         // it was serving. That is the "关掉窗口，进程还在，装不了新版" report.
         // Asking for a *visible handle* is the only check that answers the
         // question the watchdog is actually asking.
-        if (windowPid) {
+        //
+        // But that check spawns a PowerShell, and a page that is merely
+        // reloading would pay for it on every tick forever. So: a dead pid
+        // needs no query at all (`isAlive` is a syscall), and a live one is
+        // asked at most every third tick — 30 s, still well inside "the user
+        // closed the window and went to install something".
+        if (windowPid && isAlive(windowPid)) {
+          if (++visibleChecks % 3 !== 0) return;
           const visible = await findVisibleWindows([windowPid]);
           if (visible.length) {
             logDesktop('watchdog-check', { windowsAlive: 1, pids: [windowPid] });
@@ -527,7 +536,7 @@ async function main(): Promise<void> {
         // Delegation can move the window to a pid we never spawned, so the
         // profile is still the authority on "is anything showing this app".
         const alive = windowProfile
-          ? await findVisibleWindows(await findWindowProcesses(windowProfile))
+          ? await findVisibleWindows(await findWindowProcesses(windowProfile, serverPort()))
           : [];
         logDesktop('watchdog-check', { windowsAlive: alive.length, pids: alive, windowPid: windowPid ?? null });
         if (alive.length === 0) shutdown('no-window');

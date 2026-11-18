@@ -198,17 +198,22 @@ export async function closeRecordedWindow(profile: string): Promise<number | und
  * line; one short-lived PowerShell costs a few hundred milliseconds and only
  * runs when a previous window may still be around.
  */
-export async function findWindowProcesses(profile: string): Promise<number[]> {
+export async function findWindowProcesses(profile: string, port?: number): Promise<number[]> {
   if (process.platform !== 'win32') return [];
   const quoted = profile.replace(/'/g, "''");
   // `.Contains()` is case-sensitive and the browser normalises the profile
   // path, so an exact match misses the very process that makes Edge delegate.
   // Match case-insensitively, and accept the loopback --app URL as a second
   // marker: it is unique to this app even if the profile string differs.
+  //
+  // The URL marker carries *our* port. `--app=` alone matched every Edge app
+  // window on the machine, including ones the user opened for other sites on
+  // localhost — and the caller kills what this returns.
+  const url = port ? `--app=http://127\\.0\\.0\\.1:${port}([/?"]|$)` : '--app=http://127\\.0\\.0\\.1:';
   const script = [
     `$p = '${quoted}';`,
     `Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='msedgewebview2.exe'" |`,
-    `  Where-Object { $_.CommandLine -and $_.CommandLine -match '--app=' -and (($_.CommandLine.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($_.CommandLine -match '--app=http://127.0.0.1:')) } |`,
+    `  Where-Object { $_.CommandLine -and $_.CommandLine -match '--app=' -and (($_.CommandLine.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($_.CommandLine -match '${url}')) } |`,
     '  ForEach-Object { $_.ProcessId }',
   ].join(' ');
   return await new Promise<number[]>((resolve) => {
@@ -322,8 +327,8 @@ export async function findVisibleWindows(pids: number[]): Promise<number[]> {
  * second window on screen and (b) make the freshly spawned process exit at once,
  * so the window would look closed while it is not.
  */
-export async function closeStaleWindows(profile: string): Promise<number[]> {
-  const pids = await findWindowProcesses(profile);
+export async function closeStaleWindows(profile: string, port?: number): Promise<number[]> {
+  const pids = await findWindowProcesses(profile, port);
   for (const pid of pids) killTree(pid);
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline && pids.some((pid) => isAlive(pid))) {

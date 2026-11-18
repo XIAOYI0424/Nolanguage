@@ -35,16 +35,17 @@ SetCompressor /SOLID lzma
 ; Written through `cmd /c echo >>`, not `FileOpen ... a`: appending from NSIS
 ; here produced a file whose only surviving line was the last one written, which
 ; is worse than no log at all. Keep the text ASCII and free of `&`, `>` and `%`
-; — cmd is doing the writing.
+; — cmd is doing the writing. `%DATE% %TIME%` are expanded by cmd itself, so the
+; timestamp costs nothing extra: "step3 took 40 s" is invisible without it.
 !define INSTLOG "$TEMP\Nolanguage-install.log"
 
 !macro LOGMSG text
-  nsExec::Exec 'cmd /c echo ${text}>>"%TEMP%\Nolanguage-install.log"'
+  nsExec::Exec 'cmd /c echo [%DATE:~0,10% %TIME%] ${text}>>"%TEMP%\Nolanguage-install.log"'
   Pop $0
 !macroend
 
 !macro LOGVAL label value
-  nsExec::Exec 'cmd /c echo ${label}=[${value}]>>"%TEMP%\Nolanguage-install.log"'
+  nsExec::Exec 'cmd /c echo [%DATE:~0,10% %TIME%] ${label}=[${value}]>>"%TEMP%\Nolanguage-install.log"'
   Pop $0
 !macroend
 
@@ -203,9 +204,27 @@ Section "安装 ${APP_NAME}" SecInstall
   inst_writable:
 
   DetailPrint "正在解压 ${APP_NAME}.exe…"
-  !insertmacro LOGMSG "step3 extracting payload"
-  File "${APP_EXE}"
-  !insertmacro LOGMSG "step3 payload written"
+  ; Staged under a different name, then swapped in.
+  ;
+  ; Writing the payload straight over the old file means an 85 MB write racing
+  ; the scanner and the indexer for the whole duration — the "confirmed writable,
+  ; still failed" window. Written as `.new` the write is uncontended, and the
+  ; only contested moment is one rename. If that fails the log says so and the
+  ; old exe is still there, which is a better outcome than a half-written one.
+  !insertmacro LOGMSG "step3 extracting payload (staged)"
+  File "/oname=${APP_NAME}.exe.new" "${APP_EXE}"
+  !insertmacro LOGMSG "step3 staged"
+  Delete "$INSTDIR\${APP_NAME}.exe"
+  Rename "$INSTDIR\${APP_NAME}.exe.new" "$INSTDIR\${APP_NAME}.exe"
+  IfFileExists "$INSTDIR\${APP_NAME}.exe.new" 0 inst_swap_ok
+    !insertmacro LOGMSG "ABORT: swap failed - old exe still in place, payload left as .new"
+    IfSilent 0 +3
+      SetErrorLevel 3
+      Quit
+    MessageBox MB_ICONSTOP|MB_OK "无法替换 $INSTDIR\${APP_NAME}.exe：旧文件仍被占用。$\r$\n$\r$\n请退出 ${APP_NAME} 后重试；新文件已解压为 ${APP_NAME}.exe.new，无需重新下载。$\r$\n$\r$\n日志：${INSTLOG}"
+    Abort
+  inst_swap_ok:
+  !insertmacro LOGMSG "step3 swapped in"
 
   ; The CLI shim and the PATH helper travel with the app: `nlg` has to work on a
   ; machine that never installed Node or a source checkout, and the PATH edit
