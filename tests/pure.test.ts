@@ -32,6 +32,8 @@ import {
   undeclaredImports,
 } from '../src/langs/dependencies';
 import { materializeAssets } from '../src/assets/embeddedAssets';
+import { FsService } from '../src/panel/FsService';
+import { handleDraft } from '../src/panel/handlers/fs';
 import { describeFailure } from '../src/desktop/fatalDialog';
 import {
   declaresFeature,
@@ -2298,4 +2300,85 @@ describe('package install', () => {
     // before it finished, which is what makes Stop work while pip is running.
     expect(r.ok).toBe(true);
   }, 20000);
+});
+
+describe('crash recovery · draft copies', () => {
+  /**
+   * A draft is written *outside* the workspace and read back by path, so the two
+   * halves that matter are: nothing lands in the project, and the copy survives a
+   * new FsService (i.e. a new session pointed at the same folder).
+   */
+  it('keeps a dirty buffer outside the workspace and reads it back', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-drafts-'));
+    const workspace = join(home, 'ws');
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, 'app.py'), 'x = 1\n');
+    const prev = process.env.NOLANGUAGE_DATA;
+    process.env.NOLANGUAGE_DATA = join(home, 'data');
+    try {
+      const reply = async (msg: Record<string, unknown>): Promise<any> => {
+        let out: any;
+        await handleDraft(new FsService(workspace), msg, (p) => { out = p; });
+        return out;
+      };
+      expect(await reply({ kind: 'draftSave', path: 'app.py', content: 'x = 2\n' })).toMatchObject({ kind: 'draftSaved', path: 'app.py' });
+
+      const listed = await reply({ kind: 'draftList' });
+      expect(listed.kind).toBe('drafts');
+      expect(listed.drafts).toHaveLength(1);
+      expect(listed.drafts[0]).toMatchObject({ path: 'app.py', content: 'x = 2\n', stale: false, sameAsDisk: false });
+      // The project folder gained nothing: a draft is app state, not a file.
+      expect(readdirSync(workspace)).toEqual(['app.py']);
+
+      // A second session (new service, same folder) sees the same copy.
+      const again: any[] = [];
+      await handleDraft(new FsService(workspace), { kind: 'draftList' }, (p) => again.push(p));
+      expect(again[0].drafts[0].content).toBe('x = 2\n');
+
+      await reply({ kind: 'draftDrop', path: 'app.py' });
+      expect((await reply({ kind: 'draftList' })).drafts).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env.NOLANGUAGE_DATA;
+      else process.env.NOLANGUAGE_DATA = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a draft stale when its file disappeared, so restore cannot overwrite', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-drafts-stale-'));
+    const workspace = join(home, 'ws');
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, 'gone.py'), 'y = 1\n');
+    const prev = process.env.NOLANGUAGE_DATA;
+    process.env.NOLANGUAGE_DATA = join(home, 'data');
+    try {
+      const fs = new FsService(workspace);
+      await handleDraft(fs, { kind: 'draftSave', path: 'gone.py', content: 'y = 2\n' }, () => undefined);
+      rmSync(join(workspace, 'gone.py'));
+      let listed: any;
+      await handleDraft(fs, { kind: 'draftList' }, (p) => { listed = p; });
+      expect(listed.drafts[0]).toMatchObject({ path: 'gone.py', stale: true, sameAsDisk: false });
+    } finally {
+      if (prev === undefined) delete process.env.NOLANGUAGE_DATA;
+      else process.env.NOLANGUAGE_DATA = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an absolute or escaping path instead of storing an unreachable copy', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-drafts-bad-'));
+    const prev = process.env.NOLANGUAGE_DATA;
+    process.env.NOLANGUAGE_DATA = join(home, 'data');
+    try {
+      const fs = new FsService(home);
+      const says: any[] = [];
+      await handleDraft(fs, { kind: 'draftSave', path: 'C:/Windows/x.py', content: 'z' }, (p) => says.push(p));
+      await handleDraft(fs, { kind: 'draftSave', path: '../outside.py', content: 'z' }, (p) => says.push(p));
+      expect(says.map((m) => m.kind)).toEqual(['draftError', 'draftError']);
+    } finally {
+      if (prev === undefined) delete process.env.NOLANGUAGE_DATA;
+      else process.env.NOLANGUAGE_DATA = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

@@ -69,7 +69,7 @@ import { handleAttribute } from './handlers/attribution.js';
 import { languageRoots, pluginPayload } from './handlers/plugins.js';
 import { PerfHandlers } from './handlers/perf.js';
 import { pickPath } from '../util/nativePicker.js';
-import { handleFs } from './handlers/fs.js';
+import { handleDraft, handleFs } from './handlers/fs.js';
 import { handleDebug, handleDebugCmd, handleRun, handleRunScript, handleTerm } from './handlers/run.js';
 import { stateFor, takeConnection } from './conn-state.js';
 
@@ -719,6 +719,13 @@ export async function main(
         case 'fsDelete':
         case 'openFolder':
           void handleFs(fs, msg, reply);
+          break;
+
+        // ---------- crash recovery (dirty buffers kept outside the workspace) ----------
+        case 'draftSave':
+        case 'draftList':
+        case 'draftDrop':
+          void handleDraft(fs, msg, reply);
           break;
 
         // ---------- extensions (host process) ----------

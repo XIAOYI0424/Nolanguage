@@ -467,7 +467,12 @@
       ta.value = text;
       renderEditor();
     }
-    if (currentFile && BUFFERS[currentFile]) BUFFERS[currentFile].dirty = true;
+    if (currentFile && BUFFERS[currentFile]) {
+      BUFFERS[currentFile].dirty = true;
+      // A programmatic rewrite (format, coverage jump, recovered text) is still
+      // unsaved text: it must reach the recovery copy like typed input does.
+      draftTouch(currentFile);
+    }
     renderTabs(); updateCaret();
   }
   function basicFormat(text) {
@@ -953,6 +958,14 @@
         resetTree();
         break;
       case 'fsError': onFsError(m); break;
+      // Crash recovery. The drafts frame is the one that asks a question; the
+      // other two are acknowledgements and stay silent unless something failed.
+      case 'drafts': onDrafts(m); break;
+      case 'draftSaved': paintDraftState(); break;
+      case 'draftDropped': paintDraftState(); break;
+      case 'draftError':
+        if (m.path) toast('Draft not kept for ' + m.path + ': ' + String(m.message || 'unknown'));
+        break;
       case 'completion': onCompletion(m); break;
       case 'hover': onHover(m); break;
       case 'scriptOut':

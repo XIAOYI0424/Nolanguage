@@ -1975,6 +1975,69 @@ console.log('');
   w.close();
 }
 
+// ------------------------------------------------ crash recovery (draft copies)
+// The copy is debounced by 2s in the client, so this block is the one place the
+// suite waits on real time. Removing either half of the mechanism goes red:
+// no `draftSave` without the timer, no `draftDrop` without the disk ACK.
+console.log('');
+{
+  const mounted = mountPage(renderPyCharmHtml(7310));
+  const w = mounted.window as any;
+  const socket = needSocket(mounted);
+  const doc = w.document;
+  const tabOf = (name: string): any => qa(w, '#etabs .etab').find((b: any) => b.getAttribute('data-tab') === name);
+  const sentOf = (kind: string): any[] => socket.sent.filter((m: any) => m.kind === kind);
+  await settle(w, 20);
+  check('drafts: boot asks the engine for leftovers', !!socket.lastSentOf('draftList'));
+
+  const ta = doc.getElementById('ta') as any;
+  ta.value = 'x = 1  # draft-gate\n';
+  fire(w, ta, 'input', {});
+  await settle(w, 60);
+  check('drafts: a keystroke alone does not write a copy', sentOf('draftSave').length === 0, String(sentOf('draftSave').length));
+
+  await settle(w, 2200);
+  const copy = socket.lastSentOf('draftSave') as any;
+  check('drafts: a dirty buffer produces a recovery copy', !!copy && String(copy.content).includes('draft-gate'), String(copy?.content || '').slice(-24));
+  check('drafts: the status bar says a copy exists', /Draft \d\d:\d\d/.test(String(q(w, '#stDraft')?.textContent || '')), String(q(w, '#stDraft')?.textContent || ''));
+
+  doc.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 's', ctrlKey: true }));
+  await settle(w, 20);
+  const write = socket.lastSentOf('fsWrite') as any;
+  socket.deliver({ kind: 'fsSaved', path: write.path, reqId: write.reqId, mtime: 7, size: String(write.content).length });
+  await settle(w, 20);
+  check('drafts: a disk ACK retires the copy', sentOf('draftDrop').some((m: any) => m.path === write.path), JSON.stringify(sentOf('draftDrop').map((m: any) => m.path)));
+  check('drafts: the status cell hides once nothing is pending', !String(q(w, '#stDraft')?.textContent || ''), String(q(w, '#stDraft')?.textContent || ''));
+
+  socket.deliver({
+    kind: 'drafts',
+    drafts: [
+      { path: 'README.md', content: '# recovered\n', savedAt: Date.now(), stale: false, sameAsDisk: false },
+      { path: 'utils.py', content: 'x = 2\n', savedAt: Date.now() - 1000, stale: true, sameAsDisk: false },
+      { path: 'main.py', content: 'same\n', savedAt: Date.now(), stale: false, sameAsDisk: true },
+    ],
+  });
+  await settle(w, 20);
+  check('drafts: leftovers are offered, not forced', (doc.querySelector('#dlgRoot .dlg-title')?.textContent || '').includes('Restore Unsaved Changes'));
+  check('drafts: a copy already on disk is dropped without asking', sentOf('draftDrop').some((m: any) => m.path === 'main.py'));
+  const writesBefore = sentOf('fsWrite').length;
+  Array.from(doc.querySelectorAll('#dlgRoot .dlg-btn') as ArrayLike<any>)
+    .find((b: any) => b.textContent === 'Restore')?.click();
+  await settle(w, 20);
+  check('drafts: restore opens the recovered text as an unsaved tab', !!tabOf('README.md')?.querySelector('.dirty'));
+  check('drafts: restore never writes to disk', sentOf('fsWrite').length === writesBefore, String(sentOf('fsWrite').length - writesBefore));
+  check('drafts: a copy whose file changed lands beside it as .recovered', !!tabOf('utils.py.recovered'), JSON.stringify(qa(w, '#etabs .etab').map((b: any) => b.getAttribute('data-tab'))));
+
+  socket.deliver({ kind: 'drafts', drafts: [{ path: 'utils.py', content: 'y = 3\n', savedAt: Date.now(), stale: false, sameAsDisk: false }] });
+  await settle(w, 20);
+  const dropsBefore = sentOf('draftDrop').length;
+  Array.from(doc.querySelectorAll('#dlgRoot .dlg-btn') as ArrayLike<any>)
+    .find((b: any) => b.textContent === 'Discard All')?.click();
+  await settle(w, 20);
+  check('drafts: Discard All removes the copy instead of restoring it', sentOf('draftDrop').length === dropsBefore + 1, String(sentOf('draftDrop').length - dropsBefore));
+  w.close();
+}
+
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
 process.exit(failed ? 1 : 0);

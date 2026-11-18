@@ -95,7 +95,13 @@
   })();
   var KCOMMANDS = [];
   BRIDGE.onMessage(handle);
-  BRIDGE.onOpen(function () { BRIDGE.send({ kind: 'listExtensions' }); bootProject(); });
+  BRIDGE.onOpen(function () {
+    BRIDGE.send({ kind: 'listExtensions' });
+    // Ask for anything a previous session left behind before the first paint, so
+    // the recovery offer and the restored tabs appear together.
+    BRIDGE.send({ kind: 'draftList' });
+    bootProject();
+  });
   BRIDGE.onClose(function () {
     // The engine went away (tab closed, sidecar died). The shell keeps working
     // for what it already holds; say so instead of failing silently.
@@ -129,3 +135,71 @@
   var PLUGINS = null;
   /** Which in-app dialog is on screen, so async replies know where to paint. */
   var DIALOG_KIND = null;
+
+  // ---------- crash recovery (drafts) ----------
+  // A dirty buffer is copied *out* of the workspace after a short pause, so a
+  // crash, a killed window or a power cut cannot take unsaved text with it. It is
+  // not a save: the file is never touched, and deleting the copy is the job of a
+  // disk ACK (or an explicit "Don't Save") — never of a successful restore, or a
+  // second crash would lose the text that was just recovered.
+  //
+  // Debounced: writing on every keystroke would flush a megabyte per word. Two
+  // seconds is long enough to coalesce typing and short enough that the window
+  // between "last edit" and "recoverable" stays small.
+  var DRAFT_DELAY = 2000;
+  var DRAFT_TIMER = Object.create(null);
+  var DRAFT_WRITTEN = Object.create(null); // path -> Date.now() of the copy on disk
+
+  function draftPending() { return Object.keys(DRAFT_WRITTEN).length; }
+
+  /** Queue a copy of this buffer; a buffer that is no longer dirty drops it. */
+  function draftTouch(path) {
+    if (!path) return;
+    if (DRAFT_TIMER[path]) { clearTimeout(DRAFT_TIMER[path]); delete DRAFT_TIMER[path]; }
+    var buf = BUFFERS[path];
+    if (!buf || !buf.dirty) return;
+    DRAFT_TIMER[path] = setTimeout(function () {
+      delete DRAFT_TIMER[path];
+      var live = BUFFERS[path];
+      if (!live || !live.dirty) return;
+      DRAFT_WRITTEN[path] = Date.now();
+      BRIDGE.send({ kind: 'draftSave', path: path, content: String(live.content == null ? '' : live.content) });
+      paintDraftState();
+    }, DRAFT_DELAY);
+  }
+
+  /** Forget a buffer's recovery copy (disk ACK, explicit discard, or a tab closed). */
+  function draftDrop(path) {
+    if (!path) return;
+    if (DRAFT_TIMER[path]) { clearTimeout(DRAFT_TIMER[path]); delete DRAFT_TIMER[path]; }
+    if (!DRAFT_WRITTEN[path]) return;
+    delete DRAFT_WRITTEN[path];
+    BRIDGE.send({ kind: 'draftDrop', path: path });
+    paintDraftState();
+  }
+
+  /**
+   * "Draft 12:03" in the status bar while at least one copy exists.
+   *
+   * Without it the recovery copy is invisible state: the user would learn about
+   * it only after a crash, which is exactly the moment they cannot ask questions.
+   */
+  function paintDraftState() {
+    var el = $('stDraft');
+    if (!el) return;
+    var paths = Object.keys(DRAFT_WRITTEN);
+    if (!paths.length) {
+      el.textContent = '';
+      el.removeAttribute('title');
+      el.classList.remove('on');
+      return;
+    }
+    var at = 0;
+    paths.forEach(function (p) { if (DRAFT_WRITTEN[p] > at) at = DRAFT_WRITTEN[p]; });
+    var d = new Date(at);
+    var hh = ('0' + d.getHours()).slice(-2);
+    var mm = ('0' + d.getMinutes()).slice(-2);
+    el.textContent = 'Draft ' + hh + ':' + mm + (paths.length > 1 ? ' (' + paths.length + ' files)' : '');
+    el.title = 'Unsaved copies kept outside the workspace: ' + paths.join(', ');
+    el.classList.add('on');
+  }

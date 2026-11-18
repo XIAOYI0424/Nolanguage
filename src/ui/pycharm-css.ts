@@ -490,6 +490,10 @@ export const PYCHARM_CSS = `
   /* transient status-bar hint (save feedback) */
   .status .cell.hint { color:var(--text-tertiary); opacity:0; transition:opacity .15s; }
   .status .cell.hint.on { opacity:1; color:var(--accent); }
+  /* crash-recovery copy: only present while a draft actually exists, so the row
+     never shows an empty cell that suggests something is being written */
+  .status .cell.draft { display:none; color:var(--warning); }
+  .status .cell.draft.on { display:flex; }
 
   /* ---------- MCP tool window ---------- */
   .mcp { display:flex; flex-direction:column; gap:8px; padding:10px; font-size:12.5px; }

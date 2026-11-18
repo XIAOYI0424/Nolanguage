@@ -425,8 +425,10 @@
       var b = document.createElement('button');
       b.className = 'etab' + (p === currentFile ? ' active' : '');
       b.setAttribute('data-tab', p); // the right-click menu needs to know which tab
+      // Every dirty tab carries the dot, not just the active one: an unsaved
+      // buffer you cannot see is the one you close by accident.
       b.innerHTML = '<span class="ic">' + ic('file', 16) + '</span><span class="nm">' + esc(p) + '</span>' +
-        (p === currentFile && bufferDirty(p) ? '<span class="dirty">●</span>' : '') +
+        (bufferDirty(p) ? '<span class="dirty" title="Unsaved changes">●</span>' : '') +
         '<span class="x" data-close="' + esc(p) + '">' + ic('close', 12) + '</span>';
       b.addEventListener('click', function (e) {
         if (e.target.closest('[data-close]')) { e.stopPropagation(); closeTab(p); return; }
@@ -464,6 +466,9 @@
       return;
     }
     delete CLOSE_AFTER_SAVE[p];
+    // Closing is the end of this buffer: keep nothing that could resurrect it.
+    // (Save already dropped the copy on its ACK; this covers "Don't Save".)
+    draftDrop(p);
     TABS.splice(i, 1); delete BUFFERS[p];
     if (currentFile === p) {
       var next = TABS[TABS.length - 1];
@@ -564,6 +569,12 @@
     if (SAVE_IN_FLIGHT[m.path] === reqId) delete SAVE_IN_FLIGHT[m.path];
     var buf = BUFFERS[m.path];
     if (buf && buf.content === pending.content) buf.dirty = false;
+    // Disk has this content now, so the recovery copy is obsolete — but only an
+    // ACK may drop it: a failed write must leave the draft in place.
+    if (buf && !buf.dirty) {
+      draftDrop(m.path);
+      if (buf.draftOf) draftDrop(buf.draftOf);
+    }
 
     if (Object.prototype.hasOwnProperty.call(SAVE_QUEUED, m.path)) {
       var queued = SAVE_QUEUED[m.path];
@@ -601,6 +612,74 @@
     if (m.path && BUFFERS[m.path]) return;
     reportError({ level: 'error', title: 'File system error', message: String(m.message || m.code || 'unknown'), detail: m.path });
   }
+
+  // ---------- crash recovery: what the last session left behind ----------
+  // The "drafts" frame arrives once per connection (the engine answers draftList). It is
+  // an offer, not a fait accompli: the user decides, because silently restoring
+  // text into a file they just fixed by hand is how a recovery feature loses
+  // trust on day one.
+  var DRAFTS_OFFERED = null;
+  function onDrafts(m) {
+    var items = (m.drafts || []).filter(function (d) { return d && typeof d.path === 'string'; });
+    var live = [], stale = [];
+    items.forEach(function (d) {
+      // Already on disk: the write landed before the crash, nothing to restore.
+      if (d.sameAsDisk) { BRIDGE.send({ kind: 'draftDrop', path: d.path }); return; }
+      (d.stale ? stale : live).push(d);
+    });
+    if (!live.length && !stale.length) return;
+    DRAFTS_OFFERED = { live: live, stale: stale };
+    var all = live.concat(stale);
+    confirmDialog({
+      title: 'Restore Unsaved Changes',
+      icon: 'warn',
+      message: all.length === 1
+        ? 'An earlier session left 1 unsaved file.'
+        : 'An earlier session left ' + all.length + ' unsaved files.',
+      sub: 'They come back as unsaved tabs. Nothing is written to disk until you save.',
+      list: all.slice(0, 8).map(function (d) {
+        return { label: d.path + (d.stale ? '  (changed on disk since)' : ''), icon: 'file' };
+      }),
+      buttons: [
+        { label: 'Discard All', danger: true, onClick: discardDrafts },
+        { label: 'Restore', primary: true, onClick: restoreDrafts }
+      ]
+    });
+  }
+  function discardDrafts() {
+    var offer = DRAFTS_OFFERED; DRAFTS_OFFERED = null;
+    if (!offer) return;
+    offer.live.concat(offer.stale).forEach(function (d) { draftDrop(d.path); });
+    toast('Discarded ' + (offer.live.length + offer.stale.length) + ' recovered file(s)');
+  }
+  function restoreDrafts() {
+    var offer = DRAFTS_OFFERED; DRAFTS_OFFERED = null;
+    if (!offer) return;
+    var all = offer.live.concat(offer.stale);
+    var active = null, restored = 0;
+    all.forEach(function (d) {
+      // A draft whose file changed on disk must not land on top of newer text:
+      // it comes back as "<name>.recovered" and only becomes a file when saved.
+      var target = d.stale ? d.path + '.recovered' : d.path;
+      var existing = BUFFERS[target];
+      if (existing && existing.dirty) return; // live edits win over a stale draft
+      BUFFERS[target] = {
+        content: String(d.content == null ? '' : d.content),
+        languageId: langOfDoc(target),
+        editable: true,
+        dirty: true,
+        draftOf: d.stale ? d.path : undefined
+      };
+      if (!isOpen(target)) TABS.push(target);
+      DRAFT_WRITTEN[d.path] = Number(d.savedAt) || Date.now();
+      active = target;
+      restored++;
+    });
+    paintDraftState();
+    renderTabs();
+    if (active) showBuffer(active);
+    if (restored) toast(restored === 1 ? 'Restored 1 unsaved file' : 'Restored ' + restored + ' unsaved files');
+  }
   /** Transient status-bar hint — the only feedback a successful save gives. */
   var hintT;
   function setStatusHint(text) {
@@ -614,6 +693,7 @@
     if (currentFile && BUFFERS[currentFile]) {
       BUFFERS[currentFile].content = ta.value;
       BUFFERS[currentFile].dirty = true;
+      draftTouch(currentFile);
     }
     if (CLOSE_ALL_BATCH) {
       CLOSE_ALL_BATCH.dirty.forEach(function (p) { delete CLOSE_AFTER_SAVE[p]; });

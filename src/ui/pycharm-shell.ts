@@ -109,6 +109,7 @@ export const PYCHARM_SHELL = `
     <span class="cell" id="stFile">main.py</span>
     <span class="cell" id="stLang"><span class="ic" data-ic="file" data-size="14"></span>Python 3.11</span>
     <span class="cell hint" id="stHint"></span>
+    <span class="cell draft" id="stDraft"></span>
     <span class="cell" id="stPos">Ln 1, Col 1</span>
     <span class="cell" id="stEnc">UTF-8</span>
     <span class="cell" id="stEol">LF</span>
