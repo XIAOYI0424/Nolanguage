@@ -8,7 +8,7 @@
  * engine is language-blind. That holds in `RunnerFactory` and the runtimes, and
  * it drifted everywhere else: `src/panel` and `src/lsp` carry language names as
  * literals (an extension map, a coverage default of `'python'`, a Python-only
- * fallback server resolved from generic code), and the four builtin manifests
+ * fallback server resolved from generic code), and the five builtin manifests
  * disagree about which `lsp` sub-fields they declare.
  *
  * None of that breaks a test today, which is exactly why it needs a gate: each

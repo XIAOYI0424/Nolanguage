@@ -6,23 +6,31 @@
  * *where* — that is the part users get wrong (running `npm install` in the wrong
  * directory, or `pip install` when the project uses uv).
  *
- * Nothing in this file writes to disk: the toolchain does, which is why a failed
- * add leaves the project exactly as it was.
+ * Gradle/Maven declaration edits are explicit and validated. Fetching is a
+ * separate user action (`planSync`), because a build can take minutes and touch
+ * the network. A failed process-based add leaves the project manifest untouched.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { applyDeclaredAdd, planDeclaredAdd, type DeclaredAddPlan } from './declaredDependencies.js';
+import { planSpawn } from '../util/spawnPlan.js';
 
-export type Ecosystem = 'npm' | 'cargo' | 'uv' | 'go';
+export type Ecosystem = 'npm' | 'pnpm' | 'yarn' | 'cargo' | 'uv' | 'go' | 'gradle' | 'maven';
 
 export interface AddPlan {
   ecosystem: Ecosystem;
-  /** Executable, already resolved for this platform (npm is a .cmd on Windows). */
+  /** Executable, already resolved for this platform (npm is a .cmd on Windows). Empty for a declaration edit. */
   command: string;
   args: string[];
   cwd: string;
   /** What to show the user before they press the button. */
   label: string;
+  /**
+   * Set when the ecosystem has no "add" command and the declaration must be
+   * written into the project file instead (Gradle / Maven).
+   */
+  declared?: DeclaredAddPlan;
 }
 
 export interface AddResult {
@@ -65,9 +73,17 @@ export function planAdd(dir: string, spec: string, opts: { probe?: boolean } = {
   // `probe` is the dialog asking "which ecosystem is this?" before the user has
   // typed anything; it wants the command without the argument.
   if (!raw && !opts.probe) throw new DependencyError('请填写要添加的依赖', 'spec');
-  if (raw && !SPEC.test(raw)) throw new DependencyError('依赖名里有不支持的字符', 'spec');
 
   const has = (file: string): boolean => existsSync(join(dir, file));
+
+  // Gradle/Maven own declarations in a build file, so validate their richer
+  // coordinate grammar before applying the command-spec whitelist for CLI ecosystems.
+  const declared = planDeclaredAdd(dir, raw, opts.probe === true);
+  if (declared) {
+    return { ecosystem: declared.ecosystem, command: '', args: [], cwd: dir, label: declared.label, declared };
+  }
+
+  if (raw && !SPEC.test(raw)) throw new DependencyError('依赖名里有不支持的字符', 'spec');
 
   if (has('Cargo.toml')) {
     return { ecosystem: 'cargo', command: bin('cargo'), args: raw ? ['add', raw] : [], cwd: dir, label: 'cargo add' };
@@ -84,11 +100,90 @@ export function planAdd(dir: string, spec: string, opts: { probe?: boolean } = {
   if (has('package.json')) {
     return { ecosystem: 'npm', command: bin('npm'), args: raw ? ['install', raw] : [], cwd: dir, label: 'npm install' };
   }
-  throw new DependencyError('这个目录里没有识别到项目（Cargo.toml / go.mod / pyproject.toml / package.json）', 'dir');
+  throw new DependencyError('这个目录里没有识别到项目（Cargo.toml / go.mod / pyproject.toml / package.json / build.gradle / pom.xml）', 'dir');
+}
+
+/** Apply a declaration edit. Process-based plans must go through `runAdd`. */
+export function applyAdd(plan: AddPlan): AddResult {
+  if (!plan.declared) {
+    return { ok: false, plan, code: null, output: '这个依赖不需要编辑项目文件' };
+  }
+  try {
+    const output = applyDeclaredAdd(plan.declared);
+    return { ok: true, plan, code: 0, output };
+  } catch (err) {
+    return { ok: false, plan, code: null, output: (err as Error).message };
+  }
+}
+
+/**
+ * Fetch what the project already declares.
+ *
+ * This is deliberately a separate, explicit action: a Gradle build can run for
+ * minutes and hit the network, so it must never be a side effect of writing a
+ * template. The command comes from the marker in the directory, not from a
+ * language id.
+ */
+export function planSync(dir: string): AddPlan {
+  const has = (file: string): boolean => existsSync(join(dir, file));
+  if (has('build.gradle.kts') || has('build.gradle') || has('settings.gradle') || has('settings.gradle.kts')) {
+    const wrapper = process.platform === 'win32'
+      ? (has('gradlew.bat') ? join(dir, 'gradlew.bat') : 'gradle')
+      : (has('gradlew') ? join(dir, 'gradlew') : 'gradle');
+    return {
+      ecosystem: 'gradle',
+      command: wrapper,
+      args: ['--no-daemon', 'classes'],
+      cwd: dir,
+      label: `${wrapper === 'gradle' ? 'gradle' : wrapper} --no-daemon classes（拉取依赖）`,
+    };
+  }
+  if (has('pom.xml')) {
+    const wrapper = process.platform === 'win32'
+      ? (has('mvnw.cmd') ? join(dir, 'mvnw.cmd') : 'mvn')
+      : (has('mvnw') ? join(dir, 'mvnw') : 'mvn');
+    return {
+      ecosystem: 'maven',
+      command: wrapper,
+      args: ['-B', '-q', 'dependency:resolve'],
+      cwd: dir,
+      label: `${wrapper === 'mvn' ? 'mvn' : wrapper} dependency:resolve（拉取依赖）`,
+    };
+  }
+  if (has('pyproject.toml')) {
+    return { ecosystem: 'uv', command: bin('uv'), args: ['sync'], cwd: dir, label: 'uv sync（拉取依赖）' };
+  }
+  if (has('requirements.txt')) {
+    return { ecosystem: 'uv', command: bin('uv'), args: ['pip', 'install', '-r', 'requirements.txt'], cwd: dir, label: 'uv pip install -r requirements.txt（拉取依赖）' };
+  }
+  if (has('Cargo.toml')) {
+    return { ecosystem: 'cargo', command: bin('cargo'), args: ['fetch'], cwd: dir, label: 'cargo fetch（拉取依赖）' };
+  }
+  if (has('go.mod')) {
+    return { ecosystem: 'go', command: bin('go'), args: ['mod', 'download'], cwd: dir, label: 'go mod download（拉取依赖）' };
+  }
+  if (has('package.json')) {
+    if (has('pnpm-lock.yaml')) {
+      return { ecosystem: 'pnpm', command: bin('pnpm'), args: ['install', '--frozen-lockfile'], cwd: dir, label: 'pnpm install --frozen-lockfile（拉取依赖）' };
+    }
+    if (has('yarn.lock')) {
+      return { ecosystem: 'yarn', command: bin('yarn'), args: ['install', '--frozen-lockfile'], cwd: dir, label: 'yarn install --frozen-lockfile（拉取依赖）' };
+    }
+    const ci = has('package-lock.json');
+    return {
+      ecosystem: 'npm',
+      command: bin('npm'),
+      args: ci ? ['ci'] : ['install'],
+      cwd: dir,
+      label: `npm ${ci ? 'ci' : 'install'}（拉取依赖）`,
+    };
+  }
+  throw new DependencyError('这个目录里没有识别到可同步的项目（build.gradle / pom.xml / Cargo.toml / go.mod / pyproject.toml / package.json）', 'dir');
 }
 
 /** Run a plan, capturing both streams. Never throws for a non-zero exit. */
 export function runAdd(plan: AddPlan, timeoutMs = 120_000): Promise<AddResult> {
+  if (plan.declared) return Promise.resolve(applyAdd(plan));
   return new Promise((resolve) => {
     let out = '';
     let done = false;
@@ -99,7 +194,8 @@ export function runAdd(plan: AddPlan, timeoutMs = 120_000): Promise<AddResult> {
     };
     let child;
     try {
-      child = spawn(plan.command, plan.args, { cwd: plan.cwd, windowsHide: true, shell: false });
+      const launch = planSpawn(plan.command, plan.args);
+      child = spawn(launch.command, launch.args, { cwd: plan.cwd, windowsHide: true, shell: launch.shell });
     } catch (err) {
       out = (err as Error).message;
       finish(null);

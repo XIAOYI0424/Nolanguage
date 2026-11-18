@@ -2,6 +2,41 @@
 
 ## 0.7.24 — 2026-11-15
 
+### 编辑器偏好：主题、保存时格式化、可搜索的命令面板
+
+设置面板（Ctrl+Alt+S）现在真的把三项偏好写进 `prefs` 并在下次启动时还原：主题（Darcula
+默认 / Light，标题栏的开关按钮走同一条 `setTheme` 路径）、**保存时格式化**、界面语言
+（`zh-CN` / `en`，切换后 `document.documentElement.lang` 一并更新，读屏与拼写检查不再按
+中文界面走）。
+
+保存时格式化先向语言服务器要格式化编辑，应用到缓冲区之后再写盘；没有服务器的语言直接保存，
+不会为了等一个永远不会来的响应把 Ctrl+S 挂住。写入仍然要等磁盘 ACK，格式化只是插在
+「取缓冲区」和「发送保存」之间。
+
+命令面板（Ctrl+P）从「只跑 `nlg` 脚本」变成两种模式：以 `nlg` 开头依旧执行脚本，其他输入
+过滤菜单项、回车跑第一条匹配。列表直接由 `MENUS` 推导，所以新加的菜单项立刻可搜索，没有
+第二份命令注册表需要同步。
+
+### 新建项目：Java 构建文件与多语言框架脚手架
+
+用户给出的 `NeroSama/vtuber/java/build.gradle` 暴露了两个缺口：Java 的依赖声明没有可走的
+添加路径，其他语言也只有最小包骨架，没有框架工程。现在向导新增 **17 个已发布模板**：
+
+- Java 升为内置插件，带来 Gradle 多模块（根 `build.gradle` + `app` + JUnit 5，Java toolchain
+  与用户那份工程同形）、Spring Boot 3.3.5（固定 starter 与插件版本）、Maven CLI 三套工程；
+- Python FastAPI、JavaScript Vite + React + TS、Go Gin、Rust Axum、C++ CMake 各一套框架模板。
+  全部是 manifest 数据，UI 与引擎没有增加任何语言分支。
+
+「添加依赖」现在覆盖 **Gradle / Maven**：这两个生态没有 `add` 子命令，工具会校验
+`group:artifact[:version]` 后把声明写进 `build.gradle` 的 `dependencies { }` 或 `pom.xml` 的
+`<dependencies>`，重复添加直接拒绝，写入先落临时文件再改名。Gradle/Maven 依赖也能在
+Packages 视图解析出来。对话框新增「拉取依赖」按钮，按项目标记执行 `gradle classes`、
+`mvn dependency:resolve`、`cargo fetch`、`go mod download`、`uv sync` 或 `npm ci/install`；
+生成工程本身不会偷偷联网。
+
+`verify:langplugins` 现在把每个已发布模板按默认参数真生成一遍，断言无未解析占位符与关键
+文件存在；manifest 校验也修掉了「没有 LSP 块就不校验模板」的漏网路径。
+
 ### 安装日志：修复「进程占用」误报与未走 PID 兜底
 
 **读取用户 16:45 的真实日志后，抓到安装器自己吞掉了 helper 的失败码。** 日志是从

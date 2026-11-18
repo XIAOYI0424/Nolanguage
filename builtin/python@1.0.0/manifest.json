@@ -288,6 +288,27 @@
         ]
       },
       {
+        "id": "fastapi-service",
+        "name": "FastAPI 服务",
+        "description": "pyproject.toml + app/main.py + httpx 测试，依赖声明可直接用「拉取依赖」解析",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "项目名", "kind": "text", "default": "demo-api", "required": true, "pattern": "^[a-z][a-z0-9_-]*$", "hint": "小写字母开头，只能含字母、数字、下划线、连字符", "group": "项目坐标" },
+          { "key": "python", "label": "Python 版本", "kind": "select", "default": "3.12", "options": [{ "value": "3.11", "label": "3.11" }, { "value": "3.12", "label": "3.12" }, { "value": "3.13", "label": "3.13" }], "group": "技术栈" },
+          { "key": "withTests", "label": "生成 httpx 测试", "kind": "boolean", "default": true, "group": "选项" }
+        ],
+        "files": [
+          { "path": "pyproject.toml", "template": "[project]\nname = \"{{name}}\"\nversion = \"0.1.0\"\nrequires-python = \">={{python}}\"\ndependencies = [\n    \"fastapi>=0.115\",\n    \"uvicorn[standard]>=0.30\",\n]\n\n[project.optional-dependencies]\ntest = [\"httpx>=0.27\"]\n\n[build-system]\nrequires = [\"setuptools>=68\"]\nbuild-backend = \"setuptools.build_meta\"\n" },
+          { "path": "app/__init__.py", "template": "\"\"\"{{name}}\"\"\"\n" },
+          { "path": "app/main.py", "template": "from fastapi import FastAPI\n\napp = FastAPI(title=\"{{name}}\")\n\n\n@app.get(\"/hello\")\ndef hello() -> dict[str, str]:\n    return {\"message\": \"hello from {{name}}\"}\n" },
+          { "path": "tests/test_main.py", "when": "withTests", "template": "from fastapi.testclient import TestClient\n\nfrom app.main import app\n\nclient = TestClient(app)\n\n\ndef test_hello():\n    response = client.get(\"/hello\")\n    assert response.status_code == 200\n    assert \"{{name}}\" in response.json()[\"message\"]\n" },
+          { "path": ".gitignore", "template": ".venv/\n__pycache__/\n*.pyc\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nFastAPI · Python {{python}}。\n\n```\nuvicorn app.main:app --reload\n```\n\n用「添加依赖」写 pyproject.toml，再点「拉取依赖」执行 `uv sync`。\n" }
+        ]
+      },
+      {
         "id": "script",
         "name": "单文件脚本",
         "description": "一个 py 文件加 README，最少结构",

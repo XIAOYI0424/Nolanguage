@@ -360,7 +360,7 @@ async function testWorkspaceApply(): Promise<void> {
   check('apply: re-enabling brings it back, same language', ids().includes('python'), ids());
 
   const order = ids();
-  check('apply: the language list keeps manifest order', order === 'go,javascript,markdown,python' || order === 'python,go,javascript,markdown', order);
+  check('apply: the language list keeps manifest order', order === 'go,javascript,markdown,python,java' || order === 'python,go,javascript,markdown,java', order);
 
   // The budget sees every language, and an over-budget install sheds a quiet one.
   const budget = ws.resourceSummary();

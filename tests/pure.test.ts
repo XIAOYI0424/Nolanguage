@@ -55,7 +55,7 @@ import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
 import { windowUsable } from '../src/desktop/handshake';
 import { detectProjects } from '../src/scaffold/detect';
-import { planAdd } from '../src/scaffold/dependencies';
+import { applyAdd, planAdd, planSync } from '../src/scaffold/dependencies';
 import { parseEnv, RunConfigStore, splitArgs } from '../src/scaffold/runConfigs';
 import { runtimeSupportsArgs } from '../src/runtimes/index';
 import { TemplateRegistry } from '../src/scaffold/registry';
@@ -1085,6 +1085,120 @@ describe('scaffold · adding a dependency', () => {
     expect(() => planAdd(dir, 'lodash')).toThrow(/没有识别到项目/);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('edits a Gradle dependencies block instead of inventing a gradle add command', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-gradle-'));
+    writeFileSync(join(dir, 'build.gradle'), "plugins { id 'java' }\n\ndependencies {\n    implementation 'org.example:base:1.0'\n}\n");
+    const plan = planAdd(dir, 'com.fasterxml.jackson.core:jackson-databind:2.17.2');
+    expect(plan.ecosystem).toBe('gradle');
+    expect(plan.command).toBe('');
+    expect(plan.declared?.declaration).toBe("implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'");
+    expect(applyAdd(plan).ok).toBe(true);
+    const after = readFileSync(join(dir, 'build.gradle'), 'utf8');
+    expect(after).toContain("implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'");
+    expect(after).toContain("implementation 'org.example:base:1.0'");
+    // A second add is a no-op error, never a duplicate declaration.
+    expect(applyAdd(plan).ok).toBe(false);
+    expect(readFileSync(join(dir, 'build.gradle'), 'utf8')).toBe(after);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('creates a Gradle dependencies block when the build file has none', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-gradle2-'));
+    writeFileSync(join(dir, 'build.gradle.kts'), 'plugins { java }\n');
+    const plan = planAdd(dir, 'org.slf4j:slf4j-api:2.0.13');
+    expect(plan.declared?.file).toBe('build.gradle.kts');
+    expect(plan.declared?.declaration).toBe('implementation("org.slf4j:slf4j-api:2.0.13")');
+    expect(applyAdd(plan).ok).toBe(true);
+    const after = readFileSync(join(dir, 'build.gradle.kts'), 'utf8');
+    expect(after).toContain('dependencies {');
+    expect(after).toContain('implementation("org.slf4j:slf4j-api:2.0.13")');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('edits the included module of a Gradle multi-project, not the aggregator root', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-gradle3-'));
+    mkdirSync(join(dir, 'service/api'), { recursive: true });
+    writeFileSync(join(dir, 'settings.gradle'), "rootProject.name = 'demo'\ninclude 'service:api'\n");
+    writeFileSync(join(dir, 'build.gradle'), "plugins { id 'java' apply false }\n");
+    writeFileSync(join(dir, 'service/api/build.gradle'), "plugins { id 'java' }\n\ndependencies {\n}\n");
+    const plan = planAdd(dir, 'org.example:core:1.0');
+    expect(plan.declared?.file).toBe('service/api/build.gradle');
+    expect(applyAdd(plan).ok).toBe(true);
+    expect(readFileSync(join(dir, 'service/api/build.gradle'), 'utf8')).toContain("implementation 'org.example:core:1.0'");
+    expect(readFileSync(join(dir, 'build.gradle'), 'utf8')).not.toContain('dependencies');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('edits pom.xml and rejects a coordinate that is not Maven-shaped', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-maven-'));
+    writeFileSync(join(dir, 'pom.xml'), '<project><modelVersion>4.0.0</modelVersion></project>\n');
+    expect(() => planAdd(dir, 'lodash && rm -rf /')).toThrow(/坐标/);
+    const plan = planAdd(dir, 'org.example:core:1.2.3');
+    expect(plan.ecosystem).toBe('maven');
+    expect(applyAdd(plan).ok).toBe(true);
+    const after = readFileSync(join(dir, 'pom.xml'), 'utf8');
+    expect(after).toContain('<groupId>org.example</groupId>');
+    expect(after).toContain('<version>1.2.3</version>');
+    expect(after.indexOf('<dependencies>')).toBeLessThan(after.indexOf('</project>'));
+    expect(applyAdd(plan).ok).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('scaffold · fetching declared packages', () => {
+  const cases: Array<[string, string, string[]]> = [
+    ['build.gradle', 'gradle', ['--no-daemon', 'classes']],
+    ['pom.xml', 'maven', ['-B', '-q', 'dependency:resolve']],
+    ['Cargo.toml', 'cargo', ['fetch']],
+    ['go.mod', 'go', ['mod', 'download']],
+    ['pyproject.toml', 'uv', ['sync']],
+    ['package.json', 'npm', ['install']],
+  ];
+  for (const [marker, ecosystem, args] of cases) {
+    it(`plans a sync for ${marker}`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'nl-sync-'));
+      writeFileSync(join(dir, marker), 'x');
+      const plan = planSync(dir);
+      expect(plan.ecosystem).toBe(ecosystem);
+      expect(plan.args).toEqual(args);
+      expect(plan.cwd).toBe(dir);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  it('uses the Gradle wrapper when present', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-sync-gradle-wrapper-'));
+    writeFileSync(join(dir, 'build.gradle'), '');
+    const wrapper = process.platform === 'win32' ? 'gradlew.bat' : 'gradlew';
+    writeFileSync(join(dir, wrapper), '');
+    const plan = planSync(dir);
+    expect(plan.command).toBe(join(dir, wrapper));
+    expect(plan.args).toEqual(['--no-daemon', 'classes']);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('prefers pnpm or Yarn lockfiles to npm', () => {
+    const pnpm = mkdtempSync(join(tmpdir(), 'nl-sync-pnpm-'));
+    writeFileSync(join(pnpm, 'package.json'), '{}');
+    writeFileSync(join(pnpm, 'pnpm-lock.yaml'), 'lockfileVersion: 9');
+    expect(planSync(pnpm)).toMatchObject({ ecosystem: 'pnpm', args: ['install', '--frozen-lockfile'] });
+    rmSync(pnpm, { recursive: true, force: true });
+
+    const yarn = mkdtempSync(join(tmpdir(), 'nl-sync-yarn-'));
+    writeFileSync(join(yarn, 'package.json'), '{}');
+    writeFileSync(join(yarn, 'yarn.lock'), '');
+    expect(planSync(yarn)).toMatchObject({ ecosystem: 'yarn', args: ['install', '--frozen-lockfile'] });
+    rmSync(yarn, { recursive: true, force: true });
+  });
+
+  it('uses npm ci when a lockfile is committed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-sync-lock-'));
+    writeFileSync(join(dir, 'package.json'), '{}');
+    writeFileSync(join(dir, 'package-lock.json'), '{}');
+    expect(planSync(dir).args).toEqual(['ci']);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('scaffold · detecting existing projects', () => {
@@ -1093,13 +1207,17 @@ describe('scaffold · detecting existing projects', () => {
     writeFileSync(join(root, 'package.json'), '{"name":"root-app"}');
     mkdirSync(join(root, 'svc'), { recursive: true });
     writeFileSync(join(root, 'svc/Cargo.toml'), '[package]\nname = "svc"\n');
+    mkdirSync(join(root, 'java-service/app'), { recursive: true });
+    writeFileSync(join(root, 'java-service/settings.gradle'), "rootProject.name = 'java-service'\ninclude 'app'\n");
+    writeFileSync(join(root, 'java-service/app/build.gradle'), "plugins { id 'java' }\n");
     mkdirSync(join(root, 'docs'), { recursive: true });
     mkdirSync(join(root, 'node_modules/x'), { recursive: true });
     writeFileSync(join(root, 'node_modules/x/package.json'), '{"name":"dep"}');
 
     const found = detectProjects(root);
-    expect(found.map((c) => `${c.language}:${c.name}`)).toEqual(['javascript:root-app', 'rust:svc']);
-    expect(found[1].marker).toBe('Cargo.toml');
+    expect(found.map((c) => `${c.language}:${c.name}`)).toEqual(['javascript:root-app', 'java:java-service', 'rust:svc']);
+    expect(found[2].marker).toBe('Cargo.toml');
+    expect(found[1].marker).toBe('settings.gradle');
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -1864,6 +1982,81 @@ describe('project dependencies', () => {
       { name: 'github.com/gin-gonic/gin', version: 'v1.9.1' },
       { name: 'github.com/spf13/cobra', version: 'v1.8.0' },
       { name: 'golang.org/x/text', version: 'v0.14.0' },
+    ]);
+  });
+
+  it('reads Cargo.toml simple and inline-table dependency declarations', () => {
+    const text = [
+      '[package]',
+      'name = "demo"',
+      '',
+      '[dependencies]',
+      'serde = "1.0"',
+      'tokio = { version = "1.40", features = ["macros"] }',
+      '',
+      '[dev-dependencies]',
+      'pretty_assertions = "1"',
+      '',
+      '[build-dependencies]',
+      'cc = "1"',
+    ].join('\n');
+    expect(parseDependencies('cargo', text)).toEqual([
+      { name: 'serde', version: '1.0' },
+      { name: 'tokio', version: '1.40' },
+      { name: 'pretty_assertions', version: '1' },
+    ]);
+  });
+
+  it('reads Gradle dependency coordinates from a build file', () => {
+    const text = [
+      'plugins { id "java" }',
+      'dependencies {',
+      "    implementation 'org.springframework.boot:spring-boot-starter-web:3.3.5'",
+      '    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")',
+      "    implementation platform('com.example:bom:1.0')",
+      "    implementation 'org.springframework.boot:spring-boot-starter-web:3.3.5'",
+      '}',
+    ].join('\n');
+    expect(parseDependencies('gradle', text)).toEqual([
+      { name: 'org.springframework.boot:spring-boot-starter-web', version: '3.3.5' },
+      { name: 'org.junit.jupiter:junit-jupiter', version: '5.10.2' },
+      { name: 'com.example:bom', version: '1.0' },
+    ]);
+  });
+
+  it('reads pom.xml dependency blocks, including BOM-managed ones without a version', () => {
+    const text = [
+      '<project>',
+      '  <dependencies>',
+      '    <dependency><groupId>org.example</groupId><artifactId>core</artifactId><version>1.2.3</version></dependency>',
+      '    <dependency>',
+      '      <groupId>com.fasterxml.jackson.core</groupId>',
+      '      <artifactId>jackson-databind</artifactId>',
+      '    </dependency>',
+      '  </dependencies>',
+      '</project>',
+    ].join('\n');
+    expect(parseDependencies('maven', text)).toEqual([
+      { name: 'org.example:core', version: '1.2.3' },
+      { name: 'com.fasterxml.jackson.core:jackson-databind' },
+    ]);
+  });
+
+  it('reads Maven dependency XML blocks and ignores dependencyManagement', () => {
+    const text = [
+      '<project>',
+      '  <dependencyManagement><dependencies>',
+      '    <dependency><groupId>org.example</groupId><artifactId>bom</artifactId><version>1</version></dependency>',
+      '  </dependencies></dependencyManagement>',
+      '  <dependencies>',
+      '    <dependency><groupId>org.example</groupId><artifactId>core</artifactId><version>1.2.3</version></dependency>',
+      '    <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>',
+      '  </dependencies>',
+      '</project>',
+    ].join('\n');
+    expect(parseDependencies('maven', text)).toEqual([
+      { name: 'org.example:core', version: '1.2.3' },
+      { name: 'com.fasterxml.jackson.core:jackson-databind' },
     ]);
   });
 

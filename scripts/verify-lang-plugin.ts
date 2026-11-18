@@ -1,5 +1,5 @@
 /**
- * Install four languages from the command line, then use each one in the app.
+ * Install example languages from the command line, then use each one in the app.
  *
  * The `nlg lang add` path is the only distribution route for a plugin that is
  * not in the marketplace: a directory with a manifest. This suite runs the
@@ -181,22 +181,25 @@ async function main(): Promise<void> {
   }
   for (const d of [HOME, TMP]) mkdirSync(d, { recursive: true });
 
-  // ---- 1. the CLI sees the built-ins, and none of the four ----
+  // ---- 1. the CLI sees the built-ins, and none of the example-only ones ----
   const before = cli(['lang', 'ls', '--home', HOME]);
   check('nlg lang ls answers', before.code === 0 && /python/.test(before.out), (before.out.split('\n')[1] ?? '').trim());
-  check('none of the four is installed yet', !CASES.some((c) => new RegExp(`^${c.id}\\s`, 'm').test(before.out)));
+  const fresh = CASES.filter((c) => c.id !== 'java'); // java is builtin now
+  check('none of the example-only languages is installed yet', !fresh.some((c) => new RegExp(`^${c.id}\\s`, 'm').test(before.out)));
 
-  // ---- 2. install all four from their directories ----
-  for (const c of CASES) {
+  // ---- 2. install the three example-only plugins; java ships builtin ----
+  for (const c of fresh) {
     const add = cli(['lang', 'add', c.dir, '--home', HOME]);
     check(`nlg lang add ${c.id}`, add.code === 0 && new RegExp(`added ${c.id}@1\\.0\\.0`).test(add.out),
       (add.out.split('\n')[0] ?? '').trim());
   }
   const after = cli(['lang', 'ls', '--home', HOME]);
-  for (const c of CASES) {
+  for (const c of fresh) {
     const row = after.out.split('\n').find((l) => new RegExp(`^${c.id}\\s`).test(l)) ?? '';
     check(`${c.id} is listed in the user layer`, /user/.test(row) && /yes/.test(row), row.trim());
   }
+  const javaRow = after.out.split('\n').find((l) => /^java\s/.test(l)) ?? '';
+  check('java is listed in the builtin layer', /builtin/.test(javaRow) && /yes/.test(javaRow), javaRow.trim());
 
   // ---- 3. the app treats each as a first-class language ----
   const logs: string[] = [];
@@ -262,7 +265,7 @@ async function main(): Promise<void> {
     client.send({ kind: 'status' });
     const ws = await client.waitFor('workspace', 20_000);
     const langs = (ws?.languages ?? []) as Array<{ id: string; fileName?: string; runMode?: string }>;
-    check('the workspace lists every language', langs.length === 4 + CASES.length,
+    check('the workspace lists every language', langs.length === 5 + fresh.length,
       langs.map((l) => l.id).join(','));
 
     for (const c of CASES) {

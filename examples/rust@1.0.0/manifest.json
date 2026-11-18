@@ -64,6 +64,16 @@
       }
     ]
   },
+  "dependencies": {
+    "format": "cargo",
+    "files": [
+      "Cargo.toml"
+    ],
+    "install": [
+      "cargo",
+      "add"
+    ]
+  },
   "scaffold": {
     "onFirstRun": [
       {
@@ -124,6 +134,24 @@
             "path": ".gitignore",
             "template": "/target\n"
           }
+        ]
+      },
+      {
+        "id": "axum-service",
+        "name": "Axum HTTP 服务",
+        "description": "Cargo.toml + axum/tokio 依赖 + 路由测试，可用「拉取依赖」执行 cargo fetch",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "crate 名", "kind": "text", "default": "demo-axum", "required": true, "pattern": "^[a-z][a-z0-9_-]*$", "hint": "小写字母开头，只能含小写字母、数字、下划线、连字符", "group": "项目坐标" },
+          { "key": "edition", "label": "Edition", "kind": "select", "default": "2021", "options": [{ "value": "2021", "label": "2021" }, { "value": "2024", "label": "2024" }], "group": "技术栈" }
+        ],
+        "files": [
+          { "path": "Cargo.toml", "template": "[package]\nname = \"{{name}}\"\nversion = \"0.1.0\"\nedition = \"{{edition}}\"\n\n[dependencies]\naxum = \"0.7\"\ntokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }\nserde_json = \"1\"\ntower = { version = \"0.4\", features = [\"util\"] }\n" },
+          { "path": "src/main.rs", "template": "use axum::{routing::get, Json, Router};\nuse serde_json::json;\n\nfn app() -> Router {\n    Router::new().route(\"/hello\", get(|| async { Json(json!({ \"message\": \"hello from {{name}}\" })) }))\n}\n\n#[tokio::main]\nasync fn main() {\n    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await.unwrap();\n    axum::serve(listener, app()).await.unwrap();\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use axum::body::Body;\n    use axum::http::{Request, StatusCode};\n    use tower::ServiceExt;\n\n    #[tokio::test]\n    async fn hello_returns_json() {\n        let response = app()\n            .oneshot(Request::builder().uri(\"/hello\").body(Body::empty()).unwrap())\n            .await\n            .unwrap();\n        assert_eq!(response.status(), StatusCode::OK);\n    }\n}\n" },
+          { "path": ".gitignore", "template": "/target\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nAxum · Rust {{edition}}。\n\n```\ncargo fetch\ncargo run\n```\n\n依赖声明都在 Cargo.toml；用「添加依赖」写坐标后再点「拉取依赖」执行 `cargo fetch`。\n" }
         ]
       },
       {

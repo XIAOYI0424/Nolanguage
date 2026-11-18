@@ -86,9 +86,9 @@ async function main(): Promise<void> {
   // ---- 1. status before anything is installed ----
   const before = cli(['lang', 'server', '--home', HOME]);
   check('lang server answers', before.code === 0 && /SERVER/.test(before.out), (before.out.split('\n')[1] ?? '').trim());
-  const beforeRows = before.out.split('\n').filter((l) => /^(python|go|javascript|markdown)\s/.test(l));
-  check('it lists every builtin language', beforeRows.length === 4, `${beforeRows.length} row(s)`);
-  check('all four are reported missing', beforeRows.every((l) => /MISSING/.test(l)), beforeRows.map((l) => l.trim().split(/\s+/)[0]).join(','));
+  const beforeRows = before.out.split('\n').filter((l) => /^(python|go|javascript|markdown|java)\s/.test(l));
+  check('it lists every builtin language', beforeRows.length === 5, `${beforeRows.length} row(s)`);
+  check('all five are reported missing', beforeRows.every((l) => /MISSING/.test(l)), beforeRows.map((l) => l.trim().split(/\s+/)[0]).join(','));
   check('each missing row carries the exact command', beforeRows.some((l) => /npm install --prefix/.test(l)) && beforeRows.some((l) => /go install/.test(l)));
 
   // ---- 2. install one, and prove the panel uses it ----

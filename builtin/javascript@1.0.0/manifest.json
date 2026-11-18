@@ -183,6 +183,27 @@
         ]
       },
       {
+        "id": "vite-react-ts",
+        "name": "Vite + React + TypeScript",
+        "description": "可运行的前端工程：固定版本依赖 + tsconfig + 一个示例页面",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "项目名", "kind": "text", "default": "demo-web", "required": true, "pattern": "^[a-z][a-z0-9-]*$", "hint": "小写字母开头，只能含小写字母、数字、连字符", "group": "项目坐标" }
+        ],
+        "files": [
+          { "path": "package.json", "template": "{\n  \"name\": \"{{name}}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build\": \"tsc --noEmit && vite build\",\n    \"preview\": \"vite preview\"\n  },\n  \"dependencies\": {\n    \"react\": \"^18.3.1\",\n    \"react-dom\": \"^18.3.1\"\n  },\n  \"devDependencies\": {\n    \"@types/react\": \"^18.3.12\",\n    \"@types/react-dom\": \"^18.3.1\",\n    \"@vitejs/plugin-react\": \"^4.3.4\",\n    \"typescript\": \"^5.6.3\",\n    \"vite\": \"^5.4.11\"\n  }\n}\n" },
+          { "path": "tsconfig.json", "template": "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"lib\": [\"ES2022\", \"DOM\", \"DOM.Iterable\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"jsx\": \"react-jsx\",\n    \"strict\": true,\n    \"noEmit\": true,\n    \"skipLibCheck\": true\n  },\n  \"include\": [\"src\", \"vite.config.ts\"]\n}\n" },
+          { "path": "vite.config.ts", "template": "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\nexport default defineConfig({ plugins: [react()] });\n" },
+          { "path": "index.html", "template": "<!doctype html>\n<html lang=\"zh-CN\">\n  <head><meta charset=\"UTF-8\"><title>{{name}}</title></head>\n  <body><div id=\"root\"></div><script type=\"module\" src=\"/src/main.tsx\"></script></body>\n</html>\n" },
+          { "path": "src/main.tsx", "template": "import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport App from './App';\n\nReactDOM.createRoot(document.getElementById('root')!).render(\n  <React.StrictMode><App /></React.StrictMode>,\n);\n" },
+          { "path": "src/App.tsx", "template": "export default function App() {\n  return <main><h1>hello from {{name}}</h1><p>Edit src/App.tsx to get started.</p></main>;\n}\n" },
+          { "path": ".gitignore", "template": "node_modules/\ndist/\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nVite + React + TypeScript。\n\n```\nnpm install\nnpm run dev\n```\n\n「拉取依赖」在有 package-lock.json 时使用 `npm ci`，否则使用 `npm install`。\n" }
+        ]
+      },
+      {
         "id": "module-file",
         "name": "JS 模块文件",
         "description": "<模块>.js，导出一个函数",

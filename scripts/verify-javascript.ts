@@ -242,7 +242,7 @@ async function main(): Promise<void> {
   check('javascript lsp starts out idle (lazy)', jsStatus?.lsp.state === 'pending', jsStatus?.lsp.state ?? '');
   check(
     'workspace status still lists every language',
-    st.languages.map((l) => l.id).join(',') === 'python,go,javascript,markdown',
+    st.languages.map((l) => l.id).join(',') === 'python,go,javascript,markdown,java',
     st.languages.map((l) => l.id).join(','),
   );
 

@@ -568,7 +568,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
 
   const deps = m.dependencies as Record<string, unknown> | undefined;
   if (deps !== undefined) {
-    const formats = ['requirements', 'gomod', 'npm', 'pyproject'];
+    const formats = ['requirements', 'gomod', 'npm', 'pyproject', 'cargo', 'gradle', 'maven'];
     if (typeof deps.format !== 'string' || !formats.includes(deps.format)) {
       add('dependencies.format', `must be one of ${formats.join(' | ')}`);
     }
@@ -590,6 +590,13 @@ export function validateManifest(raw: unknown): ManifestValidation {
       add('dependencies.install', 'must be an array of strings when present');
     }
   }
+
+  // Template declarations are validated for every plugin, not only for the
+  // ones that also ship an LSP: a language server is optional, a bad template
+  // is always a bad template. This used to live inside the `if (lsp)` block,
+  // so a plugin without a server could ship an unresolvable {{placeholder}}.
+  const scaffold = m.scaffold as Record<string, unknown> | undefined;
+  if (scaffold && scaffold.templates !== undefined) validateTemplates(scaffold.templates, add);
 
   const lsp = m.lsp as Record<string, unknown> | undefined;
   if (lsp) {
@@ -622,8 +629,6 @@ export function validateManifest(raw: unknown): ManifestValidation {
         }
       }
     }
-    const scaffold = m.scaffold as Record<string, unknown> | undefined;
-    if (scaffold && scaffold.templates !== undefined) validateTemplates(scaffold.templates, add);
 
     // ---- pooled manager fields ----
     if (lsp.manager !== undefined && typeof lsp.manager !== 'boolean') {

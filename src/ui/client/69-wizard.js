@@ -453,7 +453,7 @@
     }
     var rows = '';
     if (!IMP.items.length) {
-      rows = '<div class="wiz-muted">' + (IMP.busy ? '正在扫描…' : '这个目录下没有找到项目标记（Cargo.toml / package.json / pyproject.toml / go.mod / pom.xml / CMakeLists.txt）。') + '</div>';
+      rows = '<div class="wiz-muted">' + (IMP.busy ? '正在扫描…' : '这个目录下没有找到项目标记（Cargo.toml / package.json / pyproject.toml / go.mod / pom.xml / build.gradle* / CMakeLists.txt）。') + '</div>';
     } else {
       for (var i = 0; i < IMP.items.length; i++) {
         var it = IMP.items[i];
@@ -553,11 +553,12 @@
       + '<div class="wiz-head"><span class="wiz-title">添加依赖</span>' + eco + '<span class="wiz-muted">Ctrl+Alt+D</span></div>'
       + '<div class="wiz-col" style="padding:12px 14px">'
       + '<div class="wiz-field"><label>目录</label><input type="text" id="depDir" value="' + esc(DEP.dir) + '" placeholder="留空 = 当前项目"></div>'
-      + '<div class="wiz-field"><label>依赖</label><input type="text" id="depSpec" value="' + esc(DEP.spec) + '" placeholder="lodash · @scope/pkg@1.2 · serde@1 · github.com/x/y@v1"></div>'
+      + '<div class="wiz-field"><label>依赖</label><input type="text" id="depSpec" value="' + esc(DEP.spec) + '" placeholder="lodash · @scope/pkg@1.2 · serde@1 · github.com/x/y@v1 · com.example:core:1.2.3"></div>'
       + (DEP.error ? '<div class="wiz-hint">' + esc(DEP.error) + '</div>' : '')
       + (DEP.output ? '<div class="wiz-sec">输出</div><pre style="max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0">' + esc(DEP.output) + '</pre>' : '')
       + '</div>'
       + '<div class="wiz-foot">'
+      + '<button class="wiz-btn" id="depSync"' + (DEP.busy ? ' disabled' : '') + '>' + (DEP.busy ? '执行中…' : '拉取依赖') + '</button>'
       + '<button class="wiz-btn" id="depCancel">关闭</button>'
       + '<button class="wiz-btn primary" id="depAdd"' + (DEP.busy ? ' disabled' : '') + '>' + (DEP.busy ? '执行中…' : '添加') + '</button>'
       + '</div></div>';
@@ -578,6 +579,15 @@
     if (cancel) cancel.addEventListener('click', depClose);
     var add = mask.querySelector('#depAdd');
     if (add) add.addEventListener('click', depAdd);
+    var sync = mask.querySelector('#depSync');
+    if (sync) sync.addEventListener('click', function () {
+      if (DEP.busy) return;
+      DEP.busy = true;
+      DEP.error = '';
+      DEP.output = '';
+      depPaint();
+      BRIDGE.send({ kind: 'depsSync', dir: DEP.dir });
+    });
   }
 
   function depAdd() {
@@ -602,7 +612,7 @@
     DEP.error = '';
     depPaint();
     if (m && m.ok) {
-      toast('已添加 ' + DEP.spec.trim());
+      toast(m && m.sync ? '依赖已同步' : '已添加 ' + DEP.spec.trim());
       // The manifest just changed on disk; the tree should show it.
       BRIDGE.send({ kind: 'fsList', path: '.' });
     }

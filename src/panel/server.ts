@@ -42,7 +42,7 @@ import { SAMPLES } from './samples.js';
 import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
 import { detectProjects } from '../scaffold/detect.js';
-import { planAdd, runAdd } from '../scaffold/dependencies.js';
+import { planAdd, planSync, runAdd } from '../scaffold/dependencies.js';
 import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
 import { FsService, FsError } from './FsService.js';
@@ -657,28 +657,22 @@ export async function main(
           reply({ kind: 'runConfigs', reqId: msg.reqId, items: workspace.runConfigs.list() });
           break;
 
-        // ---------- add a dependency ----------
-        case 'depsAdd': {
+        // ---------- add / fetch dependencies ----------
+        case 'depsAdd':
+        case 'depsSync': {
+          const sync = msg.kind === 'depsSync';
           const dir = String(msg.dir ?? '') || workspace.projectRoot();
           const spec = String(msg.spec ?? '');
-          const dryRun = msg.dryRun === true;
+          const dryRun = !sync && msg.dryRun === true;
           void (async () => {
+            const send = (extra: Record<string, unknown>): void =>
+              reply({ kind: 'depResult', reqId: msg.reqId, ...(sync ? { sync: true } : {}), ...extra });
             try {
-              const plan = planAdd(dir, spec, { probe: dryRun && !spec.trim() });
-              if (dryRun) {
-                reply({ kind: 'depResult', reqId: msg.reqId, ok: true, plan, output: '' });
-                return;
-              }
-              const result = await runAdd(plan);
-              reply({ kind: 'depResult', reqId: msg.reqId, ...result });
+              const plan = sync ? planSync(dir) : planAdd(dir, spec, { probe: dryRun && !spec.trim() });
+              if (dryRun) return send({ ok: true, plan, output: '' });
+              send({ ...(await runAdd(plan, sync ? 300_000 : 120_000)) });
             } catch (err) {
-              reply({
-                kind: 'depResult',
-                reqId: msg.reqId,
-                ok: false,
-                message: (err as Error).message,
-                field: (err as { field?: string }).field ?? null,
-              });
+              send({ ok: false, message: (err as Error).message, field: (err as { field?: string }).field ?? null });
             }
           })();
           break;

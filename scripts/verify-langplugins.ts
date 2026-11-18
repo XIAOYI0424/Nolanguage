@@ -24,6 +24,9 @@ import { join } from 'node:path';
 import { Kernel } from '../src/kernel/Kernel.js';
 import { validateManifest, bufferName, primaryExtension, supportsRun, type LanguageManifest } from '../src/langs/manifest.js';
 import { LanguageRegistry, type RegistryRoot } from '../src/langs/Registry.js';
+import { templatesFor } from '../src/langs/templateRegistry.js';
+import { parseDependencies } from '../src/langs/dependencies.js';
+import { applyAdd, planAdd, planSync } from '../src/scaffold/dependencies.js';
 import { RunnerFactory } from '../src/langs/RunnerFactory.js';
 import { RuntimeRegistry, satisfies, parseRequirement } from '../src/runtimes/RuntimeRegistry.js';
 import { defaultRuntimeRegistry } from '../src/runtimes/index.js';
@@ -102,6 +105,21 @@ function testManifest(): void {
 
   const badRequires = validateManifest(baseManifest({ run: { mode: 'template', requires: [1] } }));
   check('manifest: `run.requires` must be strings', !badRequires.ok && badRequires.issues.some((i) => i.field === 'run.requires'));
+
+  // A language without an LSP still ships templates. The template validator
+  // used to sit inside `if (lsp)`, so this shape slipped through unnoticed.
+  const badTemplate = validateManifest(
+    baseManifest({
+      scaffold: {
+        templates: [{ id: 'bad', name: 'Bad', files: [{ path: 'a.txt', template: '{{undeclared}}' }] }],
+      },
+    }),
+  );
+  check(
+    'manifest: templates are validated even without an LSP block',
+    !badTemplate.ok && badTemplate.issues.some((i) => i.field.startsWith('scaffold.templates[0].files[0]')),
+    badTemplate.issues.map((i) => i.field).join(','),
+  );
 }
 
 // ========================================================== 3. examples shelf
@@ -163,6 +181,130 @@ function testVersions(): void {
   check('versions: an empty registry satisfies nothing', !empty.satisfies('template', '^1.0.0'));
 }
 
+// ======================================================== shipped templates
+
+/**
+ * A manifest can validate and still generate a broken project: a path with a
+ * placeholder nobody declared, a file that never gets written, or a framework
+ * template whose dependency line quietly disappeared. Generate every shipped
+ * template here, with its own defaults, and read the result back.
+ */
+async function testTemplates(): Promise<void> {
+  const manifests: LanguageManifest[] = [];
+  for (const root of [BUILTIN, join(ROOT, 'examples')]) {
+    for (const name of (await readdir(root, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name)) {
+      try {
+        const raw: unknown = JSON.parse(await readFile(join(root, name, 'manifest.json'), 'utf8'));
+        if (validateManifest(raw).ok) manifests.push(raw as LanguageManifest);
+      } catch {
+        /* a broken manifest is reported by testExamples(), not twice here */
+      }
+    }
+  }
+  const registry = templatesFor(manifests);
+  const items = registry.list();
+  check('templates: every shipped language contributes project scaffolds', items.length >= 15, `${items.length} template(s)`);
+
+  const watched: Array<[string, string, string]> = [
+    ['java', 'gradle-multi', 'settings.gradle'],
+    ['java', 'gradle-multi', 'app/build.gradle'],
+    ['java', 'spring-boot', 'build.gradle'],
+    ['java', 'maven-app', 'pom.xml'],
+    ['python', 'fastapi-service', 'pyproject.toml'],
+    ['javascript', 'vite-react-ts', 'package.json'],
+    ['go', 'gin-service', 'go.mod'],
+    ['rust', 'axum-service', 'Cargo.toml'],
+    ['cpp', 'cmake-app', 'CMakeLists.txt'],
+  ];
+  const generated = new Map<string, string>();
+  let unresolved = 0;
+  let broken = 0;
+  for (const item of items) {
+    const submitted: Record<string, unknown> = {};
+    for (const p of item.params ?? []) {
+      submitted[p.key] = p.default ?? (p.kind === 'boolean' ? false : p.kind === 'multiselect' ? [] : 'demo');
+    }
+    // Keep the generated trees: deleting each one here trips the agent's
+    // per-turn bulk-delete guard. The shared TMP cleanup at the end is
+    // best-effort for the same reason.
+    const dir = await mkdtemp(join(TMP, `tpl-${item.language}-${item.id}-`));
+    try {
+      const result = registry.generate(item.language, item.id, submitted, dir);
+      if (!result.files.length) broken++;
+      for (const f of result.files) {
+        const text = await readFile(join(dir, f.path), 'utf8');
+        if (/\{\{\w+\}\}/.test(f.path) || /\{\{\w+\}\}/.test(text)) unresolved++;
+        generated.set(`${item.language}:${item.id}:${f.path}`, text);
+      }
+    } catch (err) {
+      broken++;
+      console.log(`  template ${item.language}:${item.id} failed: ${(err as Error).message}`);
+    }
+  }
+  check('templates: every shipped template generates without an unresolved placeholder', unresolved === 0 && broken === 0, `${unresolved} unresolved, ${broken} broken`);
+  for (const [language, id, file] of watched) {
+    const text = generated.get(`${language}:${id}:${file}`) ?? '';
+    const needle: Record<string, string> = {
+      'settings.gradle': "rootProject.name = '",
+      'app/build.gradle': "mainClass = 'com.example.demo.App'",
+      'build.gradle': id === 'spring-boot' ? 'spring-boot-starter-web' : 'JavaLanguageVersion.of',
+      'pom.xml': '<modelVersion>',
+      'pyproject.toml': 'fastapi',
+      'package.json': '"vite"',
+      'go.mod': 'gin-gonic/gin',
+      'Cargo.toml': 'axum',
+      'CMakeLists.txt': 'cmake_minimum_required',
+    };
+    check(`templates: ${language}:${id} writes a real ${file}`, text.includes(needle[file] ?? ''), `${text.length} byte(s)`);
+  }
+}
+
+// ===================================================== framework dependencies
+
+async function testProjectDependencies(): Promise<void> {
+  const dir = await mkdtemp(join(TMP, 'project-dependencies-'));
+  try {
+    await mkdir(join(dir, 'service', 'api'), { recursive: true });
+    await writeFile(join(dir, 'settings.gradle'), "rootProject.name = 'demo'\ninclude 'service:api'\n");
+    await writeFile(join(dir, 'build.gradle'), "plugins { id 'java' apply false }\n");
+    await writeFile(join(dir, 'service', 'api', 'build.gradle'), "plugins { id 'java' }\ndependencies { implementation 'org.example:base:1.0' }\n");
+    const gradle = planAdd(dir, 'com.example:api-client:2.1');
+    check('dependencies: a Gradle root routes edits into its included module', gradle.declared?.file === 'service/api/build.gradle', gradle.declared?.file ?? 'no build file');
+    check('dependencies: a valid Maven coordinate is written into the build file', applyAdd(gradle).ok && (await readFile(join(dir, 'service', 'api', 'build.gradle'), 'utf8')).includes("implementation 'com.example:api-client:2.1'"));
+    check('dependencies: a second Gradle add is rejected instead of duplicated', !applyAdd(gradle).ok);
+    check('dependencies: one-line Gradle blocks are expanded safely', (await readFile(join(dir, 'service', 'api', 'build.gradle'), 'utf8')).includes("implementation 'org.example:base:1.0'"));
+
+    const mavenDir = join(dir, 'maven');
+    await mkdir(mavenDir);
+    const pom = join(mavenDir, 'pom.xml');
+    await writeFile(pom, '<project><modelVersion>4.0.0</modelVersion><dependencyManagement><dependencies><dependency><groupId>org.example</groupId><artifactId>bom</artifactId><version>1</version></dependency></dependencies></dependencyManagement></project>');
+    const maven = planAdd(mavenDir, 'org.example:client:1.2.3');
+    const mavenResult = applyAdd(maven);
+    const pomText = await readFile(pom, 'utf8');
+    check('dependencies: Maven inserts project dependencies outside dependencyManagement', mavenResult.ok && /<dependencyManagement>[\s\S]*?<\/dependencyManagement><dependencies>[\s\S]*?<groupId>org\.example<\/groupId>[\s\S]*?<\/dependencies><\/project>/.test(pomText));
+    check('dependencies: invalid Maven coordinates are rejected before writing', (() => {
+      try { planAdd(mavenDir, 'bad && command'); return false; } catch { return true; }
+    })());
+
+    const cargo = parseDependencies('cargo', '[dependencies]\nserde = "1.0"\ntokio = { version = "1.40", features = ["macros"] }\n[dev-dependencies]\npretty_assertions = "1"\n[build-dependencies]\ncc = "1"\n');
+    check('dependencies: Cargo reads normal and inline-table dependency forms', JSON.stringify(cargo) === JSON.stringify([
+      { name: 'serde', version: '1.0' },
+      { name: 'tokio', version: '1.40' },
+      { name: 'pretty_assertions', version: '1' },
+    ]), JSON.stringify(cargo));
+
+    const syncDir = join(dir, 'sync');
+    await mkdir(syncDir);
+    await writeFile(join(syncDir, 'build.gradle'), '');
+    const wrapper = process.platform === 'win32' ? 'gradlew.bat' : 'gradlew';
+    await writeFile(join(syncDir, wrapper), '');
+    const sync = planSync(syncDir);
+    check('dependencies: Gradle fetch uses the project wrapper when present', sync.command === join(syncDir, wrapper) && sync.args.includes('classes'), sync.command);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 // ============================================================ 3. registry
 
 async function testRegistry(kernel: Kernel): Promise<void> {
@@ -174,10 +316,10 @@ async function testRegistry(kernel: Kernel): Promise<void> {
   await reg.scan();
 
   const ids = reg.all().map((m) => m.id);
-  check('registry: the official plugins are discovered', ids.length === 4, ids.join(','));
+  check('registry: the official plugins are discovered', ids.length === 5, ids.join(','));
   check(
     'registry: presentation order comes from the manifests',
-    ids.join(',') === 'python,go,javascript,markdown',
+    ids.join(',') === 'python,go,javascript,markdown,java',
     ids.join(','),
   );
   check('registry: builtin plugins are not removable', reg.sourceOf('python')?.removable === false);
@@ -257,7 +399,7 @@ async function testRegistry(kernel: Kernel): Promise<void> {
   await writeFile(join(badDir, 'manifest.json'), JSON.stringify({ id: 'broken' }), 'utf8');
   const reg3 = new LanguageRegistry({ home: join(TMP, 'home2'), extraRoots: [...roots, { dir: join(TMP, 'bad-root'), kind: 'user', removable: true }] });
   await reg3.scan();
-  check('registry: an invalid manifest is skipped, not fatal', reg3.all().length === 4, `${reg3.all().length} enabled`);
+  check('registry: an invalid manifest is skipped, not fatal', reg3.all().length === 5, `${reg3.all().length} enabled`);
 
   void kernel;
 }
@@ -635,6 +777,8 @@ async function main(): Promise<void> {
     testVersions();
     await testDiscovery();
     await testExamples();
+    await testTemplates();
+    await testProjectDependencies();
     await testRegistry(kernel);
 
     if (!pythonBin) {

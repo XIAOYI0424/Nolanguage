@@ -1,0 +1,360 @@
+{
+  "id": "java",
+  "displayName": "Java",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "publisher": "nolanguage",
+  "description": "Java projects and the single-file source launcher. Gradle and Maven build files are first-class templates, with coordinate-based dependency editing and an explicit package fetch.",
+  "order": 53,
+  "trust": {
+    "sandbox": "subprocess"
+  },
+  "file": {
+    "extensions": [
+      "java"
+    ],
+    "defaultExt": "java",
+    "fileName": "Main.java"
+  },
+  "grammar": {
+    "rules": [
+      {
+        "re": "//[^\\n]*",
+        "cls": "c"
+      },
+      {
+        "re": "/\\*[\\s\\S]*?\\*/",
+        "cls": "c"
+      },
+      {
+        "re": "\"\"\"[\\s\\S]*?\"\"\"",
+        "cls": "s"
+      },
+      {
+        "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"",
+        "cls": "s"
+      },
+      {
+        "re": "'(?:[^'\\\\\\n]|\\\\.)*'",
+        "cls": "s"
+      },
+      {
+        "re": "@[A-Za-z_][A-Za-z0-9_]*",
+        "cls": "d"
+      },
+      {
+        "re": "\\b(?:abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|default|do|double|else|enum|extends|final|finally|float|for|goto|if|implements|import|instanceof|int|interface|long|native|new|package|private|protected|public|return|short|static|strictfp|super|switch|synchronized|this|throw|throws|transient|try|void|volatile|while|var|record|sealed|permits|yield)\\b",
+        "cls": "k"
+      },
+      {
+        "re": "\\b(?:String|System|Object|Integer|Long|Double|Boolean|Character|Math|List|ArrayList|Map|HashMap|Set|HashSet|Optional|Stream|Exception|RuntimeException|IllegalArgumentException|StringBuilder|Thread|Runnable|Override|Deprecated|Record|Builder)\\b",
+        "cls": "b"
+      },
+      {
+        "re": "\\b[0-9][0-9_]*(?:\\.[0-9]+)?[fFdDlL]?\\b",
+        "cls": "n"
+      },
+      {
+        "re": "[A-Za-z_][A-Za-z0-9_]*(?=\\()",
+        "cls": "f"
+      },
+      {
+        "re": "\\b[A-Z][A-Za-z0-9_]*\\b",
+        "cls": "cl"
+      }
+    ]
+  },
+  "dependencies": {
+    "format": "gradle",
+    "files": [
+      "app/build.gradle",
+      { "file": "app/build.gradle.kts", "format": "gradle" },
+      "build.gradle.kts",
+      { "file": "build.gradle", "format": "gradle" },
+      { "file": "pom.xml", "format": "maven" }
+    ]
+  },
+  "scaffold": {
+    "templates": [
+      {
+        "id": "gradle-multi",
+        "name": "Gradle 多模块（Java 工具链）",
+        "description": "根 build.gradle + app 子模块 + JUnit 5，类似 NeroSama/vtuber/java 的工程骨架",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "项目名", "kind": "text", "default": "demo-gradle", "required": true, "pattern": "^[a-z][a-z0-9-]*$", "hint": "小写字母开头，只能含小写字母、数字、连字符", "group": "项目坐标" },
+          { "key": "group", "label": "group", "kind": "text", "default": "com.example", "required": true, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "hint": "形如 com.example", "group": "项目坐标" },
+          { "key": "packagePath", "label": "源码目录", "kind": "text", "default": "com/example/demo", "required": true, "pattern": "^[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+$", "hint": "用斜杠分隔，例如 com/example/demo", "group": "项目坐标" },
+          { "key": "packageName", "label": "Java 包名", "kind": "text", "default": "com.example.demo", "required": true, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "hint": "Java 包名，需与源码目录对应，例如 com/example/demo → com.example.demo", "group": "项目坐标" },
+          { "key": "javaVersion", "label": "Java 版本", "kind": "select", "default": "21", "options": [{ "value": "17", "label": "17 (LTS)" }, { "value": "21", "label": "21 (LTS)" }], "group": "技术栈" },
+          { "key": "withTests", "label": "生成 JUnit 5 测试", "kind": "boolean", "default": true, "group": "选项" }
+        ],
+        "files": [
+          { "path": "settings.gradle", "template": "rootProject.name = '{{name}}'\ninclude 'app'\n" },
+          { "path": "build.gradle", "template": "plugins {\n    id 'java' apply false\n}\n\nallprojects {\n    group = '{{group}}'\n    version = '0.1.0-SNAPSHOT'\n\n    repositories {\n        mavenCentral()\n    }\n}\n\nsubprojects {\n    apply plugin: 'java'\n\n    java {\n        toolchain {\n            languageVersion = JavaLanguageVersion.of({{javaVersion}})\n        }\n    }\n\n    tasks.withType(Test).configureEach {\n        useJUnitPlatform()\n    }\n}\n" },
+          { "path": "gradle.properties", "template": "org.gradle.jvmargs=-Xmx1g\n" },
+          { "path": "app/build.gradle", "template": "plugins {\n    id 'java'\n    id 'application'\n}\n\napplication {\n    mainClass = '{{packageName}}.App'\n}\n\ndependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'\n}\n\ntest {\n    useJUnitPlatform()\n}\n" },
+          { "path": "app/src/main/java/{{packagePath}}/App.java", "template": "package {{packageName}};\n\npublic final class App {\n    public static String greeting() {\n        return \"hello from {{name}}\";\n    }\n\n    public static void main(String[] args) {\n        System.out.println(greeting());\n    }\n}\n" },
+          { "path": "app/src/test/java/{{packagePath}}/AppTest.java", "when": "withTests", "template": "package {{packageName}};\n\nimport org.junit.jupiter.api.Test;\n\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nclass AppTest {\n    @Test\n    void greets() {\n        assertTrue(App.greeting().contains(\"{{name}}\"));\n    }\n}\n" },
+          { "path": ".gitignore", "template": ".gradle/\nbuild/\napp/build/\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nGradle {{javaVersion}} 多模块骨架。\n\n```\ngradle --no-daemon :app:run\ngradle --no-daemon test\n```\n\n依赖声明写在 `app/build.gradle` 的 `dependencies { }` 里；用 Ctrl+Alt+D 添加坐标，再点「拉取依赖」。\n" }
+        ]
+      },
+      {
+        "id": "spring-boot",
+        "name": "Spring Boot 3（Gradle）",
+        "description": "官方 starter 依赖 + Controller + 测试，版本号固定，可离线生成工程文件",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "项目名", "kind": "text", "default": "demo-spring", "required": true, "pattern": "^[a-z][a-z0-9-]*$", "hint": "小写字母开头，只能含小写字母、数字、连字符", "group": "项目坐标" },
+          { "key": "group", "label": "group", "kind": "text", "default": "com.example", "required": true, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "hint": "形如 com.example", "group": "项目坐标" },
+          { "key": "packagePath", "label": "源码目录", "kind": "text", "default": "com/example/demo", "required": true, "pattern": "^[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+$", "hint": "用斜杠分隔，例如 com/example/demo", "group": "项目坐标" },
+          { "key": "packageName", "label": "Java 包名", "kind": "text", "default": "com.example.demo", "required": true, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "hint": "Java 包名，需与源码目录对应，例如 com/example/demo → com.example.demo", "group": "项目坐标" },
+          { "key": "javaVersion", "label": "Java 版本", "kind": "select", "default": "21", "options": [{ "value": "17", "label": "17 (LTS)" }, { "value": "21", "label": "21 (LTS)" }], "group": "技术栈" }
+        ],
+        "files": [
+          { "path": "settings.gradle", "template": "rootProject.name = '{{name}}'\n" },
+          { "path": "build.gradle", "template": "plugins {\n    id 'java'\n    id 'org.springframework.boot' version '3.3.5'\n    id 'io.spring.dependency-management' version '1.1.6'\n}\n\ngroup = '{{group}}'\nversion = '0.0.1-SNAPSHOT'\n\njava {\n    toolchain {\n        languageVersion = JavaLanguageVersion.of({{javaVersion}})\n    }\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    implementation 'org.springframework.boot:spring-boot-starter-web'\n    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n}\n\ntasks.named('test') {\n    useJUnitPlatform()\n}\n" },
+          { "path": "src/main/java/{{packagePath}}/DemoApplication.java", "template": "package {{packageName}};\n\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n\n@SpringBootApplication\npublic class DemoApplication {\n    public static void main(String[] args) {\n        SpringApplication.run(DemoApplication.class, args);\n    }\n}\n" },
+          { "path": "src/main/java/{{packagePath}}/HelloController.java", "template": "package {{packageName}};\n\nimport org.springframework.web.bind.annotation.GetMapping;\nimport org.springframework.web.bind.annotation.RestController;\n\n@RestController\npublic class HelloController {\n    @GetMapping(\"/hello\")\n    public String hello() {\n        return \"hello from {{name}}\";\n    }\n}\n" },
+          { "path": "src/main/resources/application.properties", "template": "server.port=8080\n" },
+          { "path": "src/test/java/{{packagePath}}/DemoApplicationTests.java", "template": "package {{packageName}};\n\nimport org.junit.jupiter.api.Test;\nimport org.springframework.boot.test.context.SpringBootTest;\n\n@SpringBootTest\nclass DemoApplicationTests {\n    @Test\n    void contextLoads() {\n    }\n}\n" },
+          { "path": ".gitignore", "template": ".gradle/\nbuild/\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nSpring Boot 3.3.5 · Java {{javaVersion}}。\n\n```\ngradle --no-daemon bootRun\n```\n\n打开 http://localhost:8080/hello 。插件版本与 starter 依赖都在 `build.gradle`，用 Ctrl+Alt+D 添加坐标后用「拉取依赖」解析。\n" }
+        ]
+      },
+      {
+        "id": "maven-app",
+        "name": "Maven 命令行应用",
+        "description": "标准 pom.xml + JUnit 5，适合 Maven 仓库或 BOM 管理的工程",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "artifactId", "kind": "text", "default": "demo-maven", "required": true, "pattern": "^[a-z][a-z0-9-]*$", "hint": "小写字母开头，只能含小写字母、数字、连字符", "group": "项目坐标" },
+          { "key": "group", "label": "groupId", "kind": "text", "default": "com.example", "required": true, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "hint": "形如 com.example", "group": "项目坐标" },
+          { "key": "packagePath", "label": "源码目录", "kind": "text", "default": "com/example/demo", "required": true, "pattern": "^[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+$", "hint": "用斜杠分隔，例如 com/example/demo", "group": "项目坐标" },
+          { "key": "packageName", "label": "Java 包名", "kind": "text", "default": "com.example.demo", "required": true, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "hint": "Java 包名，需与源码目录对应，例如 com/example/demo → com.example.demo", "group": "项目坐标" },
+          { "key": "javaVersion", "label": "Java 版本", "kind": "select", "default": "21", "options": [{ "value": "17", "label": "17 (LTS)" }, { "value": "21", "label": "21 (LTS)" }], "group": "技术栈" },
+          { "key": "withTests", "label": "生成 JUnit 5 测试", "kind": "boolean", "default": true, "group": "选项" }
+        ],
+        "files": [
+          { "path": "pom.xml", "template": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>{{group}}</groupId>\n  <artifactId>{{name}}</artifactId>\n  <version>0.1.0-SNAPSHOT</version>\n\n  <properties>\n    <maven.compiler.release>{{javaVersion}}</maven.compiler.release>\n    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n  </properties>\n\n  <dependencies>\n    <dependency>\n      <groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>\n      <scope>test</scope>\n    </dependency>\n  </dependencies>\n\n  <build>\n    <plugins>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-compiler-plugin</artifactId>\n        <version>3.13.0</version>\n      </plugin>\n      <plugin>\n        <groupId>org.apache.maven.plugins</groupId>\n        <artifactId>maven-surefire-plugin</artifactId>\n        <version>3.2.5</version>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n" },
+          { "path": "src/main/java/{{packagePath}}/App.java", "template": "package {{packageName}};\n\npublic final class App {\n    public static String greeting() {\n        return \"hello from {{name}}\";\n    }\n\n    public static void main(String[] args) {\n        System.out.println(greeting());\n    }\n}\n" },
+          { "path": "src/test/java/{{packagePath}}/AppTest.java", "when": "withTests", "template": "package {{packageName}};\n\nimport org.junit.jupiter.api.Test;\n\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nclass AppTest {\n    @Test\n    void greets() {\n        assertTrue(App.greeting().contains(\"{{name}}\"));\n    }\n}\n" },
+          { "path": ".gitignore", "template": "target/\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nMaven · Java {{javaVersion}}。\n\n```\nmvn -q package\njava -cp target/classes {{group}}.App\nmvn test\n```\n\n用 Ctrl+Alt+D 添加 `group:artifact:version` 坐标，再点「拉取依赖」。\n" }
+        ]
+      }
+    ]
+  },
+  "lsp": {
+    "manager": true,
+    "provider": {
+      "kind": "github",
+      "package": "eclipse-jdtls/eclipse.jdt.ls",
+      "asset": "jdtls"
+    },
+    "discovery": {
+      "commands": [
+        "jdtls"
+      ],
+      "envVars": [
+        "JDTLS"
+      ],
+      "knownPaths": [
+        "~/.local/share/jdtls/bin/jdtls",
+        "~/.local/bin/jdtls",
+        "C:/jdtls/bin/jdtls.bat"
+      ]
+    },
+    "projectMarkers": [
+      "pom.xml",
+      "build.gradle",
+      "settings.gradle",
+      "build.gradle.kts",
+      "settings.gradle.kts"
+    ],
+    "command": [
+      "{toolchain}",
+      "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+      "-Dosgi.bundles.defaultStartLevel=4",
+      "-Declipse.product=org.eclipse.jdt.ls.core.product",
+      "-Dlog.level=ERROR",
+      "-Dosgi.locking=none",
+      "-Xmx2G",
+      "-XX:+UseG1GC",
+      "-jar",
+      "{glob:{dist}/plugins/org.eclipse.equinox.launcher_*.jar}",
+      "-configuration",
+      "{dist}/config_{platform}",
+      "-data",
+      "{dataDir}"
+    ],
+    "args": [],
+    "initializationOptions": {
+      "settings": {
+        "java.import.mode": "ondemand",
+        "java.jdt.ls.vmargs": "-Xmx2G -XX:+UseG1GC",
+        "java.configuration.updateBuildConfiguration": "disabled"
+      },
+      "extendedClientCapabilities": {
+        "progressReportProvider": false
+      }
+    },
+    "idleTtlMs": 7200000,
+    "firstRequestBudgetMs": 500,
+    "startTimeoutMs": 120000,
+    "incremental": "git",
+    "fallback": {
+      "kind": "lexical",
+      "keywords": [
+        "abstract",
+        "assert",
+        "boolean",
+        "break",
+        "byte",
+        "case",
+        "catch",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extends",
+        "final",
+        "finally",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "instanceof",
+        "int",
+        "interface",
+        "long",
+        "native",
+        "new",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "record",
+        "return",
+        "sealed",
+        "short",
+        "static",
+        "strictfp",
+        "super",
+        "switch",
+        "synchronized",
+        "this",
+        "throw",
+        "throws",
+        "transient",
+        "try",
+        "var",
+        "void",
+        "volatile",
+        "while",
+        "yield",
+        "true",
+        "false",
+        "null"
+      ],
+      "types": [
+        "String",
+        "System",
+        "Object",
+        "Integer",
+        "Long",
+        "Double",
+        "Boolean",
+        "Character",
+        "Math",
+        "List",
+        "ArrayList",
+        "Map",
+        "HashMap",
+        "Set",
+        "HashSet",
+        "Optional",
+        "Stream",
+        "StringBuilder",
+        "Exception",
+        "RuntimeException",
+        "IllegalArgumentException",
+        "Thread",
+        "Runnable",
+        "Override"
+      ],
+      "declarationPattern": "(?:class|interface|enum|record)\\s+([A-Za-z_$][\\w$]*)",
+      "note": "jdtls is not installed — lexical fallback: keywords, declarations in this file, and brace/literal checks only"
+    },
+    "languageId": "java",
+    "serverName": "jdtls",
+    "memoryHint": "400MB",
+    "degradedNote": "jdtls not installed - Run works, Check and completion do not",
+    "freshDataDir": true
+  },
+  "run": {
+    "mode": "template",
+    "requires": [
+      "template@^1.0.0"
+    ],
+    "timeoutMs": 60000,
+    "sourceExt": ".java",
+    "interpreters": {
+      "envDirs": [],
+      "envBins": [],
+      "marker": ".java-version",
+      "exeNames": ["java.exe", "java"],
+      "versionDirs": [".jdks", ".sdkman/candidates/java", "scoop/apps/openjdk/current/bin"],
+      "versionBins": ["bin/java.exe", "bin/java", "java.exe", "java"],
+      "versionArgs": ["-version"],
+      "sdkPrefix": "Java"
+    },
+    "discovery": {
+      "commands": [
+        "java"
+      ],
+      "envVars": [
+        "JAVA_BIN"
+      ],
+      "knownPaths": [
+        "C:/Program Files/Java/latest/bin/java.exe",
+        "C:/Program Files/Eclipse Adoptium/jdk-21/bin/java.exe",
+        "/usr/bin/java",
+        "~/.local/bin/java"
+      ]
+    },
+    "versionArgs": [
+      "-version"
+    ],
+    "steps": [
+      {
+        "role": "run",
+        "cmd": "\"{toolchain}\" \"{file}\""
+      }
+    ],
+    "modes": {
+      "test": {
+        "steps": [
+          {
+            "role": "run",
+            "cmd": "\"{toolchain}\" \"{file}\""
+          }
+        ]
+      }
+    }
+  }
+}

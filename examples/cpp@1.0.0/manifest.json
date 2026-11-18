@@ -67,6 +67,31 @@
       }
     ]
   },
+  "scaffold": {
+    "templates": [
+      {
+        "id": "cmake-app",
+        "name": "CMake 可执行程序",
+        "description": "CMakeLists.txt + src + 可选测试，clangd 可直接索引 compile_commands.json",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{name}}",
+        "params": [
+          { "key": "name", "label": "项目名", "kind": "text", "default": "demo-cpp", "required": true, "pattern": "^[a-z][a-z0-9_-]*$", "hint": "小写字母开头，只能含小写字母、数字、下划线、连字符", "group": "项目坐标" },
+          { "key": "cppStandard", "label": "C++ 标准", "kind": "select", "default": "20", "options": [{ "value": "17", "label": "C++17" }, { "value": "20", "label": "C++20" }], "group": "技术栈" },
+          { "key": "withTests", "label": "生成测试", "kind": "boolean", "default": true, "group": "选项" }
+        ],
+        "files": [
+          { "path": "CMakeLists.txt", "template": "cmake_minimum_required(VERSION 3.16)\nproject({{name}} LANGUAGES CXX)\n\nset(CMAKE_CXX_STANDARD {{cppStandard}})\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nset(CMAKE_EXPORT_COMPILE_COMMANDS ON)\n\nadd_executable({{name}} src/main.cpp)\n\nenable_testing()\nif(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp)\n  add_executable(unit_test tests/test_main.cpp)\n  add_test(NAME unit_test COMMAND unit_test)\nendif()\n" },
+          { "path": "src/add.hpp", "template": "#pragma once\n\ninline int add(int a, int b) {\n  return a + b;\n}\n" },
+          { "path": "src/main.cpp", "template": "#include <cstdio>\n\n#include \"add.hpp\"\n\nint main() {\n  std::printf(\"hello from {{name}}: %d\\n\", add(20, 22));\n  return 0;\n}\n" },
+          { "path": "tests/test_main.cpp", "when": "withTests", "template": "#include <cassert>\n\n#include \"../src/add.hpp\"\n\nint main() {\n  assert(add(20, 22) == 42);\n  return 0;\n}\n" },
+          { "path": ".gitignore", "template": "build/\n" },
+          { "path": "README.md", "template": "# {{name}}\n\nCMake · C++{{cppStandard}}。\n\n```\ncmake -S . -B build\ncmake --build build\nctest --test-dir build\n```\n\n`compile_commands.json` 会让 clangd 使用模板声明的包含路径与标准。\n" }
+        ]
+      }
+    ]
+  },
   "lsp": {
     "provider": {
       "kind": "github",

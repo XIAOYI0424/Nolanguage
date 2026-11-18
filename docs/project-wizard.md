@@ -63,8 +63,8 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 - 只看**当前目录 + 一层子目录**：深扫一个 home 目录又慢又不准，答案几乎总在隔壁；
 - 跳过 `node_modules` / `target` / `dist` / `build` / `.venv` 等，它们不是项目根；
-- 标记表是数据（`Cargo.toml`→rust、`package.json`→javascript、`pyproject.toml`/`setup.py`→
-  python、`go.mod`→go、`pom.xml`→java、`CMakeLists.txt`→cpp），显示名优先从文件里读
+- 标记表是数据（`Cargo.toml`→rust、`package.json`→javascript、`pyproject.toml`/`setup.py`→python、
+  `go.mod`→go、`pom.xml`/`build.gradle*`/`settings.gradle*`→java、`CMakeLists.txt`→cpp），显示名优先从文件里读
   （`name` / `module` / `<artifactId>`），读不到就用目录名；
 - **语言没装也能打开**：它只是一个目录，能看文件。
 
@@ -81,9 +81,22 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 | `go.mod` | `go get <spec>` |
 | `pyproject.toml` | `uv add <spec>`（`pip install` 只改环境，不改项目声明） |
 | `package.json` | `npm install <spec>` |
+| `build.gradle` / `build.gradle.kts` | 在 `dependencies { }` 中写 `implementation 'group:artifact[:version]'` |
+| `pom.xml` | 在 `<dependencies>` 中写 `<dependency>` 块 |
+
+Gradle 与 Maven **没有** `add dependency` 命令——它们的依赖声明就是构建文件。所以这两个生态走不同的路径：先校验 Maven 坐标（`group:artifact[:version]`，拒绝空白与 shell 元字符），再把声明插入已有的块；没有块就创建一个。重复添加会被拒绝，不会写出两条相同依赖。写入先落临时文件再改名，避免半截 `build.gradle`。
+
+对话框底部另有「拉取依赖」：它只执行当前项目生态自己的同步命令，不改版本号，也不在生成项目时偷偷跑。
+
+| 标记 | 同步命令 |
+|---|---|
+| `build.gradle*` / `settings.gradle*` | 优先项目中的 Gradle wrapper；否则 `gradle --no-daemon classes` |
+| `pom.xml` | 优先 Maven wrapper；否则 `mvn -B -q dependency:resolve` |
+| `Cargo.toml` / `go.mod` / `pyproject.toml` | `cargo fetch` / `go mod download` / `uv sync` |
+| `package.json` | `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`；`yarn.lock` → `yarn install --frozen-lockfile`；`package-lock.json` → `npm ci`；否则 `npm install` |
 
 `<spec>` 在**任何进程启动之前**按白名单校验（`lodash`、`@scope/pkg@1.2`、`serde@1`、
-`github.com/x/y@v1`）；空白和 shell 元字符一律拒绝——命令虽然不走 shell，但「看起来像第二个
+`github.com/x/y@v1`、`com.example:core:1.2.3`）；空白和 shell 元字符一律拒绝——命令虽然不走 shell，但「看起来像第二个
 参数」的输入不该有机会。失败不写盘：工具链失败时项目原样不动，输出原样展示。
 
 ## 二点九、运行配置（Ctrl+Alt+R）
@@ -188,8 +201,9 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 | 层 | 位置 |
 |---|---|
-| 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出、文件模板只写一个文件 |
+| 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出、文件模板只写一个文件；Gradle/Maven 坐标编辑与六种同步计划 |
 | 端到端 | CDP 冒烟：Ctrl+Alt+N → 选卡片 → 创建 → 文件出现在工作区；文件模式 7 张卡片筛到 3 张，生成 `main_test.go`；Ctrl+Alt+O 打开项目；Ctrl+Alt+D 识别 `cargo add` 并拒绝非法 spec |
+| 插件门禁 | `verify:langplugins`：把每个已发布模板按默认参数真生成一遍，断言无未解析 `{{key}}`、框架关键文件存在；同时校验无 LSP 插件的模板声明 |
 | 架构 | `scaffold` 层 = 3，只能被更高层引用 |
 
 ## 七、还没做

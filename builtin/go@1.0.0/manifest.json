@@ -142,6 +142,27 @@
         ]
       },
       {
+        "id": "gin-service",
+        "name": "Gin HTTP 服务",
+        "description": "go.mod + 路由处理器 + httptest，框架依赖写进 go.mod，可用「拉取依赖」下载",
+        "source": "builtin",
+        "kind": "project",
+        "suggestedDir": "{{dir}}",
+        "params": [
+          { "key": "module", "label": "模块路径", "kind": "text", "default": "example.com/demo-api", "required": true, "pattern": "^[a-z0-9.-]+(/[a-z0-9._-]+)+$", "hint": "形如 example.com/你的模块", "group": "项目坐标" },
+          { "key": "dir", "label": "目录名", "kind": "text", "default": "demo-api", "required": true, "pattern": "^[a-z][a-z0-9_-]*$", "hint": "小写字母开头", "group": "项目坐标" },
+          { "key": "goVersion", "label": "Go 版本", "kind": "select", "default": "1.22", "options": [{ "value": "1.21", "label": "1.21" }, { "value": "1.22", "label": "1.22" }, { "value": "1.23", "label": "1.23" }], "group": "技术栈" },
+          { "key": "withTest", "label": "生成 httptest 用例", "kind": "boolean", "default": true, "group": "选项" }
+        ],
+        "files": [
+          { "path": "go.mod", "template": "module {{module}}\n\ngo {{goVersion}}\n\nrequire github.com/gin-gonic/gin v1.10.0\n" },
+          { "path": "main.go", "template": "package main\n\nimport (\n\t\"net/http\"\n\n\t\"github.com/gin-gonic/gin\"\n)\n\nfunc newRouter() *gin.Engine {\n\tr := gin.Default()\n\tr.GET(\"/hello\", func(c *gin.Context) {\n\t\tc.JSON(http.StatusOK, gin.H{\"message\": \"hello from {{module}}\"})\n\t})\n\treturn r\n}\n\nfunc main() {\n\tif err := newRouter().Run(\":8080\"); err != nil {\n\t\tpanic(err)\n\t}\n}\n" },
+          { "path": "main_test.go", "when": "withTest", "template": "package main\n\nimport (\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"testing\"\n)\n\nfunc TestHello(t *testing.T) {\n\tw := httptest.NewRecorder()\n\tr := httptest.NewRequest(http.MethodGet, \"/hello\", nil)\n\tnewRouter().ServeHTTP(w, r)\n\tif w.Code != http.StatusOK {\n\t\tt.Fatalf(\"status = %d\", w.Code)\n\t}\n}\n" },
+          { "path": ".gitignore", "template": "vendor/\n" },
+          { "path": "README.md", "template": "# {{dir}}\n\nGin · Go {{goVersion}}。\n\n```\ngo mod download\ngo run .\n```\n\n用 Ctrl+Alt+D 写 go.mod，再点「拉取依赖」执行 `go mod download`。\n" }
+        ]
+      },
+      {
         "id": "test-file",
         "name": "Go 测试文件",
         "description": "<模块>_test.go，带一个用例",

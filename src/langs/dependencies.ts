@@ -19,7 +19,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * How a dependency file is shaped. Named formats, not named languages.
@@ -29,7 +29,7 @@ import { resolve, sep } from 'node:path';
  * misses the two real ones. One manifest can therefore name a different format
  * per file (see `DependencyFile`).
  */
-export type DependencyFormat = 'requirements' | 'gomod' | 'npm' | 'pyproject';
+export type DependencyFormat = 'requirements' | 'gomod' | 'npm' | 'pyproject' | 'cargo' | 'gradle' | 'maven';
 
 /** One candidate file, optionally with a format of its own. */
 export interface DependencyFile {
@@ -233,6 +233,93 @@ function parseNpm(text: string): Dependency[] {
   return out;
 }
 
+/** Parse `[dependencies]`, `[dev-dependencies]` and target-scoped Cargo.toml tables. */
+function parseCargo(text: string): Dependency[] {
+  const out: Dependency[] = [];
+  const byName = new Map<string, Dependency>();
+  let active = false;
+  let current: Dependency | undefined;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header) {
+      const section = header[1].trim();
+      const table = /^(?:dev-)?dependencies\.([A-Za-z0-9_-]+)$/.exec(section);
+      active = /(^|\.)(dev-)?dependencies$/.test(section) || !!table;
+      if (section === 'workspace.dependencies') active = false;
+      current = undefined;
+      if (active && table) {
+        const name = table[1];
+        current = byName.get(name) ?? { name };
+        if (!byName.has(name)) { byName.set(name, current); out.push(current); }
+      }
+      continue;
+    }
+    if (!active) continue;
+    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
+    if (!assignment) continue;
+    const [, key, value] = assignment;
+    if (current) {
+      if (key === 'version') current.version = /^['"]([^'"]+)['"]/.exec(value)?.[1];
+      if (key === 'package') current.name = /^['"]([^'"]+)['"]/.exec(value)?.[1] ?? current.name;
+      continue;
+    }
+    const inlineVersion = /\bversion\s*=\s*['"]([^'"]+)['"]/.exec(value)?.[1];
+    const simpleVersion = /^['"]([^'"]+)['"]$/.exec(value)?.[1];
+    const packageName = /\bpackage\s*=\s*['"]([^'"]+)['"]/.exec(value)?.[1] ?? key;
+    const dep = { name: packageName, ...(inlineVersion ?? simpleVersion ? { version: inlineVersion ?? simpleVersion } : {}) };
+    byName.set(key, dep);
+    out.push(dep);
+  }
+  return out;
+}
+
+/** Parse Gradle/Maven project declaration files using their declared format. */
+function parseGradle(text: string): Dependency[] {
+  const out: Dependency[] = [];
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/['"]([A-Za-z][A-Za-z0-9_.-]*):([A-Za-z][A-Za-z0-9_.-]*)(?::([^'"\s]+))?['"]/g)) {
+    const name = `${m[1]}:${m[2]}`;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, ...(m[3] ? { version: m[3] } : {}) });
+  }
+  return out;
+}
+
+/** The `<dependency>` blocks of a pom.xml, without pretending to be an XML resolver. */
+function parseMaven(text: string): Dependency[] {
+  const out: Dependency[] = [];
+  const rootOpen = /<(?:[A-Za-z_][\w.-]*:)?project\b[^>]*>/g.exec(text);
+  if (!rootOpen) return out;
+  const rootTag = rootOpen[0].match(/^<((?:[A-Za-z_][\w.-]*:)?)project/)?.[1] ?? '';
+  const closingProject = new RegExp(`<\\/${rootTag}project\\s*>`, 'g');
+  const rootClose = closingProject.exec(text);
+  if (!rootClose) return out;
+  const project = text.slice(rootOpen.index + rootOpen[0].length, rootClose.index);
+  // `<dependencyManagement>` also contains a `<dependencies>` block, and it is
+  // usually the first one. Those entries are BOM-managed versions, not the
+  // project's own dependencies, so drop the section before looking for the
+  // real block.
+  const managedTag = new RegExp(
+    `<${rootTag}dependencyManagement\\b[^>]*>[\\s\\S]*?<\\/${rootTag}dependencyManagement\\s*>`,
+    'g',
+  );
+  const own = project.replace(managedTag, '');
+  const dependenciesTag = new RegExp(`<${rootTag}dependencies\\b[^>]*>([\\s\\S]*?)<\\/${rootTag}dependencies\\s*>`, 'g');
+  const depBlock = dependenciesTag.exec(own);
+  if (!depBlock) return out;
+  const dependencyTag = new RegExp(`<${rootTag}dependency\\b[^>]*>([\\s\\S]*?)<\\/${rootTag}dependency\\s*>`, 'g');
+  for (const block of depBlock[1].matchAll(dependencyTag)) {
+    const group = new RegExp(`<${rootTag}groupId\\b[^>]*>([^<]+)<\\/${rootTag}groupId>`).exec(block[1])?.[1]?.trim();
+    const artifact = new RegExp(`<${rootTag}artifactId\\b[^>]*>([^<]+)<\\/${rootTag}artifactId>`).exec(block[1])?.[1]?.trim();
+    const version = new RegExp(`<${rootTag}version\\b[^>]*>([^<]+)<\\/${rootTag}version>`).exec(block[1])?.[1]?.trim();
+    if (group && artifact) out.push({ name: `${group}:${artifact}`, ...(version ? { version } : {}) });
+  }
+  return out;
+}
+
 /** Dispatch on the declared format. Unknown input yields an empty list. */
 export function parseDependencies(format: DependencyFormat, text: string): Dependency[] {
   switch (format) {
@@ -244,6 +331,12 @@ export function parseDependencies(format: DependencyFormat, text: string): Depen
       return parseNpm(text);
     case 'pyproject':
       return parsePyproject(text);
+    case 'cargo':
+      return parseCargo(text);
+    case 'gradle':
+      return parseGradle(text);
+    case 'maven':
+      return parseMaven(text);
     default:
       return [];
   }
@@ -319,9 +412,10 @@ async function firstReadable(
   root: string,
   entries: ReadonlyArray<{ name: string; format: DependencyFormat }>,
 ): Promise<{ rel: string; format: DependencyFormat; text: string } | undefined> {
+  const resolvedRoot = resolve(root);
   for (const entry of entries) {
-    const abs = resolve(root, entry.name);
-    if (!inside(root, abs)) continue;
+    const abs = resolve(resolvedRoot, entry.name);
+    if (!inside(resolvedRoot, abs)) continue;
     try {
       const info = await stat(abs);
       if (!info.isFile() || info.size > MAX_DEPENDENCY_FILE_BYTES) continue;

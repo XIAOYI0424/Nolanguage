@@ -41,6 +41,10 @@ const MARKERS: Marker[] = [
   { file: 'setup.py', language: 'python' },
   { file: 'go.mod', language: 'go', name: (t) => /^module\s+(\S+)/m.exec(t)?.[1] },
   { file: 'pom.xml', language: 'java', name: (t) => /<artifactId>([^<]+)<\/artifactId>/.exec(t)?.[1] },
+  { file: 'build.gradle.kts', language: 'java', name: (t) => /rootProject\.name\s*=\s*['"]([^'"]+)['"]/.exec(t)?.[1] },
+  { file: 'build.gradle', language: 'java', name: (t) => /rootProject\.name\s*=\s*['"]([^'"]+)['"]/.exec(t)?.[1] },
+  { file: 'settings.gradle.kts', language: 'java', name: (t) => /rootProject\.name\s*=\s*['"]([^'"]+)['"]/.exec(t)?.[1] },
+  { file: 'settings.gradle', language: 'java', name: (t) => /rootProject\.name\s*=\s*['"]([^'"]+)['"]/.exec(t)?.[1] },
   { file: 'CMakeLists.txt', language: 'cpp' },
   { file: 'main.py', language: 'python' },
   { file: 'main.rs', language: 'rust' },
@@ -50,7 +54,7 @@ const MARKERS: Marker[] = [
 /** Directories that are never a project root of their own. */
 const SKIP = new Set(['node_modules', '.git', 'target', 'dist', 'build', '.venv', 'venv', '__pycache__', 'out', 'bin', 'obj']);
 
-const HINTS = ['Cargo.lock', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'poetry.lock', 'go.sum', 'pom.xml', '.git'];
+const HINTS = ['Cargo.lock', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'poetry.lock', 'go.sum', 'gradle.lockfile', 'pom.xml', '.git'];
 
 function readCandidate(dir: string): ProjectCandidate | undefined {
   for (const marker of MARKERS) {
