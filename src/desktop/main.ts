@@ -46,6 +46,7 @@ import {
   clearSession,
   closeRecordedWindow,
   closeStaleWindows,
+  clearServerPid,
   findVisibleWindows,
   findWindowProcesses,
   isAlive,
@@ -53,6 +54,7 @@ import {
   logDesktop,
   patchSession,
   readSession,
+  writeServerPid,
 } from './session.js';
 
 /**
@@ -333,6 +335,9 @@ async function main(): Promise<void> {
   }
 
   patchSession({ serverPid: process.pid, port: serverPort() });
+  // Also as a bare number, for the installer: it has to stop this process to
+  // replace the exe, and NSIS reads lines rather than JSON.
+  writeServerPid();
 
   bootLog('server-starting', { port: serverPort() });
   const { main: startServer } = await import('../panel/server.js');
@@ -556,6 +561,9 @@ async function main(): Promise<void> {
     // window we watched was actually killed — if discovery never found it, the
     // next launch must sweep the profile instead of delegating to it.
     patchSession(windowPid ? { browserPid: undefined, cleanExit: true } : { browserPid: undefined });
+    // The pid file must not outlive the process it names: a stale one would make
+    // the installer kill whatever inherits that pid next.
+    clearServerPid();
     // A hung child close must not leave the server holding the port: the next
     // launch would see /health and exit with no window. Last resort only.
     const force = setTimeout(() => {

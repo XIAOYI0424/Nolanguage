@@ -93,6 +93,35 @@ function sessionFile(): string {
   return appDataPath('desktop-session.json');
 }
 
+/**
+ * The server pid as a bare number, for readers that cannot parse JSON.
+ *
+ * `desktop-session.json` already records it, but the process that most needs to
+ * stop this one is the NSIS installer, and NSIS can read a line — not JSON. A
+ * one-line file next to the session is the whole interface, and it is what lets
+ * an upgrade close the app even when the PowerShell helper is unavailable.
+ */
+function pidFile(): string {
+  return appDataPath('server.pid');
+}
+
+export function writeServerPid(pid: number = process.pid): void {
+  try {
+    mkdirSync(appDataPath(), { recursive: true });
+    writeFileSync(pidFile(), String(pid), 'utf8');
+  } catch {
+    /* bookkeeping must never block a launch */
+  }
+}
+
+export function clearServerPid(): void {
+  try {
+    rmSync(pidFile(), { force: true });
+  } catch {
+    /* nothing to clean */
+  }
+}
+
 /** Recorded session, or `undefined` when there is none or it is unreadable. */
 export function readSession(): SessionState | undefined {
   try {

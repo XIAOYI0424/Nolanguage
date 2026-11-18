@@ -24,6 +24,30 @@ SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
 
+; ------------------------------------------------------------------ 安装日志
+;
+; `LogSet` is only available when makensis was built with NSIS_CONFIG_LOG, and
+; the one this project ships against refuses it outright ("LogSet specified,
+; NSIS_CONFIG_LOG not defined"). So the log is written by the script itself, and
+; it answers the only question a failed upgrade raises: which step decided the
+; file was busy, and what was holding it. `exited with 2` says none of that.
+;
+; Written through `cmd /c echo >>`, not `FileOpen ... a`: appending from NSIS
+; here produced a file whose only surviving line was the last one written, which
+; is worse than no log at all. Keep the text ASCII and free of `&`, `>` and `%`
+; — cmd is doing the writing.
+!define INSTLOG "$TEMP\Nolanguage-install.log"
+
+!macro LOGMSG text
+  nsExec::Exec 'cmd /c echo ${text}>>"%TEMP%\Nolanguage-install.log"'
+  Pop $0
+!macroend
+
+!macro LOGVAL label value
+  nsExec::Exec 'cmd /c echo ${label}=[${value}]>>"%TEMP%\Nolanguage-install.log"'
+  Pop $0
+!macroend
+
 !ifndef APP_EXE
   !define APP_EXE "dist\Nolanguage.exe"
 !endif
@@ -101,6 +125,18 @@ VIAddVersionKey "LegalCopyright"  "${APP_PUBLISHER}"
 
 Section "安装 ${APP_NAME}" SecInstall
 
+  ; ---- log header (truncates: one run, one file) -------------------------
+  ; Delete rather than `FileOpen ... w`: a truncating open followed by appends
+  ; from the same section produced a file whose first line was the *last* one
+  ; written, which is worse than no log. Every write below is an append.
+  Delete "${INSTLOG}"
+  !insertmacro LOGMSG "${APP_NAME} installer"
+  !insertmacro LOGVAL "  INSTDIR" "$INSTDIR"
+  StrCpy $8 "no"
+  IfSilent 0 +2
+  StrCpy $8 "yes"
+  !insertmacro LOGVAL "  silent" "$8"
+
   ; An upgrade must not fail on a locked file: close the instance we are about to
   ; overwrite. Not `taskkill /IM`: that kills every Nolanguage on the machine,
   ; including an editor the user has open and a copy installed somewhere else —
@@ -111,27 +147,65 @@ Section "安装 ${APP_NAME}" SecInstall
   SetOverwrite on
   File "${__FILEDIR__}\stop-instance.ps1"
 
+  ; ---- step 1: ask the helper to stop the instance under $INSTDIR ---------
   DetailPrint "正在检查是否已运行 ${APP_NAME}…"
-  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
+  nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
   Pop $0
+  Pop $1
+  !insertmacro LOGVAL "step1 helper exit" "$0"
 
-  ; The helper exits 1 only when it is *sure*: it stopped the instance and the
-  ; file still would not open for writing. That is the one case where the
-  ; extractor below would show "无法打开要写入的文件" — a dialog that names neither
-  ; the app nor the reason, and whose Retry cannot work. Anything else from
-  ; nsExec ("error", a timeout, PowerShell missing) is *not* evidence of a lock,
-  ; so it falls through and lets the extractor try: aborting on "could not ask"
-  ; turned a working install into "the installer does nothing".
-  StrCmp $0 "1" 0 inst_writable
+  ; The helper exits 0 when the file is writable, 1 when it is *sure* it is not.
+  ; Anything else from nsExec ("error", a timeout, PowerShell missing or blocked
+  ; by policy) means "could not ask" — which is not the same as "not locked".
+  ; Both non-zero cases fall through to the pid fallback below; only a proven
+  ; lock may abort. Aborting on "could not ask" turned a working install into
+  ; "the installer does nothing".
+  StrCpy $5 $0
+  StrCmp $5 "0" inst_writable
+
+  ; ---- step 2: the app recorded its own pid; use it ----------------------
+  ; This is also the machine where the helper cannot run at all: a bare number
+  ; in a one-line file needs no interpreter.
+  StrCpy $7 ""
+  IfFileExists "$LOCALAPPDATA\${APP_NAME}\server.pid" 0 inst_no_pid_kill
+    FileOpen $9 "$LOCALAPPDATA\${APP_NAME}\server.pid" r
+    FileRead $9 $7
+    FileClose $9
+    ; No trimming: the app writes the number with no line ending.
+  inst_no_pid_kill:
+  StrCmp $7 "" inst_after_pid
+    !insertmacro LOGVAL "step2 session pid" "$7"
+    nsExec::ExecToStack 'taskkill /PID $7 /T /F'
+    Pop $0
+    Pop $1
+    !insertmacro LOGVAL "step2 taskkill exit" "$0"
+  inst_after_pid:
+
+  ; Unknown verdict: the kill above may well have freed the file, and the
+  ; extractor is the next thing that can tell. Do not abort on a guess.
+  StrCmp $5 "1" 0 inst_writable
+
+  ; Proven locked: ask the helper once more, now that the pid kill ran. It is
+  ; what knows how to wait for the image to be unmapped, so its verdict decides.
+  nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
+  Pop $0
+  Pop $1
+  !insertmacro LOGVAL "step2 helper retry exit" "$0"
+  StrCmp $0 "1" inst_locked inst_writable
+
+  inst_locked:
+    !insertmacro LOGMSG "ABORT: payload still locked"
     IfSilent 0 +3
       SetErrorLevel 2
       Quit
-    MessageBox MB_ICONSTOP|MB_OK "无法写入 $INSTDIR\${APP_NAME}.exe：文件仍被占用。$\r$\n$\r$\n请先退出 ${APP_NAME}（任务管理器里确认没有 ${APP_NAME}.exe），再重新运行安装程序。"
+    MessageBox MB_ICONSTOP|MB_OK "无法写入 $INSTDIR\${APP_NAME}.exe：文件仍被占用。$\r$\n$\r$\n请先退出 ${APP_NAME}（任务管理器里确认没有 ${APP_NAME}.exe），再重新运行安装程序。$\r$\n$\r$\n日志：${INSTLOG}"
     Abort
   inst_writable:
 
   DetailPrint "正在解压 ${APP_NAME}.exe…"
+  !insertmacro LOGMSG "step3 extracting payload"
   File "${APP_EXE}"
+  !insertmacro LOGMSG "step3 payload written"
 
   ; The CLI shim and the PATH helper travel with the app: `nlg` has to work on a
   ; machine that never installed Node or a source checkout, and the PATH edit
@@ -164,8 +238,10 @@ Section "安装 ${APP_NAME}" SecInstall
   ; HKCU PATH, with a receipt recording the exact previous value, so uninstall
   ; restores it instead of deleting anything that looks like ours.
   DetailPrint "正在把 nlg 加入用户 PATH（可在卸载时精确还原）…"
-  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\path-tool.ps1" -Action add -InstallDir "$INSTDIR"'
+  nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\path-tool.ps1" -Action add -InstallDir "$INSTDIR"'
   Pop $0
+  Pop $1
+  !insertmacro LOGVAL "step4 path-tool exit" "$0"
 
   DetailPrint "正在写入注册表（设置 → 应用 中可卸载）…"
   WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"         "${APP_NAME}"
@@ -182,6 +258,8 @@ Section "安装 ${APP_NAME}" SecInstall
   ; 90 MB tree stalls the progress bar for seconds on a machine with real-time
   ; antivirus, and the value only feeds "Settings → Apps" size display.
   WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" 95000
+
+  !insertmacro LOGMSG "done: install completed"
 
   DetailPrint "安装完成。"
 SectionEnd
