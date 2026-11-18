@@ -9,9 +9,24 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { buildPickerScript, encodeCommand, parsePickerOutput } from '../src/util/nativePicker.js';
 
 const PORT = Number(process.env.VERIFY_PORT ?? 7411);
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+/** Run a generated script through the real parser, headless (no window). */
+const runPowerShell = (script: string): Promise<{ code: number | null; out: string; err: string }> =>
+  new Promise((resolve) => {
+    let out = '';
+    let err = '';
+    const p = spawn('powershell', ['-NoProfile', '-STA', '-EncodedCommand', encodeCommand(script)], {
+      windowsHide: true,
+      shell: false,
+    });
+    p.stdout.on('data', (d) => (out += String(d)));
+    p.stderr.on('data', (d) => (err += String(d)));
+    p.on('close', (code) => resolve({ code, out, err }));
+  });
 
 interface Msg {
   kind: string;
@@ -235,6 +250,51 @@ async function main(): Promise<void> {
     c.close();
   } finally {
     child.kill('SIGKILL');
+  }
+
+  // ---- the OS dialog the page asks for -------------------------------------
+  // `File > Open Folder` used to call `__TAURI_INTERNALS__`, which the shipped
+  // Edge --app build does not have, so the menu item answered "available in the
+  // desktop app" from inside the desktop app. The engine opens the dialog now,
+  // and these checks keep the generated PowerShell honest: a quoting bug there is
+  // a dialog that never appears, which is exactly the bug being fixed.
+  //
+  // The dialog is never shown here: `ShowDialog()` is swapped for a property
+  // dump, so the real parser runs over the real generated text without a window.
+  {
+    const dirScript = buildPickerScript({ mode: 'directory', title: "Bob's \"folder\"", defaultPath: 'C:\\Temp' });
+    check('picker: a directory script constructs a FolderBrowserDialog', dirScript.includes('FolderBrowserDialog'));
+    check('picker: an apostrophe in the title is doubled, not left to break the string', dirScript.includes("Bob''s"));
+    const fileScript = buildPickerScript({
+      mode: 'file',
+      title: 'Open',
+      filters: [{ name: 'Source', extensions: ['py', 'js'] }],
+    });
+    check(
+      'picker: the file filter becomes a WinForms filter string',
+      fileScript.includes("'Source|*.py;*.js|All files|*.*'"),
+      fileScript.split('\n').find((l) => l.includes('Filter')) ?? '',
+    );
+    check('picker: a cancelled dialog parses as null', parsePickerOutput('') === null);
+    check('picker: a path with trailing noise still parses', parsePickerOutput('x\r\nC:\\a b\\c.py\r\n') === 'C:\\a b\\c.py');
+
+    const headless = (script: string): string =>
+      script.replace(
+        /if \(\$d\.ShowDialog\(\) -eq \[System\.Windows\.Forms\.DialogResult\]::OK\) \{ \[Console\]::Out\.Write\(([^)]+)\) \}/,
+        '[Console]::Out.Write("OK:" + $d.GetType().Name)',
+      );
+    for (const [label, script] of [
+      ['directory', dirScript],
+      ['file', fileScript],
+      ['save', buildPickerScript({ mode: 'save', title: 'Save As' })],
+    ] as const) {
+      const r = await runPowerShell(headless(script));
+      check(
+        `picker: PowerShell parses the ${label} script and builds its dialog`,
+        r.code === 0 && r.out.trim().startsWith('OK:'),
+        r.code === 0 ? r.out.trim() : (r.err.trim().split(/\r?\n/).slice(-1)[0] ?? `exit ${r.code}`),
+      );
+    }
   }
 
   const failed = results.filter((r) => !r.ok);

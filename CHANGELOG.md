@@ -23,6 +23,20 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**`File → Open Folder` 在桌面版里一直是死的——现在能弹系统对话框了。** 菜单项走的是
+`__TAURI_INTERNALS__`（Tauri 的 dialog 插件），而产品跑的是 Edge `--app`，那个对象根本不存在，
+于是 `nativeOpen()` 返回 `null`，界面只弹一句「原生选择器只在桌面版可用」——**在桌面版里**。
+Tauri 搁置之后，换项目根目录的唯一办法是 `Ctrl+Alt+O` 里手打路径。
+
+现在没有 Tauri 时请求发给引擎，由 `src/util/nativePicker.ts` 调系统对话框：
+`FolderBrowserDialog` / `OpenFileDialog` / `SaveFileDialog`，脚本按 `-EncodedCommand`
+（base64 UTF-16LE）传——标题里有引号、过滤器里有花括号，用 `-Command` 拼字符串迟早出错。
+取消（没有输出）与「对话框打不开」（有 message）分开处理，后者会在界面上说出来。
+
+`verify-panel` 14 → **22**：生成脚本的形状（单引号加倍、WinForms 过滤器串、取消解析），以及
+**用真实解析器跑一遍生成文本**——把 `ShowDialog()` 换成属性输出，不弹窗但走真解析器。
+一个引号 bug 的结果是「对话框永远不出现」，正是这次要修的东西。
+
 **安装冒烟在一台装了真实副本的机器上是破坏性的——修了三个缺陷。** 这次按要求跑
 `npm run ci:install-smoke`，它通过了，但它对宿主做了三件不该做的事：
 

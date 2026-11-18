@@ -1,22 +1,54 @@
-  // ---------- native file pickers (Tauri only) ----------
+  // ---------- native file pickers ----------
   // These are the one allowed piece of OS-native UI: Open / Open Folder / Save As
-  // are real system dialogs. The page bundles no @tauri-apps/api, so the calls go
-  // straight to the dialog plugin through __TAURI_INTERNALS__ — the same trap the
-  // bridge and the title-bar buttons document: window.__TAURI__ does not exist
-  // here, and asking for it made every native picker a no-op in the desktop app.
-  // In the web preview there is no OS picker, so we fall back to a balloon and the
-  // Project tool window still opens files.
+  // are real system dialogs. Two ways to get one, and the shipped build uses the
+  // second: the page bundles no @tauri-apps/api, so under the Tauri shell the
+  // calls go straight to the dialog plugin through __TAURI_INTERNALS__. The
+  // shipped app is Edge --app, where that object does not exist — which is why
+  // "Open Folder" used to answer "available in the desktop app" from inside the
+  // desktop app. Without Tauri the request goes to the engine, which opens the
+  // same dialog through the OS on this machine.
   function tauriInternals() {
     var T = window.__TAURI_INTERNALS__;
     return (T && typeof T.invoke === 'function') ? T : null;
   }
+  var PICK_WAIT = null;
+  function pickViaEngine(opts) {
+    // One dialog at a time: a second menu click while the first is open would
+    // overwrite the waiter and leave the first promise unsettled forever.
+    if (PICK_WAIT) return PICK_WAIT.promise;
+    var wait = {};
+    wait.promise = new Promise(function (resolve, reject) {
+      wait.resolve = resolve;
+      wait.reject = reject;
+    });
+    PICK_WAIT = wait;
+    BRIDGE.send({
+      kind: 'nativePick',
+      reqId: 'pick-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+      mode: opts.save ? 'save' : (opts.directory ? 'directory' : 'file'),
+      title: opts.title || '',
+      defaultPath: opts.defaultPath || '',
+      filters: opts.filters || []
+    });
+    return wait.promise;
+  }
+  /** The engine's answer. Resolves with the array shape the Tauri plugin returns. */
+  function nativeOnPicked(m) {
+    var wait = PICK_WAIT;
+    PICK_WAIT = null;
+    if (!wait) return;
+    if (m && m.message) { wait.reject(new Error(m.message)); return; }
+    wait.resolve(m && m.path ? [m.path] : null);
+  }
   function nativeOpen(opts) {
     var T = tauriInternals();
-    return T ? T.invoke('plugin:dialog|open', { options: opts }) : null;
+    if (T) return T.invoke('plugin:dialog|open', { options: opts });
+    return pickViaEngine(opts);
   }
   function nativeSave(opts) {
     var T = tauriInternals();
-    return T ? T.invoke('plugin:dialog|save', { options: opts }) : null;
+    if (T) return T.invoke('plugin:dialog|save', { options: opts });
+    return pickViaEngine({ save: true, title: opts.title, defaultPath: opts.defaultPath, filters: opts.filters });
   }
   function pickerFailed(title, err) {
     balloon({ type: 'error', title: title, message: 'The system dialog could not open: ' + ((err && err.message) || err || 'unknown error') });

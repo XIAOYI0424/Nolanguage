@@ -68,6 +68,7 @@ import {
 import { handleAttribute } from './handlers/attribution.js';
 import { languageRoots, pluginPayload } from './handlers/plugins.js';
 import { PerfHandlers } from './handlers/perf.js';
+import { pickPath } from '../util/nativePicker.js';
 import { handleFs } from './handlers/fs.js';
 import { handleDebug, handleDebugCmd, handleRun, handleRunScript, handleTerm } from './handlers/run.js';
 import { stateFor, takeConnection } from './conn-state.js';
@@ -691,6 +692,27 @@ export async function main(
           } catch (err) {
             reply({ kind: 'projectCandidates', reqId: msg.reqId, dir, items: [], message: (err as Error).message });
           }
+          break;
+        }
+
+        // ---------- the OS file dialog (no Tauri needed) ----------
+        // The page's pickers used to call `__TAURI_INTERNALS__`, which the shipped
+        // Edge `--app` build does not have: File > Open Folder answered "available
+        // in the desktop app" from inside the desktop app. The dialog is opened
+        // here, on the machine the user is looking at.
+        case 'nativePick': {
+          const mode = msg.mode === 'directory' || msg.mode === 'save' ? msg.mode : 'file';
+          const filters = Array.isArray(msg.filters)
+            ? (msg.filters as Array<{ name?: string; extensions?: string[] }>)
+                .filter((f) => f && Array.isArray(f.extensions))
+                .map((f) => ({ name: String(f.name ?? 'Files'), extensions: f.extensions!.map(String) }))
+            : undefined;
+          void pickPath({ mode, title: String(msg.title ?? ''), defaultPath: String(msg.defaultPath ?? ''), filters }).then(
+            (path) => reply({ kind: 'nativePicked', reqId: msg.reqId, path }),
+            // A dialog that could not open is worth saying out loud: the user
+            // clicked a menu item and nothing appeared.
+            (err: Error) => reply({ kind: 'nativePicked', reqId: msg.reqId, path: null, message: err.message }),
+          );
           break;
         }
 

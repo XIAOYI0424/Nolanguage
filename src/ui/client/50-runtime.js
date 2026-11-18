@@ -782,6 +782,9 @@
       case 'projectCandidates':
         impOnCandidates(m);
         break;
+      case 'nativePicked':
+        nativeOnPicked(m);
+        break;
       case 'depResult':
         depOnResult(m);
         break;
