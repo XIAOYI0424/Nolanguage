@@ -505,18 +505,26 @@ async function main(): Promise<void> {
       if (++quietSeconds < 10) return;
       quietSeconds = 0;
       void (async () => {
-        // Cheap first: the pid we discovered is the window. Only fall back to
-        // the profile query when it is gone (delegation can move the window to
-        // a pid we never spawned). A CIM query on every quiet tick is both
-        // slow and the reason a probe timeout used to look like "no window".
-        if (isAlive(windowPid)) {
-          logDesktop('watchdog-check', { windowsAlive: 1, pids: [windowPid] });
-          return;
+        // A live process is not a window. `windowPid` was discovered as "the
+        // process holding the profile", and Chromium keeps a background process
+        // alive after its last window closes — so the old `isAlive(windowPid)`
+        // fast path answered "still there" forever and the server outlived the UI
+        // it was serving. That is the "关掉窗口，进程还在，装不了新版" report.
+        // Asking for a *visible handle* is the only check that answers the
+        // question the watchdog is actually asking.
+        if (windowPid) {
+          const visible = await findVisibleWindows([windowPid]);
+          if (visible.length) {
+            logDesktop('watchdog-check', { windowsAlive: 1, pids: [windowPid] });
+            return;
+          }
         }
+        // Delegation can move the window to a pid we never spawned, so the
+        // profile is still the authority on "is anything showing this app".
         const alive = windowProfile
           ? await findVisibleWindows(await findWindowProcesses(windowProfile))
           : [];
-        logDesktop('watchdog-check', { windowsAlive: alive.length, pids: alive });
+        logDesktop('watchdog-check', { windowsAlive: alive.length, pids: alive, windowPid: windowPid ?? null });
         if (alive.length === 0) shutdown('no-window');
       })();
     }, 1000).unref?.();

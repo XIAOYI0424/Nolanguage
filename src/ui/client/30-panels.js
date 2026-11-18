@@ -736,6 +736,22 @@
     BRIDGE.send({ kind: 'fsList', path: path });
   }
   function refreshDir(path) { delete TREE[path]; delete TREE_LOADING[path]; loadDir(path); }
+  /**
+   * Forget every cached listing and load the new root.
+   *
+   * The cache is keyed by a path *relative to the root*, so after a root switch
+   * those keys describe different directories: src in the old project and src in
+   * the new one are not the same folder. Keeping them is why opening a folder
+   * changed the name in the toolbar and nothing else — the explorer went on
+   * rendering the previous project under the new name.
+   */
+  function resetTree() {
+    TREE = {};
+    TREE_LOADING = {};
+    EXPANDED = { '': true };
+    renderTree();
+    loadDir('');
+  }
   function renderTree() {
     var body = $('panelBody'); if (!body) return;
     body.innerHTML = '<div class="ptree" id="ptree">' + renderNodes('', 0) + '</div>';

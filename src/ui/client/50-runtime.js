@@ -930,6 +930,10 @@
       case 'fsRoot':
         ROOT_NAME = m.name;
         { var pv = document.querySelector('#projWidget .val'); if (pv) pv.textContent = m.name; }
+        // The tree is cached by path relative to the root, so every entry is now
+        // about a different directory. Without this the folder changes and the
+        // contents do not.
+        resetTree();
         break;
       case 'fsError': onFsError(m); break;
       case 'completion': onCompletion(m); break;
