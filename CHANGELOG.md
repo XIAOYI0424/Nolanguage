@@ -39,6 +39,20 @@ step3 staged → step3 swapped in → done: install completed
 
 共 9 秒完成 payload 写入；安装后 Nolanguage 进程为 0。`%TEMP%\Nolanguage-install.log` 每步带时间戳。
 
+### 桌面操作：文件对话框置前，启动不再闪两次
+
+- 系统文件/文件夹对话框现在用已发现的 WebView 窗口作为 `IWin32Window` owner；此前 PowerShell
+  是隐藏进程且对话框无 owner，Windows 会把模态对话框放在主窗口后面。`NOLANGUAGE_WINDOW_PID`
+  只在当前桌面窗口发现后写入子进程环境；没有本地窗口时安全回退为无 owner。
+- 清理 Edge/WebView2 的独占 profile 时，不再要求进程命令行同时含 `--app=`。后台 profile
+  宿主通常没有 `--app`，但仍会接收下一次启动并造成首窗口闪现、退出，再重开一窗；唯一的
+  `--user-data-dir` 本身足以证明属于 Nolanguage。localhost URL 仍按当前服务端口精确匹配。
+- 若 Edge 仍发生 delegation，只有在委派窗口已连上当前服务器时才直接接管，不再杀窗重开；
+  3 秒内没有客户端才走一次恢复重试。
+- **安装后的默认入口本来就是桌面端，保持不变并加门禁**：Finish 页、无标签开始菜单快捷方式、
+  桌面快捷方式都不带 `--open-browser`；只有显式的 “Nolanguage (Web)” 才带该参数。
+
+
 ### 启动：不再等一个语言服务，版本探测改为缓存
 
 启动耗时测出来之后（`npm run verify:startup` 之前是一组一次性探针），最大的一块不是内核，是**等 python 的服务**：`builtin/python@1.0.0` 是唯一 `lsp.eager: true` 的语言，`workspace.init()` 里同步等它握手。把它关掉，`init()` 从 **439–518 ms 掉到 138–150 ms**。

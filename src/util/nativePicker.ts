@@ -12,10 +12,12 @@
  * braces and a user-supplied title, and every one of them would otherwise be an
  * escaping bug.
  *
- * The dialog is modal to nothing in particular — Windows puts it behind the app
- * window unless it is given an owner, and there is no handle to give it from a
- * console process. It is still a real dialog: it blocks until the user answers,
- * which is why the caller must never hold the event loop open for it.
+ * The dialog used to have no owner. Windows then treated the hidden PowerShell
+ * process as the owner, so its modal picker could open *behind* the app window.
+ * The desktop entry now passes the discovered WebView process PID in
+ * NOLANGUAGE_WINDOW_PID; this script wraps its HWND in IWin32Window and supplies
+ * that as the dialog owner. If no visible app window is available (browser
+ * fallback, early startup), it safely falls back to the unowned dialog.
  */
 import { spawn } from 'node:child_process';
 
@@ -59,6 +61,18 @@ export function buildPickerScript(opts: PickOptions): string {
   const lines = [
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+    "Add-Type -ReferencedAssemblies ([System.Windows.Forms.Form].Assembly.Location) -TypeDefinition 'using System; using System.Windows.Forms; public sealed class NolanguageDialogOwner : IWin32Window { public IntPtr Handle { get; private set; } public NolanguageDialogOwner(IntPtr handle) { Handle = handle; } }' | Out-Null",
+    'function Show-NolanguageDialog($dialog) {',
+    '  $ownerPid = 0',
+    '  if ([int]::TryParse($env:NOLANGUAGE_WINDOW_PID, [ref]$ownerPid) -and $ownerPid -gt 0) {',
+    '    $ownerProcess = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue',
+    '    if ($ownerProcess -and $ownerProcess.MainWindowHandle -ne [IntPtr]::Zero) {',
+    '      $owner = [NolanguageDialogOwner]::new([IntPtr]$ownerProcess.MainWindowHandle)',
+    '      return $dialog.ShowDialog($owner)',
+    '    }',
+    '  }',
+    '  return $dialog.ShowDialog()',
+    '}',
   ];
 
   if (mode === 'directory') {
@@ -67,7 +81,7 @@ export function buildPickerScript(opts: PickOptions): string {
       `$d.Description = ${title}`,
       '$d.ShowNewFolderButton = $true',
       opts.defaultPath ? `$d.SelectedPath = ${psQuote(opts.defaultPath)}` : '',
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }',
+      'if ((Show-NolanguageDialog $d) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }',
     );
   } else if (mode === 'save') {
     lines.push(
@@ -75,7 +89,7 @@ export function buildPickerScript(opts: PickOptions): string {
       `$d.Title = ${title}`,
       `$d.Filter = ${psQuote(psFilter(opts.filters))}`,
       opts.defaultPath ? `$d.FileName = ${psQuote(opts.defaultPath)}` : '',
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
+      'if ((Show-NolanguageDialog $d) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
     );
   } else {
     lines.push(
@@ -84,7 +98,7 @@ export function buildPickerScript(opts: PickOptions): string {
       `$d.Filter = ${psQuote(psFilter(opts.filters))}`,
       '$d.CheckFileExists = $true',
       opts.defaultPath ? `$d.InitialDirectory = ${psQuote(opts.defaultPath)}` : '',
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
+      'if ((Show-NolanguageDialog $d) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
     );
   }
 

@@ -179,11 +179,32 @@ check(
 );
 const sessionSource = readFileSync(join(here, '..', 'src', 'desktop', 'session.ts'), 'utf8');
 check('the window probe is case-insensitive', /OrdinalIgnoreCase/.test(sessionSource));
-check('the window probe also matches the app URL', /--app=http:\/\/127\.0\.0\.1:/.test(sessionSource));
-check('a delegated spawn is retried once', /delegation-retry/.test(mainSource));
+check(
+  'the window URL fallback is scoped to the app port',
+  sessionSource.includes('const url = port ?') && sessionSource.includes('--app=http') && sessionSource.includes('${url}'),
+);
+check(
+  'profile sweep catches Chromium background processes before they delegate',
+  sessionSource.includes('IndexOf($p, [StringComparison]::OrdinalIgnoreCase)') &&
+    !sessionSource.includes("CommandLine -match '--app=' -and"),
+);
+check('a delegated spawn is retried only if no client connected to its visible window', /delegation-adopted/.test(mainSource));
+check('the desktop window pid is published for owned native dialogs', /NOLANGUAGE_WINDOW_PID = String\(windowPid\)/.test(mainSource));
 check('the watchdog checks the known window pid first', /isAlive\(windowPid\)/.test(mainSource));
 check('an orphan server is taken over instead of exiting', /orphan-server/.test(mainSource));
 check('a hung shutdown force-exits', /shutdown-timeout/.test(mainSource));
+const installerSource = readFileSync(join(here, '..', 'installer', 'Nolanguage.nsi'), 'utf8');
+check(
+  'installer finish action launches desktop by default',
+  installerSource.includes('!define MUI_FINISHPAGE_RUN "$INSTDIR\\${APP_NAME}.exe"') &&
+    installerSource.includes('!define MUI_FINISHPAGE_RUN_TEXT "运行 ${APP_NAME} (Desktop)"'),
+);
+check(
+  'the unlabelled Start Menu and desktop shortcuts launch desktop mode',
+  installerSource.includes('CreateShortcut "$SMPROGRAMS\\${APP_NAME}\\${APP_NAME}.lnk"           "$INSTDIR\\${APP_NAME}.exe" ""') &&
+    installerSource.includes('CreateShortcut "$DESKTOP\\${APP_NAME}.lnk" "$INSTDIR\\${APP_NAME}.exe" ""'),
+);
+check('browser mode is explicit in the separate Web shortcut', installerSource.includes('APP_WEB_ARG   "--open-browser"'));
 const gitProbeSource = readFileSync(join(here, '..', 'src', 'git', 'GitProbe.ts'), 'utf8');
 check(
   'the git probe never opens a console window',

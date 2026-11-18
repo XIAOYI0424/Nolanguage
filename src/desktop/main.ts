@@ -252,6 +252,10 @@ function ownBuild(): BuildIdentity {
 }
 
 async function main(): Promise<void> {
+  // Do not trust an inherited/stale value: it names the WebView window created
+  // by this process, which is discovered below. The picker helper uses it as
+  // the native dialog's owner so Windows puts the modal dialog over the app.
+  delete process.env.NOLANGUAGE_WINDOW_PID;
   // The server writes install-receipt.json only for the packaged desktop. A
   // source run (`nlg ide`) or a test server must never overwrite the receipt
   // with `node.exe` — doctor would then report the wrong "installed app".
@@ -408,8 +412,29 @@ async function main(): Promise<void> {
     if (view.engine === 'none') openSystemBrowser(entryUrl);
     else {
       windowPid = await discoverWindow(profile, !fastExit);
-      if (fastExit) {
-        logDesktop('delegation-retry', { pid: windowPid ?? null });
+      if (fastExit && windowPid) {
+        // Edge can delegate --app to its existing profile process. If that
+        // window has connected to this server, it is already the window we need:
+        // killing it and spawning again creates the visible "one window closes,
+        // then another appears" flicker after installation. Give a cold page a
+        // short chance to connect before deciding that the delegated window is
+        // stale and needs the one allowed retry.
+        const connectDeadline = Date.now() + 3000;
+        while (server.clientCount() === 0 && Date.now() < connectDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (server.clientCount() > 0) {
+          logDesktop('delegation-adopted', { pid: windowPid, clients: server.clientCount() });
+        } else {
+          logDesktop('delegation-retry', { pid: windowPid });
+          view.close();
+          await closeStaleWindows(profile);
+          view = openWebView({ url: entryUrl, size: '1280,860', quiet: true });
+          windowPid = await discoverWindow(profile);
+        }
+      } else if (fastExit) {
+        // No usable visible window was found at all.
+        logDesktop('delegation-retry', { pid: null });
         view.close();
         await closeStaleWindows(profile);
         view = openWebView({ url: entryUrl, size: '1280,860', quiet: true });
@@ -460,6 +485,8 @@ async function main(): Promise<void> {
         // The command line proves a process; only a window handle proves a UI.
         const visible = await findVisibleWindows(candidates);
         if (visible.length) {
+          windowPid = visible[0];
+          process.env.NOLANGUAGE_WINDOW_PID = String(windowPid);
           logDesktop('window-discovered', { pid: visible[0], pids: candidates, visible });
           patchSession({ browserPid: visible[0], profile });
           return visible[0];
@@ -471,6 +498,8 @@ async function main(): Promise<void> {
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    // The picker falls back to an unowned dialog when there is no native window.
+    delete process.env.NOLANGUAGE_WINDOW_PID;
     // A tree that never showed a window is not a UI: kill it so the profile is
     // released, then give the user a browser tab (the page itself is fine).
     for (const pid of candidates) killTree(pid);

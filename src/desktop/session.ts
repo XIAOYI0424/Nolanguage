@@ -193,10 +193,11 @@ export async function closeRecordedWindow(profile: string): Promise<number | und
 /**
  * Pids of Edge processes that render *our* window for *profile*.
  *
- * Only `--app=` + our exact `--user-data-dir` qualify, so the user's own Edge
- * session is never touched. Uses CIM because `tasklist` cannot show a command
- * line; one short-lived PowerShell costs a few hundred milliseconds and only
- * runs when a previous window may still be around.
+ * The app uses a dedicated `--user-data-dir`, so that exact profile path is the
+ * identity marker — including Chromium's background/profile process that has no
+ * `--app=` argument but makes the next launch delegate, flash a window, then
+ * retry into a second window. The URL/port is a fallback when Edge normalises the
+ * profile path. No ordinary Edge profile is touched.
  */
 export async function findWindowProcesses(profile: string, port?: number): Promise<number[]> {
   if (process.platform !== 'win32') return [];
@@ -213,7 +214,7 @@ export async function findWindowProcesses(profile: string, port?: number): Promi
   const script = [
     `$p = '${quoted}';`,
     `Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='msedgewebview2.exe'" |`,
-    `  Where-Object { $_.CommandLine -and $_.CommandLine -match '--app=' -and (($_.CommandLine.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($_.CommandLine -match '${url}')) } |`,
+    `  Where-Object { $_.CommandLine -and (($_.CommandLine.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($_.CommandLine -match '${url}')) } |`,,
     '  ForEach-Object { $_.ProcessId }',
   ].join(' ');
   return await new Promise<number[]>((resolve) => {

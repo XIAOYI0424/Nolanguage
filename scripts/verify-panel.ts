@@ -264,6 +264,8 @@ async function main(): Promise<void> {
   {
     const dirScript = buildPickerScript({ mode: 'directory', title: "Bob's \"folder\"", defaultPath: 'C:\\Temp' });
     check('picker: a directory script constructs a FolderBrowserDialog', dirScript.includes('FolderBrowserDialog'));
+    check('picker: the dialog is explicitly owned by the desktop window when available', dirScript.includes('ShowDialog($owner)'));
+    check('picker: the owner PID is passed by the desktop launcher', dirScript.includes('NOLANGUAGE_WINDOW_PID'));
     check('picker: an apostrophe in the title is doubled, not left to break the string', dirScript.includes("Bob''s"));
     const fileScript = buildPickerScript({
       mode: 'file',
@@ -280,7 +282,7 @@ async function main(): Promise<void> {
 
     const headless = (script: string): string =>
       script.replace(
-        /if \(\$d\.ShowDialog\(\) -eq \[System\.Windows\.Forms\.DialogResult\]::OK\) \{ \[Console\]::Out\.Write\(([^)]+)\) \}/,
+        /if \(\(Show-NolanguageDialog \$d\) -eq \[System\.Windows\.Forms\.DialogResult\]::OK\) \{ \[Console\]::Out\.Write\(([^)]+)\) \}/,
         '[Console]::Out.Write("OK:" + $d.GetType().Name)',
       );
     for (const [label, script] of [
