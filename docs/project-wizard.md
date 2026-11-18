@@ -1,8 +1,8 @@
 # 项目向导：manifest 声明模板，UI 不认识任何语言
 
 > 状态：P0 + 部分 P1 已实现（三栏、类型/语言/来源筛选、schema 表单、条件文件、目标目录校验、
-> 文件模板、导入现有项目）。外部 provider（Initializr / cookiecutter / cargo-generate）尚未
-> 接入——它们的**形状**已经定好。
+> 文件模板、导入现有项目、添加依赖）。外部 provider（Initializr / cookiecutter /
+> cargo-generate）尚未接入——它们的**形状**已经定好。
 
 ## 一、为什么是三栏
 
@@ -70,6 +70,22 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 打开 = 现有的 `openFolder`（`fs.setRoot`）。所以这个功能没有新的写入路径，只有新的**发现**路径。
 
+## 二点八、添加依赖（Ctrl+Alt+D）
+
+不解析 lock 文件、不改版本号——那是工具链的事。这里只负责两件用户最容易做错的事：
+**用哪个命令**、**在哪个目录**。
+
+| 标记 | 命令 |
+|---|---|
+| `Cargo.toml` | `cargo add <spec>` |
+| `go.mod` | `go get <spec>` |
+| `pyproject.toml` | `uv add <spec>`（`pip install` 只改环境，不改项目声明） |
+| `package.json` | `npm install <spec>` |
+
+`<spec>` 在**任何进程启动之前**按白名单校验（`lodash`、`@scope/pkg@1.2`、`serde@1`、
+`github.com/x/y@v1`）；空白和 shell 元字符一律拒绝——命令虽然不走 shell，但「看起来像第二个
+参数」的输入不该有机会。失败不写盘：工具链失败时项目原样不动，输出原样展示。
+
 ## 三、代码分层
 
 | 文件 | 职责 |
@@ -103,7 +119,7 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 | 层 | 位置 |
 |---|---|
 | 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出、文件模板只写一个文件 |
-| 端到端 | CDP 冒烟：Ctrl+Alt+N → 选卡片 → 创建 → 文件出现在工作区；文件模式 7 张卡片筛到 3 张，生成 `main_test.go` |
+| 端到端 | CDP 冒烟：Ctrl+Alt+N → 选卡片 → 创建 → 文件出现在工作区；文件模式 7 张卡片筛到 3 张，生成 `main_test.go`；Ctrl+Alt+O 打开项目；Ctrl+Alt+D 识别 `cargo add` 并拒绝非法 spec |
 | 架构 | `scaffold` 层 = 3，只能被更高层引用 |
 
 ## 七、还没做

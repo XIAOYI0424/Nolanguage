@@ -514,3 +514,96 @@
     if (IMP.items.length === 1) IMP.pick = IMP.items[0].dir;
     impPaint();
   }
+
+  // ------------------------------------------------------ add a dependency
+  //
+  // The panel runs the ecosystem's own command and shows its output. It does not
+  // resolve versions or edit lock files: the toolchain owns that, and a failed
+  // add leaves the project untouched.
+
+  var DEP = { dir: '', label: '', spec: '', output: '', error: '', busy: false };
+
+  function depOpen() {
+    wizStyle();
+    DEP.dir = '';
+    DEP.label = '';
+    DEP.spec = '';
+    DEP.output = '';
+    DEP.error = '';
+    DEP.busy = false;
+    depPaint();
+    BRIDGE.send({ kind: 'depsAdd', dryRun: true });
+  }
+
+  function depClose() {
+    var mask = $('nlDep');
+    if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+  }
+
+  function depPaint() {
+    var mask = $('nlDep');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'nlDep';
+      mask.className = 'wiz-mask';
+      document.body.appendChild(mask);
+    }
+    var eco = DEP.label ? '<span class="wiz-badge">' + esc(DEP.label) + '</span>' : '<span class="wiz-muted">未识别到项目</span>';
+    mask.innerHTML = '<div class="wiz-box" style="width:min(720px,92vw);height:auto;max-height:80vh">'
+      + '<div class="wiz-head"><span class="wiz-title">添加依赖</span>' + eco + '<span class="wiz-muted">Ctrl+Alt+D</span></div>'
+      + '<div class="wiz-col" style="padding:12px 14px">'
+      + '<div class="wiz-field"><label>目录</label><input type="text" id="depDir" value="' + esc(DEP.dir) + '" placeholder="留空 = 当前项目"></div>'
+      + '<div class="wiz-field"><label>依赖</label><input type="text" id="depSpec" value="' + esc(DEP.spec) + '" placeholder="lodash · @scope/pkg@1.2 · serde@1 · github.com/x/y@v1"></div>'
+      + (DEP.error ? '<div class="wiz-hint">' + esc(DEP.error) + '</div>' : '')
+      + (DEP.output ? '<div class="wiz-sec">输出</div><pre style="max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0">' + esc(DEP.output) + '</pre>' : '')
+      + '</div>'
+      + '<div class="wiz-foot">'
+      + '<button class="wiz-btn" id="depCancel">关闭</button>'
+      + '<button class="wiz-btn primary" id="depAdd"' + (DEP.busy ? ' disabled' : '') + '>' + (DEP.busy ? '执行中…' : '添加') + '</button>'
+      + '</div></div>';
+
+    var dir = mask.querySelector('#depDir');
+    if (dir) {
+      dir.addEventListener('input', function () { DEP.dir = dir.value; });
+      dir.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { DEP.dir = dir.value; BRIDGE.send({ kind: 'depsAdd', dir: DEP.dir, dryRun: true }); }
+      });
+    }
+    var spec = mask.querySelector('#depSpec');
+    if (spec) {
+      spec.addEventListener('input', function () { DEP.spec = spec.value; });
+      spec.addEventListener('keydown', function (e) { if (e.key === 'Enter') depAdd(); });
+    }
+    var cancel = mask.querySelector('#depCancel');
+    if (cancel) cancel.addEventListener('click', depClose);
+    var add = mask.querySelector('#depAdd');
+    if (add) add.addEventListener('click', depAdd);
+  }
+
+  function depAdd() {
+    if (DEP.busy) return;
+    if (!DEP.spec.trim()) { DEP.error = '请填写要添加的依赖'; depPaint(); return; }
+    DEP.busy = true;
+    DEP.error = '';
+    DEP.output = '';
+    depPaint();
+    BRIDGE.send({ kind: 'depsAdd', dir: DEP.dir, spec: DEP.spec });
+  }
+
+  function depOnResult(m) {
+    DEP.busy = false;
+    if (m && m.plan) DEP.label = m.plan.label || m.plan.ecosystem || '';
+    if (m && m.ok === false && m.message) {
+      DEP.error = m.message;
+      depPaint();
+      return;
+    }
+    DEP.output = String((m && m.output) || '').trim() || '(没有输出)';
+    DEP.error = '';
+    depPaint();
+    if (m && m.ok) {
+      toast('已添加 ' + DEP.spec.trim());
+      // The manifest just changed on disk; the tree should show it.
+      BRIDGE.send({ kind: 'fsList', path: '.' });
+    }
+  }

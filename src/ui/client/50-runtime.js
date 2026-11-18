@@ -782,6 +782,9 @@
       case 'projectCandidates':
         impOnCandidates(m);
         break;
+      case 'depResult':
+        depOnResult(m);
+        break;
       case 'templateGenerated':
         wizOnGenerated(m);
         break;

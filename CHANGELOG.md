@@ -23,6 +23,16 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**添加依赖（Ctrl+Alt+D / File 菜单）。** 按项目标记选命令（`cargo add` / `go get` / `uv add` /
+`npm install`），在项目目录里跑工具链自己的命令，原样展示输出。不解析 lock 文件、不改版本号——
+那是工具链的事；这里只解决「用哪个命令、在哪个目录」这两个最容易做错的决定。
+
+`<spec>` 在任何进程启动前按白名单校验，空白和 shell 元字符一律拒绝（命令不走 shell，但
+「看起来像第二个参数」的输入不该有机会）。失败不写盘：工具链失败时项目原样不动。
+
+`npm test` 178 → **185**（四种生态的命令规划、probe、非法 spec、无项目目录）；CDP 冒烟：
+Ctrl+Alt+D 从 `Cargo.toml` 识别出 `cargo add`，输入 `serde && rm -rf /` 被拒绝。
+
 **导入现有项目（Ctrl+Alt+O / File 菜单）。** 文件已经存在，所以这不是向导：扫当前目录 + 一层
 子目录的项目标记（`Cargo.toml` / `package.json` / `pyproject.toml` / `setup.py` / `go.mod` /
 `pom.xml` / `CMakeLists.txt`），跳过 `node_modules`/`target`/`dist`/`build`/`.venv`，显示名优先

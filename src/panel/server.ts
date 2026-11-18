@@ -42,6 +42,7 @@ import { SAMPLES } from './samples.js';
 import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
 import { detectProjects } from '../scaffold/detect.js';
+import { planAdd, runAdd } from '../scaffold/dependencies.js';
 import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
 import { FsService, FsError } from './FsService.js';
@@ -633,6 +634,33 @@ export async function main(
               field: (err as { field?: string }).field ?? null,
             });
           }
+          break;
+        }
+
+        // ---------- add a dependency ----------
+        case 'depsAdd': {
+          const dir = String(msg.dir ?? '') || workspace.projectRoot();
+          const spec = String(msg.spec ?? '');
+          const dryRun = msg.dryRun === true;
+          void (async () => {
+            try {
+              const plan = planAdd(dir, spec, { probe: dryRun && !spec.trim() });
+              if (dryRun) {
+                reply({ kind: 'depResult', reqId: msg.reqId, ok: true, plan, output: '' });
+                return;
+              }
+              const result = await runAdd(plan);
+              reply({ kind: 'depResult', reqId: msg.reqId, ...result });
+            } catch (err) {
+              reply({
+                kind: 'depResult',
+                reqId: msg.reqId,
+                ok: false,
+                message: (err as Error).message,
+                field: (err as { field?: string }).field ?? null,
+              });
+            }
+          })();
           break;
         }
 

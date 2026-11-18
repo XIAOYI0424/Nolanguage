@@ -55,6 +55,7 @@ import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
 import { windowUsable } from '../src/desktop/handshake';
 import { detectProjects } from '../src/scaffold/detect';
+import { planAdd } from '../src/scaffold/dependencies';
 import { TemplateRegistry } from '../src/scaffold/registry';
 import { safeRelativePath } from '../src/scaffold/types';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
@@ -974,6 +975,49 @@ describe('scaffold · templates', () => {
     const [item] = reg.list();
     expect(item.available).toBe(false);
     expect(item.reason).toBe('network unreachable');
+  });
+});
+
+describe('scaffold · adding a dependency', () => {
+  const dirs: Array<[string, string, string[]]> = [
+    ['Cargo.toml', 'cargo', ['add', 'serde@1']],
+    ['go.mod', 'go', ['get', 'github.com/x/y@v1']],
+    ['pyproject.toml', 'uv', ['add', 'httpx']],
+    ['package.json', 'npm', ['install', 'lodash']],
+  ];
+
+  for (const [marker, ecosystem, args] of dirs) {
+    it(`plans ${ecosystem} for a directory with ${marker}`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'nl-dep-'));
+      writeFileSync(join(dir, marker), 'x');
+      const plan = planAdd(dir, args[args.length - 1]);
+      expect(plan.ecosystem).toBe(ecosystem);
+      expect(plan.args).toEqual(args);
+      expect(plan.cwd).toBe(dir);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  it('probes the ecosystem without a package name', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-probe-'));
+    writeFileSync(join(dir, 'Cargo.toml'), 'x');
+    expect(planAdd(dir, '', { probe: true }).label).toBe('cargo add');
+    expect(() => planAdd(dir, '')).toThrow(/请填写/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects a spec that could look like a second argument', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-bad-'));
+    writeFileSync(join(dir, 'package.json'), '{}');
+    expect(() => planAdd(dir, 'lodash && rm -rf /')).toThrow(/字符/);
+    expect(() => planAdd(dir, '--save-dev')).not.toThrow();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a directory with no project marker', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nl-dep-none-'));
+    expect(() => planAdd(dir, 'lodash')).toThrow(/没有识别到项目/);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
