@@ -101,14 +101,19 @@ VIAddVersionKey "LegalCopyright"  "${APP_PUBLISHER}"
 
 Section "安装 ${APP_NAME}" SecInstall
 
-  ; An upgrade must not fail on a locked file: close a running instance first.
-  ; `nsExec` runs the command hidden, so no console window ever appears.
-  DetailPrint "正在检查是否已运行 ${APP_NAME}…"
-  nsExec::ExecToLog 'taskkill /IM "${APP_NAME}.exe" /F /T'
-  Pop $0
-
+  ; An upgrade must not fail on a locked file: close the instance we are about to
+  ; overwrite. Not `taskkill /IM`: that kills every Nolanguage on the machine,
+  ; including an editor the user has open and a copy installed somewhere else —
+  ; which is exactly what an install-smoke run is. The helper is extracted first
+  ; because it has to exist before the exe is replaced; it is a new file, so the
+  ; running instance cannot be holding it.
   SetOutPath "$INSTDIR"
   SetOverwrite on
+  File "${__FILEDIR__}\stop-instance.ps1"
+
+  DetailPrint "正在检查是否已运行 ${APP_NAME}…"
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
+  Pop $0
 
   DetailPrint "正在解压 ${APP_NAME}.exe…"
   File "${APP_EXE}"
@@ -163,8 +168,11 @@ SectionEnd
 
 Section "Uninstall"
 
+  ; Same rule as the installer: stop the instance under *this* $INSTDIR. An
+  ; uninstaller run from a copy must not take the real install down with it.
   DetailPrint "正在关闭 ${APP_NAME}…"
-  nsExec::ExecToLog 'taskkill /IM "${APP_NAME}.exe" /F /T'
+  IfFileExists "$INSTDIR\stop-instance.ps1" 0 +2
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
   Pop $0
 
   ; Restore PATH before the helper script is deleted with the directory.
@@ -177,6 +185,7 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\nlg.cmd"
   Delete "$INSTDIR\path-tool.ps1"
+  Delete "$INSTDIR\stop-instance.ps1"
   ; The helper removes its own receipt; delete it here as well so a receipt can
   ; never survive the uninstall that was supposed to consume it.
   Delete "$LOCALAPPDATA\Nolanguage\install-receipt.json"
