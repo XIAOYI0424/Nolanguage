@@ -580,7 +580,10 @@
   }
   function showInterpreters(m) {
     var list = m.candidates || [];
-    if (!list.length) {
+    var creates = m.creates || [];
+    // "No interpreter found" used to be the end of the road. When the plugin can
+    // create one, the dialog is the place to say so.
+    if (!list.length && !creates.length) {
       toast('No ' + m.language + ' interpreter found');
       return;
     }
@@ -594,15 +597,52 @@
     // *last* checked one, so "Auto" must stay unchecked while an interpreter is
     // active, or the dialog would silently apply the unpinned state.
     radios.push({ name: 'bin', value: '', label: 'Auto (discovered, no pin)', def: !m.active && !m.pinned });
+    var buttons = [{ label: 'Cancel' }];
+    if (creates.length) {
+      buttons.push({ label: 'New Environment…', onClick: function () { openNewEnvironment(m); } });
+    }
+    buttons.push({ label: 'Apply', primary: true, onClick: function (v) {
+      BRIDGE.send({ kind: 'setInterpreter', language: m.language, path: v.bin || undefined });
+    } });
     showModal({
       title: 'Project interpreter — ' + m.language, icon: 'settings',
       message: m.root,
-      sub: list.length + ' candidate' + (list.length === 1 ? '' : 's'),
+      sub: (list.length ? list.length + ' candidate' + (list.length === 1 ? '' : 's') : 'no candidate yet') +
+        (creates.length ? ' · can create ' + creates.map(function (c) { return c.label; }).join(' / ') : ''),
       radios: radios,
+      buttons: buttons
+    });
+  }
+
+  /**
+   * Create an environment from the plugin's declared providers.
+   *
+   * The dialog is a *request*, not a form that runs anything: the engine validates
+   * the target (inside the project, empty) and owns the spawn, so an invalid path
+   * comes back as one sentence in the terminal instead of a half-built .venv.
+   */
+  function openNewEnvironment(m) {
+    var creates = m.creates || [];
+    if (!creates.length) { toast('This language declares no environment provider'); return; }
+    var first = creates[0];
+    showModal({
+      title: 'New ' + m.language + ' environment', icon: 'settings',
+      message: m.root,
+      sub: 'Created inside the project. The interpreter switches to it when the command succeeds.',
+      radios: creates.map(function (c, i) {
+        return { name: 'prov', value: c.id, label: c.label + (c.defaultPath ? '   →  ' + c.defaultPath : ''), def: i === 0 };
+      }),
+      fields: [
+        { name: 'path', label: 'Directory (project-relative)', value: first.defaultPath || '.venv', placeholder: '.venv' },
+        { name: 'version', label: 'Version', value: '', placeholder: first.wantsVersion ? 'required, e.g. 3.12' : 'optional' }
+      ],
       buttons: [
         { label: 'Cancel' },
-        { label: 'Apply', primary: true, onClick: function (v) {
-          BRIDGE.send({ kind: 'setInterpreter', language: m.language, path: v.bin || undefined });
+        { label: 'Create', primary: true, onClick: function (v) {
+          toggleWindow('terminal');
+          termWrite('Creating ' + m.language + ' environment (' + String(v.prov || '') + ')\n', 'dim');
+          renderTermOut();
+          BRIDGE.send({ kind: 'envCreate', language: m.language, provider: v.prov, path: v.path, version: v.version });
         } }
       ]
     });

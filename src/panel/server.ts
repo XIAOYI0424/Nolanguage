@@ -70,7 +70,7 @@ import { languageRoots, pluginPayload } from './handlers/plugins.js';
 import { PerfHandlers } from './handlers/perf.js';
 import { pickPath } from '../util/nativePicker.js';
 import { handleDraft, handleFs } from './handlers/fs.js';
-import { handleDebug, handleDebugCmd, handleRun, handleRunScript, handleTerm } from './handlers/run.js';
+import { handleDebug, handleDebugCmd, handleEnvCreate, handleRun, handleRunScript, handleTerm } from './handlers/run.js';
 import { stateFor, takeConnection } from './conn-state.js';
 
 /**
@@ -861,9 +861,7 @@ export async function main(
           void handleWorkspaceSymbol(workspace, msg, reply);
           break;
 
-        case 'format':
-          void handleFormat(workspace, msg, reply);
-          break;
+        case 'format': void handleFormat(workspace, msg, reply); break;
 
         case 'folding': void handleFolding(workspace, msg, reply); break;
         case 'hover':
@@ -896,6 +894,7 @@ export async function main(
         case 'setInterpreter':
           void handleSetInterpreter(workspace, msg, reply);
           break;
+        case 'envCreate': void handleEnvCreate(workspace, msg, reply); break;
 
         case 'importIdea':
           void handleImportIdea(workspace, msg, reply);

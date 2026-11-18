@@ -10,7 +10,7 @@
  */
 import { parseEnv, splitArgs } from '../../scaffold/runConfigs.js';
 import { exec as execCb, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +18,7 @@ import { promisify } from 'node:util';
 import type { Kernel } from '../../kernel/Kernel.js';
 import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '../../dap/DapClient.js';
 import { discoverBinary } from '../../langs/discover.js';
+import { environmentExecutable, planEnvironment } from '../../langs/interpreters.js';
 import type { WorkspaceService } from '../WorkspaceService.js';
 import { stateFor, dropDap, peekConnection } from '../conn-state.js';
 import { boundedRunTimeout } from '../run-timeout.js';
@@ -615,5 +616,96 @@ export async function handleDebugCmd(
   } catch (err) {
     reply({ kind: 'debugState', ok: false, error: (err as Error).message });
   }
+}
+
+/** Env creation is slower than a run (conda resolves a solver), but not unbounded. */
+const ENV_CREATE_TIMEOUT_MS = 300_000;
+/** `python -m venv` prints little; conda can print a lot. Cap it like the terminal. */
+const ENV_CREATE_OUTPUT_LIMIT = 256 * 1024;
+
+/**
+ * Create an environment from the plugin's `run.interpreters.create` block.
+ *
+ * Everything about *which* command runs comes from the manifest; this function
+ * decides only the parts the engine does own: where the directory may be (inside
+ * the project, and empty), that the spawn happens in one place, and that the
+ * caller gets the resulting interpreter path so the picker can switch to it.
+ *
+ * Refusing a non-empty directory is the important guard: pointing `venv` at the
+ * project root is not an exotic mistake, and its failure mode is a half-populated
+ * tree that looks like a broken project rather than a bad dialog entry.
+ */
+export async function handleEnvCreate(
+  workspace: WorkspaceService,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const reqId = Number(msg.reqId ?? 0);
+  const language = asLanguage(msg.language, workspace);
+  const interpreters = workspace.manifestOf(language)?.run?.interpreters;
+  let plan: ReturnType<typeof planEnvironment>;
+  try {
+    plan = planEnvironment({
+      create: interpreters?.create,
+      provider: typeof msg.provider === 'string' ? msg.provider : undefined,
+      root: workspace.root,
+      dir: typeof msg.path === 'string' ? msg.path : '',
+      version: typeof msg.version === 'string' ? msg.version : undefined,
+      toolchain: workspace.toolchainFor(language),
+    });
+    if (existsSync(plan.dir) && readdirSync(plan.dir).length > 0) {
+      throw new Error(`${plan.dir} is not empty`);
+    }
+  } catch (err) {
+    reply({ kind: 'envDone', reqId, language, ok: false, error: (err as Error).message });
+    return;
+  }
+
+  reply({ kind: 'envStarted', reqId, language, provider: plan.provider, dir: plan.dir, display: plan.display });
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(plan.command[0], plan.command.slice(1), {
+      cwd: workspace.root,
+      windowsHide: true,
+      env: process.env,
+    });
+  } catch (err) {
+    reply({ kind: 'envDone', reqId, language, ok: false, error: (err as Error).message });
+    return;
+  }
+
+  let sent = 0;
+  const stream = (d: Buffer, which: 'stdout' | 'stderr'): void => {
+    if (sent > ENV_CREATE_OUTPUT_LIMIT) return;
+    sent += d.length;
+    reply({ kind: 'envOut', reqId, stream: which, text: d.toString('utf8') });
+  };
+  child.stdout?.on('data', (d: Buffer) => stream(d, 'stdout'));
+  child.stderr?.on('data', (d: Buffer) => stream(d, 'stderr'));
+  const timer = setTimeout(() => {
+    reply({ kind: 'envOut', reqId, stream: 'stderr', text: `\nenvironment creation timed out after ${ENV_CREATE_TIMEOUT_MS / 1000}s; killing it\n` });
+    child.kill();
+  }, ENV_CREATE_TIMEOUT_MS);
+  child.on('error', (err) => {
+    clearTimeout(timer);
+    reply({ kind: 'envDone', reqId, language, ok: false, dir: plan.dir, error: String(err) });
+  });
+  child.on('close', (code) => {
+    clearTimeout(timer);
+    const ok = code === 0;
+    reply({
+      kind: 'envDone',
+      reqId,
+      language,
+      ok,
+      code: code ?? null,
+      provider: plan.provider,
+      dir: plan.dir,
+      // Only meaningful on success: a failed create leaves no interpreter, and
+      // handing back a path that does not exist would switch the project to it.
+      executable: ok ? environmentExecutable(plan.dir, interpreters?.envBins) : undefined,
+      error: ok ? undefined : `the ${plan.provider} command exited with ${code ?? 'no code'}`,
+    });
+  });
 }
 

@@ -396,6 +396,54 @@ function validateInterpreters(value: unknown, field: string, add: (f: string, m:
       add(`${field}.${key}`, 'must be a non-empty string when present');
     }
   }
+  if (spec.create !== undefined) validateCreates(spec.create, `${field}.create`, add);
+}
+
+/**
+ * `run.interpreters.create`: the commands that build an environment.
+ *
+ * Three things are checked here rather than at spawn time: the command is a
+ * string array (a single string would be handed to spawn as argv[0]), every
+ * placeholder is one the engine actually fills, and `defaultPath` stays inside
+ * the project. A literal `{foo}` reaching `spawn` fails at the user's screen with
+ * `ENOENT {foo}`, which is unreadable and unactionable.
+ */
+const CREATE_PLACEHOLDERS = ['{toolchain}', '{path}', '{version}'];
+
+function validateCreates(value: unknown, field: string, add: (f: string, m: string) => void): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    add(field, 'must be an object keyed by provider (venv, conda, …)');
+    return;
+  }
+  for (const [provider, raw] of Object.entries(value as Record<string, unknown>)) {
+    const at = `${field}.${provider}`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      add(at, 'must be an object');
+      continue;
+    }
+    const spec = raw as Record<string, unknown>;
+    if (!Array.isArray(spec.command) || spec.command.length === 0 || spec.command.some((c) => typeof c !== 'string' || !c)) {
+      add(`${at}.command`, 'must be a non-empty array of non-empty strings');
+    } else {
+      const bad = spec.command
+        .flatMap((c) => String(c).match(/\{[a-zA-Z0-9_]+\}/g) ?? [])
+        .filter((p) => !CREATE_PLACEHOLDERS.includes(p));
+      if (bad.length) add(`${at}.command`, `unknown placeholder(s) ${[...new Set(bad)].join(', ')}; known: ${CREATE_PLACEHOLDERS.join(', ')}`);
+    }
+    if (spec.defaultPath !== undefined) {
+      const p = spec.defaultPath;
+      if (typeof p !== 'string' || !p) add(`${at}.defaultPath`, 'must be a non-empty string when present');
+      else if (/^[/\\]/.test(p) || /^[A-Za-z]:/.test(p)) add(`${at}.defaultPath`, 'must be project-relative');
+      else if (p.replace(/\\/g, '/').split('/').some((seg) => seg === '..')) add(`${at}.defaultPath`, 'must not escape the project');
+    }
+    for (const key of ['label']) {
+      const v = spec[key];
+      if (v !== undefined && (typeof v !== 'string' || !v)) add(`${at}.${key}`, 'must be a non-empty string when present');
+    }
+    if (spec.wantsVersion !== undefined && typeof spec.wantsVersion !== 'boolean') {
+      add(`${at}.wantsVersion`, 'must be a boolean');
+    }
+  }
 }
 
 /**

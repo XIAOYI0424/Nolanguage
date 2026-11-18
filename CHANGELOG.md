@@ -2,6 +2,27 @@
 
 ## 0.7.24 — 2026-11-15
 
+### 新建环境：解释器列表里可以直接造一个 venv
+
+以前只能"发现"环境：项目里没有 `.venv` 时，唯一的出路是在终端手敲 `python -m venv .venv`，
+再回到选择器里翻出它。现在选择器多一个 `New Environment…`，提供者与命令由插件声明
+（`run.interpreters.create`，python 插件给了 `venv` 与 `conda`），引擎不认语言、更不认 "venv"。
+
+命令里的占位符只有三个：`{toolchain}`（拿来建环境的解释器）、`{path}`（目标目录）、`{version}`
+（`conda … python={version}` 这类）。写了别的占位符，`validateManifest` 在安装时就拒绝——否则它会被
+原样交给 spawn，用户看到的是 `ENOENT {foo}`。
+
+守卫都在引擎侧，而不是对话框里：目标必须在项目内、目录必须为空（把 `venv` 指向项目根不是罕见手误，
+它的后果是半填充的目录树，看起来像项目坏了）、`wantsVersion` 的提供者必须给版本、模板要 `{toolchain}`
+时得先选定解释器。任一不满足都只返回一句话，不 spawn。
+
+输出流进 Terminal 面板（PyCharm 的做法）：conda 选到意外的 solver、pip 想要编译器，这些是唯一值得
+读的东西，转圈图标会把它们藏起来。成功后自动切到新建的解释器——创建它的目的就是用它；pins 仍写在
+`toolchains.json`（机器级，原本就有，本次未改）。
+
+顺带修掉一条过严的断言：`verify-langplugins` 里用 `</dependencyManagement><dependencies>` 精确匹配，
+实际测的是写入器的缩进而不是写入位置，改成"新 artifact 位于托管段之后、`</project>` 之前"。
+
 ### 代码折叠：服务器给范围，本地 brace/indent 兜底
 
 `Code > Fold Code Block`（`Ctrl+Shift+[`）、`Fold All`、`Unfold All`，行号右侧多一列折叠箭头。

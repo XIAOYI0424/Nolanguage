@@ -167,7 +167,32 @@
       "versionArgs": [
         "--version"
       ],
-      "sdkPrefix": "Python"
+      "sdkPrefix": "Python",
+      "create": {
+        "venv": {
+          "command": [
+            "{toolchain}",
+            "-m",
+            "venv",
+            "{path}"
+          ],
+          "defaultPath": ".venv",
+          "label": "venv"
+        },
+        "conda": {
+          "command": [
+            "conda",
+            "create",
+            "-y",
+            "-p",
+            "{path}",
+            "python={version}"
+          ],
+          "defaultPath": ".conda",
+          "label": "conda",
+          "wantsVersion": true
+        }
+      }
     }
   },
   "profiler": {

@@ -10,13 +10,17 @@
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ide.ts
  */
 import { spawn } from 'node:child_process';
+import { existsSync, rmSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
+import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { RawWsClient } from './lib/RawWsClient.js';
 import { sampleById } from '../src/panel/samples.js';
 import { resolveGoBin, discoverGoServer } from '../src/go/discover.js';
 
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PORT = Number(process.env.VERIFY_PORT ?? 7510);
 
 const results: { name: string; ok: boolean; detail: string; skipped?: boolean }[] = [];
@@ -471,6 +475,74 @@ async function main(): Promise<void> {
       client.send({ kind: 'run', language: 'klingon', sessionId: 'verify-go', code: 'print("fallback")' });
       const g5 = await client.waitFor('runResult', 60_000);
       check('unknown language falls back to python', /fallback/.test(String(g5?.stdout ?? '')), `lang=${g5?.language}`);
+    }
+
+    // ---------- environment creation: the interpreter picker's "New…" ----------
+    // The guards are asserted first because they are the ones that must never
+    // regress: a create that walks out of the project, or that overwrites a
+    // populated directory, is worse than no create at all.
+    client.clearReceived();
+    client.send({ kind: 'interpreters', language: 'python' });
+    const interp = await client.waitFor('interpreters', 20_000);
+    const creates = (interp?.creates ?? []) as Array<{ id: string; needsToolchain: boolean; wantsVersion: boolean }>;
+    check('interpreter list advertises the declared providers', creates.some((c) => c.id === 'venv'), creates.map((c) => c.id).join(','));
+    check('the venv provider needs an existing interpreter', !!creates.find((c) => c.id === 'venv')?.needsToolchain);
+    check('the conda provider asks for a version', !!creates.find((c) => c.id === 'conda')?.wantsVersion);
+
+    client.clearReceived();
+    client.send({ kind: 'envCreate', language: 'python', provider: 'venv', path: '../escape' });
+    const escaped = await client.waitFor('envDone', 10_000);
+    check(
+      'an environment outside the project is refused',
+      escaped?.ok === false && /inside the project/.test(String(escaped?.error ?? '')),
+      String(escaped?.error ?? ''),
+    );
+
+    client.clearReceived();
+    client.send({ kind: 'envCreate', language: 'python', provider: 'pixi', path: '.tmp/env-check' });
+    const unknownProvider = await client.waitFor('envDone', 10_000);
+    check(
+      'an unknown provider is reported with the real list',
+      unknownProvider?.ok === false && /venv, conda/.test(String(unknownProvider?.error ?? '')),
+      String(unknownProvider?.error ?? ''),
+    );
+
+    client.clearReceived();
+    client.send({ kind: 'envCreate', language: 'python', provider: 'venv', path: '.' });
+    const notEmpty = await client.waitFor('envDone', 10_000);
+    check(
+      'a non-empty target is refused instead of half-populating it',
+      notEmpty?.ok === false && /not empty/.test(String(notEmpty?.error ?? '')),
+      String(notEmpty?.error ?? ''),
+    );
+
+    // Positive path, in the scratch directory the suites already use (`gitignored`),
+    // and only when python is actually there: the point is the spawn + marker +
+    // executable detection, not re-testing argv building.
+    const scratch = join('.tmp', `env-check-${process.pid}`);
+    rmSync(join(ROOT, scratch), { recursive: true, force: true });
+    if (interp?.active) {
+      client.clearReceived();
+      client.send({ kind: 'setInterpreter', language: 'python', path: interp.active });
+      await client.waitFor('interpreterSet', 20_000);
+      client.clearReceived();
+      client.send({ kind: 'envCreate', language: 'python', provider: 'venv', path: scratch });
+      const announced = await client.waitFor('envStarted', 15_000);
+      check('envCreate announces the command it will run', /-m\s+venv/.test(String(announced?.display ?? '')), String(announced?.display ?? ''));
+      const made = await client.waitFor('envDone', 120_000);
+      check('a venv is created inside the project', made?.ok === true, String(made?.error ?? ''));
+      // The suite's server runs against its own temp workspace, so the path to
+      // assert on is the one the reply names — not the repo-relative scratch name.
+      const madeDir = String(made?.dir ?? '');
+      check('the created environment has its marker file', !!madeDir && existsSync(join(madeDir, 'pyvenv.cfg')), madeDir);
+      check(
+        'the reply names the interpreter to switch to',
+        typeof made?.executable === 'string' && /python/i.test(String(made.executable)),
+        String(made?.executable ?? ''),
+      );
+      rmSync(madeDir || join(ROOT, scratch), { recursive: true, force: true });
+    } else {
+      skip('a venv is created inside the project', 'no python interpreter discovered');
     }
 
     // ---------- metrics reach the Performance tab ----------

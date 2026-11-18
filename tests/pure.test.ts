@@ -32,6 +32,8 @@ import {
   undeclaredImports,
 } from '../src/langs/dependencies';
 import { materializeAssets } from '../src/assets/embeddedAssets';
+import { environmentExecutable, planEnvironment } from '../src/langs/interpreters';
+import { validateManifest } from '../src/langs/manifest';
 import { normalizeFoldingRanges } from '../src/lsp/navigation';
 import { FsService } from '../src/panel/FsService';
 import { handleDraft } from '../src/panel/handlers/fs';
@@ -2328,6 +2330,94 @@ describe('folding ranges · textDocument/foldingRange', () => {
   it('returns nothing for a reply that is not a list', () => {
     expect(normalizeFoldingRanges(null)).toEqual([]);
     expect(normalizeFoldingRanges({ startLine: 0, endLine: 2 })).toEqual([]);
+  });
+});
+
+describe('environment creation · run.interpreters.create', () => {
+  const create = {
+    venv: { command: ['{toolchain}', '-m', 'venv', '{path}'], defaultPath: '.venv' },
+    conda: { command: ['conda', 'create', '-p', '{path}', 'python={version}'], wantsVersion: true },
+  };
+
+  it('substitutes the three placeholders and nothing else', () => {
+    const plan = planEnvironment({
+      create,
+      provider: 'venv',
+      root: 'C:/proj',
+      dir: '.venv',
+      toolchain: 'C:/py/python.exe',
+    });
+    expect(plan.command).toHaveLength(4);
+    expect(plan.command[0]).toBe('C:/py/python.exe');
+    expect(plan.command[3].replace(/\\/g, '/')).toBe('C:/proj/.venv');
+    expect(plan.display).toBe(plan.command.join(' '));
+  });
+
+  it('refuses a target outside the project, and allows an absolute one inside', () => {
+    expect(() => planEnvironment({ create, provider: 'venv', root: 'C:/proj', dir: '../elsewhere', toolchain: 'py' })).toThrow(
+      /inside the project/,
+    );
+    const plan = planEnvironment({
+      create,
+      provider: 'venv',
+      root: 'C:/proj',
+      dir: 'C:/proj/envs/a',
+      toolchain: 'py',
+    });
+    expect(plan.dir.replace(/\\/g, '/')).toBe('C:/proj/envs/a');
+  });
+
+  it('asks for what the provider needs instead of spawning a broken command', () => {
+    expect(() => planEnvironment({ create, provider: 'conda', root: 'C:/proj', dir: '.conda' })).toThrow(/version/);
+    expect(() => planEnvironment({ create, provider: 'venv', root: 'C:/proj', dir: '.venv' })).toThrow(/interpreter/);
+  });
+
+  it('names the providers it does have when asked for one it does not', () => {
+    expect(() => planEnvironment({ create, provider: 'pixi', root: 'C:/proj', dir: '.p' })).toThrow(/venv, conda/);
+    expect(() => planEnvironment({ create: undefined, provider: 'venv', root: 'C:/proj', dir: '.venv' })).toThrow(
+      /no environment providers/,
+    );
+  });
+
+  it('finds the interpreter the new environment will have', () => {
+    // `join` decides the separator, so compare in one normalised form.
+    const norm = (p: string): string => p.replace(/\\/g, '/');
+    const found = environmentExecutable('C:/proj/.venv', ['bin/python', 'Scripts/python.exe'], (p) => norm(p).endsWith('Scripts/python.exe'));
+    expect(found && norm(found)).toBe('C:/proj/.venv/Scripts/python.exe');
+    expect(environmentExecutable('C:/proj/.venv', ['bin/python'], () => false)).toBeUndefined();
+  });
+
+  it('rejects a manifest whose create command would reach spawn as a literal token', () => {
+    const base = {
+      id: 'x',
+      displayName: 'X',
+      version: '1.0.0',
+      apiVersion: '^1.0.0',
+      file: { extensions: ['x'] },
+      run: { mode: 'template', interpreters: { create: { venv: { command: ['{toolchain}', '{foo}', '{path}'] } } } },
+    };
+    const bad = validateManifest(base);
+    expect(bad.ok).toBe(false);
+    expect(JSON.stringify(bad.issues)).toContain('{foo}');
+
+    const ok = validateManifest({
+      ...base,
+      run: { mode: 'template', interpreters: { create: { venv: { command: ['{toolchain}', '{path}'] } } } },
+    });
+    expect(ok.ok).toBe(true);
+  });
+
+  it('rejects a defaultPath that escapes the project', () => {
+    const bad = validateManifest({
+      id: 'x',
+      displayName: 'X',
+      version: '1.0.0',
+      apiVersion: '^1.0.0',
+      file: { extensions: ['x'] },
+      run: { mode: 'template', interpreters: { create: { venv: { command: ['{path}'], defaultPath: '../out' } } } },
+    });
+    expect(bad.ok).toBe(false);
+    expect(JSON.stringify(bad.issues)).toContain('escape');
   });
 });
 

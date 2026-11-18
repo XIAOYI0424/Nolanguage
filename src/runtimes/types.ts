@@ -123,6 +123,35 @@ export interface InterpretersSpec {
    * Used to match a project's recorded SDK name against a discovered candidate.
    */
   sdkPrefix?: string;
+  /**
+   * How to *create* a new environment, keyed by provider (`venv`, `conda`, …).
+   *
+   * Discovery could already find an environment; nothing could make one, which
+   * left "open a fresh project" as the only way to get a clean interpreter. The
+   * commands live here for the same reason the run command does: creating a venv
+   * is language knowledge, and the engine must not learn the word "venv".
+   */
+  create?: Record<string, EnvironmentCreateSpec>;
+}
+
+/**
+ * One way to create an environment for a language.
+ *
+ * Placeholders are limited to `{toolchain}` (the interpreter that builds the
+ * environment), `{path}` (the target directory, absolute) and `{version}` (the
+ * version the user asked for). Anything else is a manifest bug, and
+ * `validateManifest` rejects it rather than shipping a literal `{foo}` to a
+ * spawn call.
+ */
+export interface EnvironmentCreateSpec {
+  /** Command template, e.g. `["{toolchain}", "-m", "venv", "{path}"]`. */
+  command: string[];
+  /** Project-relative directory the dialog pre-fills. */
+  defaultPath?: string;
+  /** Human label for the provider picker; defaults to the key. */
+  label?: string;
+  /** Provider wants `{version}` filled in (conda: `python=3.12`). */
+  wantsVersion?: boolean;
 }
 
 export interface RunConfig {

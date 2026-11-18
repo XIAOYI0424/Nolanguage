@@ -281,7 +281,18 @@ async function testProjectDependencies(): Promise<void> {
     const maven = planAdd(mavenDir, 'org.example:client:1.2.3');
     const mavenResult = applyAdd(maven);
     const pomText = await readFile(pom, 'utf8');
-    check('dependencies: Maven inserts project dependencies outside dependencyManagement', mavenResult.ok && /<dependencyManagement>[\s\S]*?<\/dependencyManagement><dependencies>[\s\S]*?<groupId>org\.example<\/groupId>[\s\S]*?<\/dependencies><\/project>/.test(pomText));
+    // Formatting-tolerant on purpose: the writer indents the block it creates, so
+    // asserting on `</dependencyManagement><dependencies>` with no whitespace
+    // tested the writer's indentation rather than *where* the entry went. What
+    // matters is that the new artifact sits after the managed section and before
+    // `</project>`, i.e. in the project's own dependency list.
+    const afterManaged = pomText.slice(pomText.lastIndexOf('</dependencyManagement>'));
+    check(
+      'dependencies: Maven inserts project dependencies outside dependencyManagement',
+      mavenResult.ok &&
+        /<dependencies>\s*<dependency>\s*<groupId>org\.example<\/groupId>\s*<artifactId>client<\/artifactId>[\s\S]*?<\/dependencies>\s*<\/project>/.test(afterManaged),
+      pomText.slice(-160),
+    );
     check('dependencies: invalid Maven coordinates are rejected before writing', (() => {
       try { planAdd(mavenDir, 'bad && command'); return false; } catch { return true; }
     })());

@@ -15,10 +15,10 @@
  * plugin boundary intact.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, delimiter, join } from 'node:path';
+import { basename, delimiter, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { probeVersion } from './discover.js';
-import type { InterpretersSpec } from '../runtimes/types.js';
+import type { EnvironmentCreateSpec, InterpretersSpec } from '../runtimes/types.js';
 
 export type InterpreterKind = 'venv' | 'conda' | 'version-manager' | 'path' | 'sdk';
 
@@ -315,6 +315,81 @@ export async function discoverInterpreters(
     return a.path.localeCompare(b.path);
   });
   return found;
+}
+
+/**
+ * Turn a declared `create` block into one concrete command.
+ *
+ * Pure and separate from the spawn: the panel owns processes, this owns the
+ * mapping from "user picked venv, path .venv, version 3.12" to argv. Keeping it
+ * here means the rules (placeholders, containment, which provider exists) are
+ * unit-testable without a child process, and the handler stays a spawn call.
+ */
+export interface EnvironmentPlan {
+  provider: string;
+  /** Absolute target directory. */
+  dir: string;
+  command: string[];
+  /** Human form for the terminal echo (`python -m venv /path`). */
+  display: string;
+}
+
+export interface PlanEnvironmentOptions {
+  create: Record<string, EnvironmentCreateSpec> | undefined;
+  provider?: string;
+  root: string;
+  /** Project-relative directory from the dialog; absolute is accepted only inside the root. */
+  dir: string;
+  version?: string;
+  /** The interpreter that builds the environment, when the command needs one. */
+  toolchain?: string;
+}
+
+export function planEnvironment(o: PlanEnvironmentOptions): EnvironmentPlan {
+  const create = o.create ?? {};
+  const providers = Object.keys(create);
+  if (!providers.length) throw new Error('this language declares no environment providers');
+  const provider = o.provider || providers[0];
+  const spec = create[provider];
+  if (!spec) throw new Error(`unknown provider "${provider}"; this plugin offers ${providers.join(', ')}`);
+
+  const root = resolve(o.root);
+  const raw = (o.dir || spec.defaultPath || '').trim();
+  if (!raw) throw new Error('a target directory is required');
+  const dir = isAbsolute(raw) ? resolve(raw) : resolve(root, raw);
+  const rel = relative(root, dir);
+  // The environment is part of the project, so a path that resolves outside it is
+  // a mistake, not an advanced option: the runner and the language server both
+  // assume the project root contains their environment.
+  if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('the environment must live inside the project');
+
+  const version = (o.version ?? '').trim();
+  if (spec.wantsVersion && !version) throw new Error(`provider "${provider}" needs a version (for example 3.12)`);
+  const needsToolchain = spec.command.includes('{toolchain}');
+  if (needsToolchain && !o.toolchain) {
+    throw new Error('this provider builds the environment from an existing interpreter; pick one first');
+  }
+
+  const command = spec.command.map((part) =>
+    part
+      .split('{path}').join(dir)
+      .split('{toolchain}').join(o.toolchain ?? '')
+      .split('{version}').join(version),
+  );
+  return { provider, dir, command, display: command.join(' ') };
+}
+
+/** Where the new environment's interpreter should be, once it exists. */
+export function environmentExecutable(
+  dir: string,
+  envBins: string[] | undefined,
+  isFile: (p: string) => boolean = (p) => existsSync(p) && fileSize(p) > 0,
+): string | undefined {
+  for (const bin of envBins ?? []) {
+    const p = join(dir, bin);
+    if (isFile(p)) return p;
+  }
+  return undefined;
 }
 
 /**

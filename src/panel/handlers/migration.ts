@@ -59,11 +59,22 @@ export async function handleInterpreters(
       sdkName: typeof msg.sdkName === 'string' && msg.sdkName ? msg.sdkName : undefined,
     });
     const picked = pickInterpreter(candidates, { pinned });
+    // What the dialog may offer as "New…". Sent with the list rather than fetched
+    // on a second round trip, because a create button that appears one click late
+    // reads as a missing feature.
+    const creates = Object.entries(declared?.create ?? {}).map(([id, spec]) => ({
+      id,
+      label: spec.label ?? id,
+      defaultPath: spec.defaultPath ?? '',
+      wantsVersion: !!spec.wantsVersion,
+      needsToolchain: spec.command.includes('{toolchain}'),
+    }));
     reply({
       kind: 'interpreters',
       language,
       root: workspace.root,
       candidates,
+      creates,
       active: picked?.path ?? null,
       pinned: pinned ?? null,
     });

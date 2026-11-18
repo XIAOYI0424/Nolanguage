@@ -770,6 +770,30 @@
           toast('Interpreter error: ' + String(m.error || 'unknown'));
         }
         break;
+      // Environment creation streams into the Terminal window, the way PyCharm
+      // shows a venv build: a spinner would hide the one thing worth reading when
+      // conda picks an unexpected solver or pip wants a compiler.
+      case 'envStarted':
+        termWrite('$ ' + String(m.display || '') + '\n', 'dim');
+        renderTermOut();
+        break;
+      case 'envOut':
+        termWrite(String(m.text || ''), m.stream === 'stderr' ? 'err' : '');
+        renderTermOut();
+        break;
+      case 'envDone':
+        if (m.ok) {
+          termWrite('[environment ready: ' + String(m.dir || '') + ']\n', 'dim');
+          toast(m.executable ? 'Environment created and selected' : 'Environment created');
+          // Switching is the point of creating one; leaving the project pinned to
+          // the old interpreter would make the new venv look empty.
+          if (m.executable) BRIDGE.send({ kind: 'setInterpreter', language: m.language, path: m.executable });
+        } else {
+          termWrite('[environment failed: ' + String(m.error || 'unknown') + ']\n', 'err');
+          toast('Environment creation failed: ' + String(m.error || 'unknown'));
+        }
+        renderTermOut();
+        break;
       case 'ideaImport':
         applyIdeaImport(m);
         break;
