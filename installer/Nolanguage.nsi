@@ -115,6 +115,21 @@ Section "安装 ${APP_NAME}" SecInstall
   nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
   Pop $0
 
+  ; The helper exits 1 only when it is *sure*: it stopped the instance and the
+  ; file still would not open for writing. That is the one case where the
+  ; extractor below would show "无法打开要写入的文件" — a dialog that names neither
+  ; the app nor the reason, and whose Retry cannot work. Anything else from
+  ; nsExec ("error", a timeout, PowerShell missing) is *not* evidence of a lock,
+  ; so it falls through and lets the extractor try: aborting on "could not ask"
+  ; turned a working install into "the installer does nothing".
+  StrCmp $0 "1" 0 inst_writable
+    IfSilent 0 +3
+      SetErrorLevel 2
+      Quit
+    MessageBox MB_ICONSTOP|MB_OK "无法写入 $INSTDIR\${APP_NAME}.exe：文件仍被占用。$\r$\n$\r$\n请先退出 ${APP_NAME}（任务管理器里确认没有 ${APP_NAME}.exe），再重新运行安装程序。"
+    Abort
+  inst_writable:
+
   DetailPrint "正在解压 ${APP_NAME}.exe…"
   File "${APP_EXE}"
 
@@ -130,6 +145,13 @@ Section "安装 ${APP_NAME}" SecInstall
 
   DetailPrint "正在创建开始菜单快捷方式…"
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+  ; Delete first: `CreateShortcut` does not reliably replace an existing .lnk —
+  ; when the old one is held by Explorer it fails silently and the stale link
+  ; survives. That is how the Start Menu kept pointing at a %TEMP% directory long
+  ; after it had been deleted.
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"     "$INSTDIR\${APP_NAME}.exe" "${APP_WEB_ARG}" "$INSTDIR\${APP_NAME}.exe"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"           "$INSTDIR\${APP_NAME}.exe" ""              "$INSTDIR\${APP_NAME}.exe"
   ; Left over from earlier builds that shipped a separate "(Desktop)" entry.
@@ -186,9 +208,15 @@ Section "Uninstall"
   Delete "$INSTDIR\nlg.cmd"
   Delete "$INSTDIR\path-tool.ps1"
   Delete "$INSTDIR\stop-instance.ps1"
-  ; The helper removes its own receipt; delete it here as well so a receipt can
-  ; never survive the uninstall that was supposed to consume it.
-  Delete "$LOCALAPPDATA\Nolanguage\install-receipt.json"
+
+  ; Everything below is machine-wide state, and it belongs to whichever copy the
+  ; machine is registered to. An uninstaller run from a copy (a %TEMP% install, a
+  ; portable copy, the install smoke) must not take the real install's
+  ; registration or shortcuts with it — that is exactly how one temp uninstall
+  ; removed the entry for D:\Nolanguage and left the Start Menu pointing at a
+  ; directory that no longer existed.
+  ReadRegStr $0 HKCU "${UNINST_KEY}" "InstallLocation"
+  StrCmp $0 "$INSTDIR" 0 uninst_not_ours
 
   DetailPrint "正在删除快捷方式…"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} (Web).lnk"
@@ -198,9 +226,17 @@ Section "Uninstall"
   RMDir  "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
 
+  ; The helper removes its own receipt; delete it here as well so a receipt can
+  ; never survive the uninstall that was supposed to consume it.
+  Delete "$LOCALAPPDATA\Nolanguage\install-receipt.json"
+  DeleteRegKey HKCU "${UNINST_KEY}"
+  Goto uninst_done
+
+uninst_not_ours:
+  DetailPrint "跳过注册表与快捷方式：注册指向 $0，不是 $INSTDIR"
+
+uninst_done:
   ; Only removes the folder when it is empty: user data (`.nolanguage`, the
   ; per-user WebView profile and telemetry DB) is deliberately kept.
   RMDir "$INSTDIR"
-
-  DeleteRegKey HKCU "${UNINST_KEY}"
 SectionEnd

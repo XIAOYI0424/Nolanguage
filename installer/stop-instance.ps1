@@ -29,9 +29,13 @@ Get-Process -Name 'Nolanguage' | ForEach-Object {
 }
 
 # Wait for the lock, not for the process: Stop-Process returns before the image is
-# unmapped. 20 x 300 ms is the same budget the old `Sleep 1500` allowed, but it
-# returns as soon as the file is free instead of always paying it.
-for ($i = 0; $i -lt 20; $i++) {
+# unmapped, and Windows can take a few seconds to finish tearing the process down.
+# 40 x 300 ms, returning as soon as the file is free instead of always paying it.
+#
+# Exit 1 only when it is certain: the process is gone and the file still will not
+# open for writing. The installer turns exactly that into "close the app and try
+# again"; any other outcome (no file, opened fine) is 0.
+for ($i = 0; $i -lt 40; $i++) {
   try {
     $fs = [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
     $fs.Close()
@@ -40,4 +44,4 @@ for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 300
   }
 }
-exit 0
+exit 1
