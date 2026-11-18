@@ -259,6 +259,22 @@ async function main(): Promise<void> {
       actions.ok && actions.value.length === 1 && !!actions.value[0]?.edits,
       actions.ok ? `${actions.value.length} action(s)` : actions.reason,
     );
+
+    // The fake server answers out of order and includes a start === end span.
+    // Both have to be handled before the ranges reach the gutter: an unsorted
+    // list paints arrows on the wrong lines, and a zero-height fold is a marker
+    // that does nothing when clicked.
+    const folds = await entry.foldingRanges(uri);
+    check(
+      'nav: folding ranges are sorted and degenerate spans dropped',
+      folds.ok && folds.value.length === 2 && folds.value[0]?.startLine === 2 && folds.value[1]?.startLine === 10,
+      folds.ok ? JSON.stringify(folds.value) : folds.reason,
+    );
+    check(
+      'nav: a fold keeps the kind the server sent, and omits one it did not',
+      folds.ok && folds.value[1]?.kind === 'region' && folds.value[0]?.kind === undefined,
+      folds.ok ? JSON.stringify(folds.value.map((r) => r.kind)) : folds.reason,
+    );
     await manager.close();
   }
 

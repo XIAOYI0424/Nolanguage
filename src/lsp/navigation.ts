@@ -77,7 +77,8 @@ export type NavFeature =
   | 'codeAction'
   | 'workspaceSymbol'
   | 'signatureHelp'
-  | 'format';
+  | 'format'
+  | 'foldingRange';
 
 /**
  * Either a value, or a reason there is none.
@@ -289,4 +290,50 @@ export function declaresFeature(capabilities: Record<string, unknown>, feature: 
           : `${feature}Provider`;
   const value = capabilities[key];
   return value !== undefined && value !== null && value !== false;
+}
+
+/**
+ * One foldable span, already converted from LSP lines to what the editor needs.
+ *
+ * `kind` is kept as the raw LSP string (`comment`, `imports`, `region`, …) so the
+ * client can decide how to draw it; a server that omits it (allowed by the spec)
+ * arrives as `undefined` rather than as a made-up `region`.
+ */
+export interface FoldingRange {
+  startLine: number;
+  endLine: number;
+  kind?: string;
+}
+
+/**
+ * `textDocument/foldingRange` → sorted, de-duplicated, line-numbered spans.
+ *
+ * Ranges that collapse to a single line are dropped: LSP lets a server emit
+ * `startLine === endLine` (an "already folded" hint), and a zero-height fold in
+ * the editor is a gutter marker that does nothing when clicked.
+ */
+export function normalizeFoldingRanges(raw: unknown): FoldingRange[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: FoldingRange[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const start = Number(o.startLine);
+    const end = Number(o.endLine ?? o.startLine);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (end <= start) continue;
+    const key = `${start}:${end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      startLine: start,
+      endLine: end,
+      ...(typeof o.kind === 'string' && o.kind ? { kind: o.kind } : {}),
+    });
+  }
+  // Outer spans first, then by line: the editor's gutter and the "fold all" order
+  // both read better when a class folds before the method inside it.
+  out.sort((a, b) => (a.startLine === b.startLine ? b.endLine - a.endLine : a.startLine - b.startLine));
+  return out;
 }

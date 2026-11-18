@@ -56,7 +56,7 @@ import { runPythonCoverage } from './coverage.js';
 import { gitStatus, gitCommit } from './git.js';
 import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '../dap/DapClient.js';
 import { discoverBinary } from '../langs/discover.js';
-import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleCompletionResolve, handleDependencyCancel, handleDependencyInstall, handleDependencyReport, handleFormat, handleHover, handleMdRender, handleSignatureHelp } from './handlers/languages.js';
+import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleCompletionResolve, handleDependencyCancel, handleDependencyInstall, handleDependencyReport, handleFolding, handleFormat, handleHover, handleMdRender, handleSignatureHelp } from './handlers/languages.js';
 import { envToolchains, handleImportIdea, handleInterpreters, handleSetInterpreter } from './handlers/migration.js';
 import {
   handleCodeAction,
@@ -721,7 +721,7 @@ export async function main(
           void handleFs(fs, msg, reply);
           break;
 
-        // ---------- crash recovery (dirty buffers kept outside the workspace) ----------
+        // Crash recovery: buffers kept outside the workspace (handlers/fs.ts).
         case 'draftSave':
         case 'draftList':
         case 'draftDrop':
@@ -865,6 +865,7 @@ export async function main(
           void handleFormat(workspace, msg, reply);
           break;
 
+        case 'folding': void handleFolding(workspace, msg, reply); break;
         case 'hover':
           void handleHover(workspace, msg, reply);
           break;

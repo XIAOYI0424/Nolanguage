@@ -507,6 +507,9 @@
     // Stale marks from the previous document must not follow the caret here.
     clearDiags();
     requestCheck();
+    // Fold spans belong to the previous document: drop them now, not in 500ms.
+    setFoldRanges(null);
+    scheduleFolds();
     pushRecent(name);
     savePrefs({ tabs: TABS, current: currentFile });
   }

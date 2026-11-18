@@ -17,7 +17,29 @@
     checkSizeNotice = false;
     BRIDGE.send({ kind: 'check', code: ta.value, language: lg });
   }
-  function scheduleCheck() { clearTimeout(diagTimer); diagTimer = setTimeout(requestCheck, 300); }
+  function scheduleCheck() { clearTimeout(diagTimer); diagTimer = setTimeout(requestCheck, 300); scheduleFolds(); }
+
+  // ---------- folding ranges ----------
+  // Debounced harder than diagnostics: a stale fold arrow for half a second costs
+  // nothing, while a request per pause competes with the checks that actually
+  // paint. The server's spans replace the local brace/indent finders when they
+  // arrive; an unsupported reply simply leaves the local ones in place.
+  var foldTimer = 0;
+  var foldReqId = 0;
+  var FOLD_MAX_CHARS = 512 * 1024;
+  function requestFolds() {
+    var lg = lspLang();
+    if (!lg || ta.value.length > FOLD_MAX_CHARS) { setFoldRanges(null); return; }
+    foldReqId++;
+    BRIDGE.send({ kind: 'folding', code: ta.value, language: lg, requestId: foldReqId });
+  }
+  function scheduleFolds() { clearTimeout(foldTimer); foldTimer = setTimeout(requestFolds, 500); }
+  function onFolding(m) {
+    // A reply for an older buffer would paint the previous file's spans onto this
+    // one; requestId is the only thing separating them.
+    if (Number(m.requestId || 0) !== foldReqId) return;
+    setFoldRanges(m.ranges || null);
+  }
 
   // ---------- run ----------
   var RUN_OUTPUT_LIMIT = 512 * 1024;
@@ -960,6 +982,7 @@
       case 'fsError': onFsError(m); break;
       // Crash recovery. The drafts frame is the one that asks a question; the
       // other two are acknowledgements and stay silent unless something failed.
+      case 'folding': onFolding(m); break;
       case 'drafts': onDrafts(m); break;
       case 'draftSaved': paintDraftState(); break;
       case 'draftDropped': paintDraftState(); break;

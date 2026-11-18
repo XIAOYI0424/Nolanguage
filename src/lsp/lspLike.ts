@@ -18,7 +18,7 @@ import type {
   Range,
   ServerCapabilities,
 } from './LspClient.js';
-import type { CodeAction, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from './navigation.js';
+import type { CodeAction, FoldingRange, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from './navigation.js';
 
 export interface LspStatus {
   running: boolean;
@@ -56,5 +56,7 @@ export interface LspLike {
   workspaceSymbols(query: string): Promise<NavResult<SymbolInformation[]>>;
   resolveCompletionItem(item: { label: string }): Promise<NavResult<{ documentation?: string; detail?: string }>>;
   signatureHelp(uri: string, position: Position, onId?: (id: number) => void): Promise<NavResult<SignatureHelp>>;
+  /** Foldable spans; `unsupported` means the caller keeps its own finders. */
+  foldingRanges(uri: string): Promise<NavResult<FoldingRange[]>>;
   stop(): Promise<void>;
 }

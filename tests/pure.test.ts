@@ -32,6 +32,7 @@ import {
   undeclaredImports,
 } from '../src/langs/dependencies';
 import { materializeAssets } from '../src/assets/embeddedAssets';
+import { normalizeFoldingRanges } from '../src/lsp/navigation';
 import { FsService } from '../src/panel/FsService';
 import { handleDraft } from '../src/panel/handlers/fs';
 import { describeFailure } from '../src/desktop/fatalDialog';
@@ -2300,6 +2301,34 @@ describe('package install', () => {
     // before it finished, which is what makes Stop work while pip is running.
     expect(r.ok).toBe(true);
   }, 20000);
+});
+
+describe('folding ranges · textDocument/foldingRange', () => {
+  /**
+   * The gutter paints whatever comes out of here, so the three failure modes are
+   * layout bugs: an unsorted list puts arrows on the wrong lines, a duplicate
+   * stacks two markers, and a zero-height span is a marker that does nothing.
+   */
+  it('sorts, de-duplicates and drops zero-height spans', () => {
+    const out = normalizeFoldingRanges([
+      { startLine: 3, endLine: 9 },
+      { startLine: 3, endLine: 9, kind: 'region' },
+      { startLine: 1, endLine: 1 },
+      { startLine: 0, endLine: 4, kind: 'class' },
+      { endLine: 7 },
+      'nope',
+      null,
+    ]);
+    expect(out).toEqual([
+      { startLine: 0, endLine: 4, kind: 'class' },
+      { startLine: 3, endLine: 9 },
+    ]);
+  });
+
+  it('returns nothing for a reply that is not a list', () => {
+    expect(normalizeFoldingRanges(null)).toEqual([]);
+    expect(normalizeFoldingRanges({ startLine: 0, endLine: 2 })).toEqual([]);
+  });
 });
 
 describe('crash recovery · draft copies', () => {

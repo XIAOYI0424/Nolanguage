@@ -30,6 +30,15 @@ import addonActiveLine from '../vendor/codemirror/addon/selection/active-line.js
 import addonShowHintJs from '../vendor/codemirror/addon/hint/show-hint.js?raw';
 import addonShowHintCss from '../vendor/codemirror/addon/hint/show-hint.css?raw';
 
+// Folding: `foldcode` provides the command, `foldgutter` the gutter, and the two
+// finders are the local fallback for servers that never implement
+// `textDocument/foldingRange` (a class body folds the same either way).
+import addonFoldCode from '../vendor/codemirror/addon/fold/foldcode.js?raw';
+import addonFoldGutter from '../vendor/codemirror/addon/fold/foldgutter.js?raw';
+import addonFoldGutterCss from '../vendor/codemirror/addon/fold/foldgutter.css?raw';
+import addonBraceFold from '../vendor/codemirror/addon/fold/brace-fold.js?raw';
+import addonIndentFold from '../vendor/codemirror/addon/fold/indent-fold.js?raw';
+
 /**
  * Theme bridge: CodeMirror ships a light theme, the shell is variable-driven
  * (Light / Darcula). Mapping CM's token classes onto the shell's `--syn-*`
@@ -62,9 +71,13 @@ const THEME_CSS = `
 #cmHost .cm-quote { color:var(--syn-comment); }
 #cmHost .cm-link { color:var(--syn-func); text-decoration:underline; }
 #cmHost .cm-error { color:var(--error); }
+#cmHost .CodeMirror-foldgutter { width:12px; }
+#cmHost .CodeMirror-foldgutter-open:after, #cmHost .CodeMirror-foldgutter-folded:after { color:var(--text-tertiary); font-size:11px; }
+#cmHost .CodeMirror-foldgutter-open:hover:after, #cmHost .CodeMirror-foldgutter-folded:hover:after { color:var(--text-primary); }
+#cmHost .CodeMirror-foldmarker { color:var(--accent); background:var(--bg-hover); border:1px solid var(--border-soft); border-radius:3px; font-family:var(--mono); font-size:11px; padding:0 4px; }
 `;
 
-export const CODEMIRROR_CSS = [cmCss, addonShowHintCss, THEME_CSS].join('\n');
+export const CODEMIRROR_CSS = [cmCss, addonShowHintCss, addonFoldGutterCss, THEME_CSS].join('\n');
 
 export const CODEMIRROR_JS = [
   cmJs,
@@ -82,5 +95,9 @@ export const CODEMIRROR_JS = [
   addonMatchBrackets,
   addonCloseBrackets,
   addonActiveLine,
+  addonFoldCode,
+  addonBraceFold,
+  addonIndentFold,
+  addonFoldGutter,
   addonShowHintJs,
 ].join('\n;\n');

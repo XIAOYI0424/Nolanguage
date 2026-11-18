@@ -76,6 +76,62 @@
       default: return null;
     }
   }
+  // ---------- folding ----------
+  // Two sources, one finder chain. The language server knows the real structure
+  // (a Python class is not a brace pair), so its foldingRange answer wins;
+  // brace/indent finders stay underneath for servers that never implement it and
+  // for the moment before the first reply arrives.
+  var LSP_FOLDS = null;
+  var FOLD_SIGNATURE = '';
+  /** Replace the server's spans; rebuild the gutter only when they really changed. */
+  function setFoldRanges(list) {
+    var ranges = (list && list.length) ? list : null;
+    var next = ranges ? ranges.map(function (r) { return r.startLine + ':' + r.endLine; }).join(',') : '';
+    if (next === FOLD_SIGNATURE) return;
+    FOLD_SIGNATURE = next;
+    LSP_FOLDS = ranges;
+    if (!CMEDITOR) return;
+    var cm = CMEDITOR.cm;
+    // foldgutter paints from its own state and only redraws on viewport/change
+    // events, so a new span list needs one rebuild. This runs on a debounced
+    // reply, never per keystroke — the trap that made setOption per keystroke
+    // expensive elsewhere in this file.
+    try { cm.setOption('foldGutter', cm.getOption('foldGutter')); } catch (e) {}
+  }
+  function lspFoldFinder(cm, pos) {
+    if (!LSP_FOLDS) return null;
+    for (var i = 0; i < LSP_FOLDS.length; i++) {
+      var r = LSP_FOLDS[i];
+      if (r.startLine !== pos.line) continue;
+      var end = Math.min(r.endLine, cm.lineCount() - 1);
+      // Fold to the end of the last line, not to column 0 of the line after it:
+      // CM5 hides from..to, and a "to" at the next line's column 0 leaves that
+      // line visible outside the fold.
+      return { from: CodeMirror.Pos(r.startLine, 0), to: CodeMirror.Pos(end, cm.getLine(end).length) };
+    }
+    return null;
+  }
+  function localFoldFinder(cm, pos) {
+    if (!window.CodeMirror || !window.CodeMirror.fold) return null;
+    var brace = window.CodeMirror.fold.brace && window.CodeMirror.fold.brace(cm, pos);
+    if (brace) return brace;
+    return (window.CodeMirror.fold.indent && window.CodeMirror.fold.indent(cm, pos)) || null;
+  }
+  function foldFinder(cm, pos) {
+    return lspFoldFinder(cm, pos) || localFoldFinder(cm, pos);
+  }
+  /**
+   * Menu / palette entry point for folding.
+   *
+   * Says why it does nothing on the textarea fallback instead of pretending: the
+   * fallback has no folds, and a menu item that silently no-ops reads as a bug.
+   */
+  function foldCommand(what) {
+    if (!CMEDITOR) { toast('Folding needs the CodeMirror editor, which is not available here.'); return; }
+    var name = what === 'foldAll' ? 'foldAll' : what === 'unfoldAll' ? 'unfoldAll' : what === 'unfold' ? 'unfold' : 'toggleFold';
+    try { CMEDITOR.cm.execCommand(name); } catch (e) { toast('Folding failed: ' + (e && e.message ? e.message : 'unknown')); }
+  }
+
   function makeCmAdapter(cm) {
     var skip = 0;
     var api = {
@@ -135,7 +191,13 @@
         lineNumbers: true,
         // A dedicated breakpoint gutter sits left of the line numbers; clicking
         // either column toggles a breakpoint (wired just below).
-        gutters: ['CodeMirror-linenumbers', { className: 'bp-gutter', style: 'width:16px' }],
+        gutters: ['CodeMirror-linenumbers', { className: 'bp-gutter', style: 'width:16px' }, 'CodeMirror-foldgutter'],
+        // The fold arrow column sits right of the breakpoints, like PyCharm's
+        // fold gutter sits inside the line-number band.
+        // Indicators stay at their defaults: foldgutter reads a string option as a
+        // *class name*, so overriding it with an arrow character would leave the
+        // gutter empty instead of drawing one.
+        foldGutter: { rangeFinder: foldFinder },
         lineWrapping: false,
         matchBrackets: true,
         autoCloseBrackets: true,
@@ -163,6 +225,12 @@
       cm.on('gutterClick', function (cmi, line, g) {
         if (g !== 'CodeMirror-linenumbers' && g !== 'bp-gutter') return;
         toggleCmBreakpoint(line);
+      });
+      // Fold keys stay inside CodeMirror's keymap: the app's own Ctrl+D is
+      // Duplicate Line, and folding must not join that list.
+      cm.addKeyMap({
+        'Ctrl-Shift-[': function (cmx) { cmx.execCommand('toggleFold'); },
+        'Ctrl-Shift-]': function (cmx) { cmx.execCommand('unfold'); },
       });
       paintCmBreakpoints();
     } catch (e) {

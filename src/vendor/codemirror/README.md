@@ -20,8 +20,13 @@ addon/hint/show-hint.js + .css     completion UI (loaded; the shell uses its own
 addon/edit/matchbrackets.js
 addon/edit/closebrackets.js
 addon/selection/active-line.js
+addon/fold/foldcode.js + foldgutter.js + .css     folding commands, gutter, arrows
+addon/fold/brace-fold.js + indent-fold.js        local finders (no-LSP fallback)
 LICENSE
 ```
+
+Folding is the one addon group the shell depends on for a feature (Code > Fold),
+so `verify-editor-assets` treats those five files as **required**, not optional.
 
 `xml` is loaded before `markdown` / `htmlmixed` because those resolve
 `text/xml` / `text/html` when a mode instance is created.

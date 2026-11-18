@@ -135,6 +135,35 @@ export async function handleFormat(
   }
 }
 
+/**
+ * Foldable spans for the gutter.
+ *
+ * `unsupported` is the normal answer for servers that never implemented
+ * `textDocument/foldingRange` (marksman, older jdtls); the client then falls back
+ * to its own brace/indent finders instead of showing an empty gutter.
+ */
+export async function handleFolding(
+  workspace: WorkspaceService,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const code = typeof msg.code === 'string' ? msg.code : '';
+  const language = asLanguage(msg.language, workspace);
+  const requestId = Number(msg.requestId ?? 0);
+  try {
+    const r = await workspace.foldingRanges(language, code);
+    reply({
+      kind: 'folding',
+      language,
+      requestId,
+      ranges: r.ok ? r.value : [],
+      ...(r.ok ? {} : { unsupported: r.reason }),
+    });
+  } catch (err) {
+    reply({ kind: 'error', language, message: `folding failed: ${(err as Error).message}` });
+  }
+}
+
 export async function handleHover(
   workspace: WorkspaceService,
   msg: Record<string, unknown>,

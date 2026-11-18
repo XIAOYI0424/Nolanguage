@@ -27,11 +27,13 @@ import {
   normalizeCodeActions,
   normalizeLocations,
   normalizeSymbols,
+  normalizeFoldingRanges,
   normalizeSignatureHelp,
   normalizeWorkspaceEdit,
   supported,
   unsupported,
   type CodeAction,
+  type FoldingRange,
   type Location,
   type NavFeature,
   type NavResult,
@@ -565,6 +567,17 @@ export class LspClient extends EventEmitter {
    */
   signatureHelp(uri: string, position: Position): Promise<NavResult<SignatureHelp>> {
     return this.nav('signatureHelp', 'textDocument/signatureHelp', { textDocument: { uri }, position }, normalizeSignatureHelp);
+  }
+
+  /**
+   * Foldable spans for the whole document.
+   *
+   * Requested on a debounce after edits, never per keystroke: the gutter is a
+   * decoration, and a round trip per character would outbid diagnostics for the
+   * same server process.
+   */
+  foldingRanges(uri: string): Promise<NavResult<FoldingRange[]>> {
+    return this.nav('foldingRange', 'textDocument/foldingRange', { textDocument: { uri } }, normalizeFoldingRanges);
   }
 
   /** Ask for diagnostics explicitly (pull) when the server supports it. */

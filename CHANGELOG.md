@@ -2,6 +2,21 @@
 
 ## 0.7.24 — 2026-11-15
 
+### 代码折叠：服务器给范围，本地 brace/indent 兜底
+
+`Code > Fold Code Block`（`Ctrl+Shift+[`）、`Fold All`、`Unfold All`，行号右侧多一列折叠箭头。
+范围优先来自语言服务器的 `textDocument/foldingRange`（Python 的 `class` 不是花括号对，只有服务器
+知道真正的结构）；没有这个能力的服务器（marksman、部分 jdtls）不会让功能消失——本地
+`brace-fold` 与 `indent-fold` 在其下兜底，`unsupported` 只是不再覆盖。
+
+请求是 debounce 500ms、只在真实变化时重建 gutter；折叠有自己的 1.5s 预算，而不是导航的 5s：
+箭头是装饰，慢回复的价值低于本地 finder。切换文件立刻清空旧范围，否则新文件会短暂显示上一个
+文件的结构。服务器发来的退化跨度（`startLine === endLine`）在归一化时丢弃——那种箭头点了什么也
+不做——并对结果排序去重。
+
+vendor 里新增 CodeMirror 5.65.21 的五个官方 addon（`foldcode`、`foldgutter`+css、`brace-fold`、
+`indent-fold`），`verify-editor-assets` 起把它们列为**必需**资产。
+
 ### 崩溃恢复：草稿放在工作区之外，且不替代保存
 
 脏缓冲区在停止输入 2 秒后写一份副本，放在应用自己的目录（`%LOCALAPPDATA%\Nolanguage\autosave`），

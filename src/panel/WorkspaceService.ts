@@ -39,7 +39,7 @@ import { defaultRuntimeRegistry, runtimeSupportsArgs } from '../runtimes/index.j
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { setExtensionManifests } from '../langs/extensionIndex.js';
-import { unsupported, type CodeAction, type Location, type NavResult, type SignatureHelp, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
+import { unsupported, type CodeAction, type FoldingRange, type Location, type NavResult, type SignatureHelp, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
 import { discoverBinary, type BinaryResolution } from '../langs/discover.js';
 import { cachedVersion } from '../langs/versionCache.js';
 import { resolveServer } from '../langs/serverInstall.js';
@@ -1015,6 +1015,11 @@ export class WorkspaceService {
 
   async format(id: LanguageId, code: string): Promise<NavResult<TextEdit[]>> {
     return this.navRequest('format', id, code, (lsp, uri) => lsp.formatting(uri));
+  }
+
+  /** Foldable spans, for the editor's gutter. `unsupported` means "use braces". */
+  async foldingRanges(id: LanguageId, code: string): Promise<NavResult<FoldingRange[]>> {
+    return this.navRequest('foldingRange', id, code, (lsp, uri) => lsp.foldingRanges(uri));
   }
 
   async definition(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<Location[]>> {

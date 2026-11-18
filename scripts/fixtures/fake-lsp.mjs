@@ -82,6 +82,9 @@ function handle(msg) {
         definitionProvider: true,
         referencesProvider: true,
         codeActionProvider: true,
+        // Advertised so the folding request goes out; the answer below contains
+        // one degenerate span, which the client's normaliser must drop.
+        foldingRangeProvider: true,
         // Formatting is deliberately absent: the fallback path for it is
         // exercised by the client's own indenter.
         documentFormattingProvider: false,
@@ -187,6 +190,16 @@ function handle(msg) {
             },
           },
         },
+      ]);
+      return;
+    case 'textDocument/foldingRange':
+      if (HANG.has('textDocument/foldingRange')) return;
+      reply(msg.id, [
+        // Out of order on purpose: the normaliser sorts by start line.
+        { startLine: 10, endLine: 14, kind: 'region' },
+        { startLine: 2, endLine: 6 },
+        // Degenerate: start === end, dropped by the client.
+        { startLine: 20, endLine: 20 },
       ]);
       return;
     case '$/cancelRequest': {

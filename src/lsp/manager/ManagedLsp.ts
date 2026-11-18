@@ -19,7 +19,7 @@ import { EventEmitter } from 'node:events';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { LspClient, type CompletionItem, type Diagnostic, type DiagnosticsWait, type Hover } from '../LspClient.js';
 import type { LspLike, LspStatus } from '../lspLike.js';
-import type { CodeAction, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from '../navigation.js';
+import type { CodeAction, FoldingRange, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from '../navigation.js';
 import { unsupported } from '../navigation.js';
 import type { Kernel } from '../../kernel/Kernel.js';
 import type { CacheValidator } from './CacheValidator.js';
@@ -126,6 +126,12 @@ export class ManagedLsp extends EventEmitter implements LspLike {
   private budgetMs = 500;
   /** Explicit actions get longer than a keystroke, but not forever. */
   private navBudgetMs = 5000;
+  /**
+   * Folding is decoration with a local fallback, so it gets a keystroke-sized
+   * budget rather than the full navigation one: a slow answer is worth less than
+   * the brace finder that is already there.
+   */
+  private foldBudgetMs = 1500;
   private closed = false;
   private fallbackCount = 0;
 
@@ -479,6 +485,25 @@ export class ManagedLsp extends EventEmitter implements LspLike {
     );
     if (out.kind === 'timeout') return unsupported<SignatureHelp>(`signature help timed out after ${this.navBudgetMs} ms`);
     if (out.kind === 'error') return unsupported<SignatureHelp>(out.error.message);
+    return out.value;
+  }
+
+  /**
+   * Foldable spans.
+   *
+   * Cheaper than the other requests and therefore on its own budget: a server
+   * that is still importing a workspace has no fold data to give, and the editor
+   * already falls back to brace/indent finders, so waiting the full navigation
+   * budget here would buy nothing.
+   */
+  async foldingRanges(uri: string): Promise<NavResult<FoldingRange[]>> {
+    const client = await this.ready();
+    if (!client) return unsupported<FoldingRange[]>(this.startError ?? this.plugin.degradedNote ?? 'no language server');
+    const out = await this.deps.scheduler.dedupe(`${this.key}|folding|${uri}`, () =>
+      withBudget(client.foldingRanges(uri), this.foldBudgetMs),
+    );
+    if (out.kind === 'timeout') return unsupported<FoldingRange[]>(`folding ranges timed out after ${this.foldBudgetMs} ms`);
+    if (out.kind === 'error') return unsupported<FoldingRange[]>(out.error.message);
     return out.value;
   }
 

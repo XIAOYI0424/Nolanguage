@@ -30,6 +30,13 @@ const REQUIRED = [
   'mode/xml/xml.js',
   'addon/hint/show-hint.js',
   'addon/hint/show-hint.css',
+  // Folding is wired into the editor, so these are no longer optional: a build
+  // that loses them would ship a menu item and a gutter that do nothing.
+  'addon/fold/foldcode.js',
+  'addon/fold/foldgutter.js',
+  'addon/fold/foldgutter.css',
+  'addon/fold/brace-fold.js',
+  'addon/fold/indent-fold.js',
 ];
 
 const OPTIONAL = [
@@ -37,10 +44,6 @@ const OPTIONAL = [
   'addon/edit/closebrackets.js',
   'addon/selection/active-line.js',
   'addon/comment/comment.js',
-  'addon/fold/foldcode.js',
-  'addon/fold/foldgutter.js',
-  'addon/fold/brace-fold.js',
-  'addon/fold/indent-fold.js',
   'addon/fold/markdown-fold.js',
 ];
 

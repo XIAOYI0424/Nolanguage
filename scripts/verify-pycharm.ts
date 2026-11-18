@@ -1975,6 +1975,43 @@ console.log('');
   w.close();
 }
 
+// ------------------------------------------------------- folding (gutter + LSP)
+// jsdom has no layout, so the *folded* state cannot be observed here; what this
+// pins is the wiring that has been wrong before: the addons actually ship, the
+// client asks for spans on a debounce, and the request carries the buffer.
+console.log('');
+{
+  const html = renderPyCharmHtml(7311);
+  const mounted = mountPage(html);
+  const w = mounted.window as any;
+  const socket = needSocket(mounted);
+  const doc = w.document;
+  check('folding: the vendored foldgutter addon is inlined', html.includes('CodeMirror.defineOption("foldGutter"'));
+  check('folding: the brace and indent finders are inlined', html.includes('CodeMirror.fold.brace') && html.includes('CodeMirror.fold.indent'));
+  check('folding: the fold gutter has theme rules', html.includes('.CodeMirror-foldgutter'));
+  check('folding: Code > Fold Code Block exists', html.includes('Fold Code Block'), '');
+  await settle(w, 20);
+
+  const foldsSent = (): number => socket.sent.filter((m: any) => m.kind === 'folding').length;
+  // Boot opens a buffer, which already asks once. Wait that out so the baseline
+  // below measures the *edit*, not the file switch.
+  await settle(w, 600);
+  const beforeEdit = foldsSent();
+  const ta = doc.getElementById('ta') as any;
+  ta.value = 'def outer():\n    def inner():\n        return 1\n    return inner\n';
+  fire(w, ta, 'input', {});
+  await settle(w, 60);
+  check('folding: no request before the debounce', foldsSent() === beforeEdit, `${beforeEdit} -> ${foldsSent()}`);
+  await settle(w, 700);
+  const req = socket.lastSentOf('folding') as any;
+  check('folding: an edit asks the server for spans', foldsSent() === beforeEdit + 1, `${beforeEdit} -> ${foldsSent()}`);
+  check('folding: the request carries the buffer and its language', !!req && String(req.code).includes('def outer') && !!req.language, req ? String(req.code).slice(0, 12) : '');
+  socket.deliver({ kind: 'folding', requestId: req.requestId, ranges: [{ startLine: 0, endLine: 3 }] });
+  await settle(w, 20);
+  check('folding: a reply for the current buffer is not reported as an error', !q(w, '#toast')?.textContent?.includes('folding'));
+  w.close();
+}
+
 // ------------------------------------------------ crash recovery (draft copies)
 // The copy is debounced by 2s in the client, so this block is the one place the
 // suite waits on real time. Removing either half of the mechanism goes red:
