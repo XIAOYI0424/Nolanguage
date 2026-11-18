@@ -177,10 +177,21 @@ function run(script, env = {}) {
         console.log(`  exit code ${code}`);
       }
       const m = /(\d+)\/(\d+) (?:parsing )?checks passed/.exec(out);
+      // Skips are why the total moves between runs. A missing toolchain does not
+      // fail a check — it removes it from the denominator, and a suite that emits
+      // a per-server matrix collapses three checks into one SKIP line. Collecting
+      // them here is what makes "why is it 2390 and not 2411" answerable from the
+      // log instead of from memory.
+      const skips = [];
+      for (const line of out.split('\n')) {
+        const k = /^SKIP\s{2}(.+?)(?:\s{2}\u2014\s(.+))?$/.exec(line);
+        if (k) skips.push({ name: k[1].trim(), reason: (k[2] ?? 'no reason given').trim() });
+      }
       resolve({
         code,
         passed: m ? Number(m[1]) : 0,
         total: m ? Number(m[2]) : 0,
+        skips,
       });
     });
   });
@@ -245,12 +256,28 @@ for (const s of summary) {
   const mark = s.skipped ? 'SKIP' : isCrashed ? 'FAIL' : isEmpty ? 'EMPTY' : 'PASS';
   console.log(`  ${mark}  ${s.name.padEnd(46)} ${s.passed}/${s.total} checks`);
 }
+// Every skip, grouped by why. The point is not the count — it is that a smaller
+// total is explained in the same breath as it is reported.
+const allSkips = summary.flatMap((s) => (s.skips ?? []).map((k) => ({ ...k, suite: s.name })));
+if (allSkips.length) {
+  const byReason = new Map();
+  for (const k of allSkips) byReason.set(k.reason, (byReason.get(k.reason) ?? 0) + 1);
+  const suitesWithSkips = new Set(allSkips.map((k) => k.suite)).size;
+  console.log(
+    `\n  ${allSkips.length} check(s) not run across ${suitesWithSkips} suite(s) — they are in no denominator below:`,
+  );
+  for (const [reason, n] of [...byReason].sort((a, b) => b[1] - a[1])) {
+    console.log(`    ${String(n).padStart(3)}  ${reason}`);
+  }
+}
+
 const totalPassed = summary.reduce((a, s) => a + s.passed, 0);
 const totalChecks = summary.reduce((a, s) => a + s.total, 0);
 const ran = summary.filter((s) => !s.skipped).length;
 const bad = failed + empty;
 console.log(
   `\n  ${totalPassed}/${totalChecks} checks passed across ${ran} suites` +
+    (allSkips.length ? `  ·  ${allSkips.length} not run (see above)` : '') +
     (bad ? `  ·  ${bad} SUITE(S) DID NOT PASS` : ''),
 );
 process.exit(bad ? 1 : 0);

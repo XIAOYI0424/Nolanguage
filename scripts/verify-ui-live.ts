@@ -60,6 +60,23 @@ if (!existsSync(EXE)) {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Poll until the page shows what the action was supposed to produce.
+ *
+ * A fixed sleep is a bet on how fast the server answers, and the answer is not
+ * always instant. Waiting for the *result* keeps the assertion — "Ctrl+Alt+R
+ * opens the dialog" — instead of encoding a latency budget into the test.
+ */
+async function until<T>(read: () => Promise<T>, done: (v: T) => boolean, budgetMs = 6000): Promise<T> {
+  const end = Date.now() + budgetMs;
+  let v = await read();
+  while (!done(v) && Date.now() < end) {
+    await sleep(250);
+    v = await read();
+  }
+  return v;
+}
+
 async function waitHealthy(ms: number): Promise<boolean> {
   const t0 = Date.now();
   for (;;) {
@@ -349,6 +366,34 @@ try {
   console.log(
     `OBSERVE cm6-trigger · 100000 lines / ${bigV.chars ?? 0} chars · setValue ${bigV.set ?? -1} ms · first keystroke ${bigV.first ?? -1} ms · 30 keystrokes ${bigV.typed ?? -1} ms · thresholds setValue>100 / keystroke>5`,
   );
+
+  // ---- the shortcuts that open a modal ----
+  // Ctrl+Alt+R was dead for a whole release: the browser-refresh guard matched
+  // `ctrlKey && key === 'r'` without excluding Alt, and it stops propagation in
+  // the capture phase, so the editor never saw the key. Nothing noticed, because
+  // the menu item opens the same dialog. A shortcut is only verified by pressing
+  // it.
+  await cdp.eval("document.querySelector('.CodeMirror').CodeMirror.focus()");
+  await sleep(200);
+  await cdp.press('r', 'KeyR', 82, MOD.ctrl | MOD.alt);
+  const rcOpen = await until(
+    async () => (await cdp.eval("!!document.getElementById('nlRc')")).value === true,
+    (v: boolean) => v,
+    4000,
+  );
+  check('Ctrl+Alt+R opens the run-configuration dialog', rcOpen, String(rcOpen));
+
+  // The arguments field follows the runtime, not the language name.
+  const argsField = await cdp.eval(
+    "(function(){var i=document.getElementById('rcArgs');return i?(i.disabled?'disabled':'enabled'):'missing';})()",
+  );
+  check(
+    'the arguments field is enabled for a runtime that has argv',
+    argsField.value === 'enabled',
+    `${String(argsField.value)} · ${String((await cdp.eval('document.getElementById(\'stLang\').textContent')).value ?? '').trim()}`,
+  );
+  await cdp.eval("(function(){var b=document.getElementById('rcCancel');if(b)b.click();return true;})()");
+  await sleep(300);
 
   cdp.close();
 } catch (err) {

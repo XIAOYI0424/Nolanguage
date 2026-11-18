@@ -128,6 +128,8 @@ export class InlineVmRunner implements Runner {
 export class InlineVmRuntime implements RuntimeExtension {
   readonly id = 'inline-vm';
   readonly version = '1.0.0';
+  /** evaluated in-process; there is no argv. */
+  readonly supportsArgs = false;
 
   validate(config: RunConfig): ValidationResult {
     const errors: string[] = [];

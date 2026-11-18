@@ -294,6 +294,23 @@ export interface RuntimeSpan {
 export interface RuntimeExtension {
   readonly id: string;
   readonly version: string;
+  /**
+   * Does this runtime put `RunRequest.args` on the program's argv?
+   *
+   * Declared rather than inferred from "did someone pass args": the panel has to
+   * know *before* the run whether the field means anything, and a runtime that
+   * quietly drops them is worse than one that says it cannot take them. The
+   * architecture gate cross-checks this flag against the code (`verify:arch`,
+   * rule R8): a runtime declaring true must read `opts.args`, and one declaring
+   * false must not.
+   *
+   * - `template`, `repl-session`: true — a real process, args go after the source.
+   * - `directory-session`: false — it runs a *fixed* step list; the argv belongs
+   *   to the manifest, and appending user args would land them on `go build`.
+   * - `inline-vm`: false — the code is evaluated in-process; there is no argv.
+   * - `script-host`: false — the entry script owns its own argument parsing.
+   */
+  readonly supportsArgs: boolean;
   /** Check that a plugin's `RunConfig` is usable by this runtime. */
   validate(config: RunConfig, languageId: string): ValidationResult;
   createRunner(config: RunConfig, ctx: HostContext): Runner;

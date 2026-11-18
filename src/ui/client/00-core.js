@@ -31,7 +31,10 @@
   document.addEventListener('wheel', function (e) { if (e.ctrlKey) e.preventDefault(); }, { passive: false, capture: true });
   document.addEventListener('keydown', function (e) {
     var k = (e.key || '').toLowerCase();
-    if (k === 'f5' || (e.ctrlKey && (k === 'r' || k === 'p'))) { e.preventDefault(); e.stopPropagation(); }
+    // Browser reload/print, and nothing else. Ctrl+Alt+R is the run-configuration
+    // shortcut: swallowing every Ctrl+R made that key unreachable, because this
+    // runs in the capture phase and stops propagation before the editor sees it.
+    if (k === 'f5' || (e.ctrlKey && !e.altKey && (k === 'r' || k === 'p'))) { e.preventDefault(); e.stopPropagation(); }
   }, true);
   document.addEventListener('submit', function (e) { e.preventDefault(); }, true);
 })();

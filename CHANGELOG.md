@@ -23,6 +23,46 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**「声明了但没接」现在有门禁了：R7 与 R8。** `RunRequest.args` 那次不是孤例，是一种形状——
+字段声明了、类型对了、面板转发了、没人读，编译干净、测试全绿、功能安静地不生效。所以
+`verify:arch` 增加两条规则：**R7** 跨运行时边界的接口，每个字段至少要有一个运行时读过；
+**R8** `RuntimeExtension.supportsArgs` 必须与代码一致（声明 `true` 的必须读 `opts.args`，
+声明 `false` 的必须不读）。两条都有自检（扫描器先在合成样本上证明看得见字段、且注释不算读过），
+并做了**故意注入验证**：把两处 `opts.args` 改成 `opts.arguments` 后
+
+```
+FAIL  R7 wiring: every RunRequest field is read by a runtime  — never read: args
+FAIL  R8 args: the supportsArgs flag matches the code  — repl-session.ts: declares true but never reads opts.args · template.ts: …
+```
+
+还原后 22/22。**门禁抓得住那个 bug，才算数。**
+
+**每个运行时现在声明自己能不能收参数。** `supportsArgs`：`template` / `repl-session` 为真，
+`directory-session` / `inline-vm` / `script-host` 为假（固定步骤列表 / 进程内求值 / 入口脚本自己解析）。
+`languageList` 把它带给页面，运行配置对话框对 javascript 这类语言**停用**「程序参数」并写明
+「inline-vm 不把参数交给程序，所以这一栏停用——存了也不会生效」；引擎再兜一层，收到不支持的参数
+记 warn 并丢弃。实测（CDP 驱动真实页面）：python `args=enabled`、javascript `args=disabled`。
+
+**`Ctrl+Alt+R` 从来没到过编辑器——修了。** 全局守卫拦浏览器刷新写的是
+`e.ctrlKey && k === 'r'`，**没排除 Alt**，而它在捕获阶段 `stopPropagation()`，于是
+`Ctrl+Alt+R` 被当成刷新吞掉。菜单项能开，所以手工点看不出来；只有真按一次键才发现。
+加 `!e.altKey` 后两条路径都通。
+
+**`verify` 的摘要现在自己解释总数为什么变。** 之前只打 `2390/2390 across 53 suites`，
+少掉的检查去哪了没人知道。现在末尾按原因聚合：
+
+```
+  15 check(s) not run across 5 suite(s) — they are in no denominator below:
+      4  gopls not installed
+      2  no real server installed in this home
+      …
+```
+
+因为缺工具链**不会让检查失败，它会让检查不进分母**（一个每服务器 3 条断言的探针，服务器不在时
+只剩 1 条 SKIP），所以「2411 → 2390」这种数字必须由日志回答，不能靠回忆。
+
+`npm test` 190 → **192**（`supportsArgs` 的五种运行时 + 未知 mode 一律 false）。
+
 **运行配置（Ctrl+Alt+R / File 菜单）。** 名称、程序参数、工作目录、环境变量四个字段，存
 `<home>/run-configs.json`（跟着用户走，不跟着项目走）。其余（解释器、超时）仍来自语言 manifest。
 

@@ -33,6 +33,28 @@ export function defaultRuntimeRegistry(): RuntimeRegistry {
   return reg;
 }
 
+/**
+ * Runtime id -> "does it put `args` on argv?", derived from the classes.
+ *
+ * A lookup table built once from the extensions themselves, so there is no
+ * second list to keep in sync. Unknown or absent modes answer false: a runtime
+ * that was not registered cannot take arguments.
+ */
+const ARGS_CAPABLE = new Map<string, boolean>(
+  [
+    new TemplateRuntime(),
+    new ReplSessionRuntime(),
+    new DirectorySessionRuntime(),
+    new InlineVmRuntime(),
+    new ScriptHostRuntime(),
+  ].map((runtime) => [runtime.id, runtime.supportsArgs]),
+);
+
+/** Does `manifest.run.mode` accept program arguments? */
+export function runtimeSupportsArgs(mode: string | undefined | null): boolean {
+  return !!mode && ARGS_CAPABLE.get(mode) === true;
+}
+
 export * from './types.js';
 export { RuntimeRegistry, satisfies, parseRequirement, parseVersion } from './RuntimeRegistry.js';
 export { TemplateRuntime, TemplateRunner } from './template.js';

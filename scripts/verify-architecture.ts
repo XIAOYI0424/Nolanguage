@@ -26,6 +26,14 @@
  *       before it becomes a problem. An exception that no longer describes
  *       anything over budget fails too, for the same reason a retired cycle
  *       entry does.
+ *   R7  **Wiring.** Every field of `RunRequest` — the interface that crosses the
+ *       runtime boundary — must be read by at least one runtime. `args` was
+ *       declared, typed, forwarded by the panel and dropped by every runtime for
+ *       a whole release: a declared field that nothing reads compiles cleanly and
+ *       fails silently, so the only way to catch the next one is to look.
+ *   R8  **Declared capability.** `RuntimeExtension.supportsArgs` must agree with
+ *       the code: a runtime that claims `true` has to read `opts.args`, and one
+ *       that claims `false` must not. A flag nobody checks is a comment.
  *   R6  **Purity.** The debugger's wire format and analysis modules are listed
  *       in the ledger and may import no `node:` builtin. That is what makes the
  *       protocol implementable by another collector, and the arithmetic testable
@@ -393,6 +401,89 @@ function nodeBuiltinsOf(text: string): string[] {
     impure.length === 0,
     impure.join(' · ') || 'ok',
   );
+}
+
+// ------------------------------------------------- R7/R8 the runtime boundary
+//
+// `RunRequest.args` was declared, typed, documented — and read by nobody. The run
+// configuration collected the arguments, the panel forwarded them, and every
+// runtime dropped them: it took a manual run to notice, because a declared field
+// that nothing reads compiles cleanly and fails silently.
+//
+// The check is deliberately narrow. Not "no field is unused" — that needs a type
+// checker and would flag legitimate write-only fields. It is "every field of the
+// interface that crosses the runtime boundary is read by at least one runtime",
+// which is the shape of the bug and is decidable with a regex.
+
+/** Strip comments, so a field named in prose is not mistaken for a read. */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+}
+
+/** Field names declared in `interface <name> { … }`. */
+function interfaceFields(source: string, name: string): string[] {
+  const m = new RegExp(`interface\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\}`).exec(stripComments(source));
+  if (!m) return [];
+  const out: string[] = [];
+  for (const line of m[1].split('\n')) {
+    const f = /^\s*(?:readonly\s+)?([a-zA-Z_]\w*)\??\s*:/.exec(line);
+    if (f) out.push(f[1]);
+  }
+  return out;
+}
+
+/** Fields read as `opts.<field>` — the name every runner gives its request. */
+function fieldsRead(source: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of stripComments(source).matchAll(/\bopts\.([a-zA-Z_]\w*)/g)) out.add(m[1]);
+  return out;
+}
+
+{
+  // Self-test first: a scanner that quietly matches nothing would report "all
+  // fields are read" forever, which is the failure mode this rule exists for.
+  const sample = ['interface RunRequest {', '  alpha?: string;', '  // beta?: number;', '  gamma?: number;', '}'].join('\n');
+  const fields = interfaceFields(sample, 'RunRequest');
+  check('self-test: interface fields come from the declaration', fields.join(',') === 'alpha,gamma', fields.join(',') || 'none');
+  const body = 'const x = opts.alpha; // opts.gamma is not a read';
+  const read = fieldsRead(body);
+  check('self-test: a field named in a comment is not a read', read.has('alpha') && !read.has('gamma'), [...read].join(','));
+}
+
+{
+  const RUNTIMES = join(SRC, 'runtimes');
+  const runtimeFiles = [...texts.keys()].filter((f) => f.startsWith(RUNTIMES) && f !== join(RUNTIMES, 'types.ts'));
+
+  const declared = interfaceFields(texts.get(join(RUNTIMES, 'types.ts')) ?? '', 'RunRequest');
+  const read = new Set<string>();
+  for (const f of runtimeFiles) for (const name of fieldsRead(texts.get(f) ?? '')) read.add(name);
+  const unread = declared.filter((name) => !read.has(name));
+  check(
+    'R7 wiring: every RunRequest field is read by a runtime',
+    declared.length >= 8 && unread.length === 0,
+    unread.length ? `never read: ${unread.join(', ')}` : `${declared.length} fields`,
+  );
+
+  const mismatched: string[] = [];
+  let extensions = 0;
+  for (const f of runtimeFiles) {
+    const text = texts.get(f) ?? '';
+    // Only the extensions themselves: `steps.ts` and `proc.ts` are helpers that
+    // take a request, not runtimes that declare a capability.
+    if (!/implements\s+RuntimeExtension/.test(text)) continue;
+    extensions++;
+    const decl = /readonly\s+supportsArgs\s*=\s*(true|false)/.exec(stripComments(text));
+    if (!decl) {
+      mismatched.push(`${relative(SRC, f)}: no supportsArgs declaration`);
+      continue;
+    }
+    const claims = decl[1] === 'true';
+    const reads = fieldsRead(text).has('args');
+    if (reads !== claims) {
+      mismatched.push(`${relative(SRC, f)}: declares ${claims} but ${reads ? 'reads' : 'never reads'} opts.args`);
+    }
+  }
+  check('R8 args: the supportsArgs flag matches the code', mismatched.length === 0, mismatched.join(' · ') || `${extensions} runtimes`);
 }
 
 // ------------------------------------------------------------------ verdict

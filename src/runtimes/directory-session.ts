@@ -152,6 +152,8 @@ export class DirectorySessionRunner implements Runner {
 export class DirectorySessionRuntime implements RuntimeExtension {
   readonly id = 'directory-session';
   readonly version = '1.0.0';
+  /** fixed step list; argv belongs to the manifest. */
+  readonly supportsArgs = false;
 
   validate(config: RunConfig): ValidationResult {
     const errors: string[] = [];

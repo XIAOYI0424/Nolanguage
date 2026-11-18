@@ -324,6 +324,8 @@ export class ScriptHostRunner implements Runner {
 export class ScriptHostRuntime implements RuntimeExtension {
   readonly id = 'script-host';
   readonly version = '1.0.0';
+  /** the entry script parses its own arguments. */
+  readonly supportsArgs = false;
 
   validate(config: RunConfig): ValidationResult {
     const errors: string[] = [];

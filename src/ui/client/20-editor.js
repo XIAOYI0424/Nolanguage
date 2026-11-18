@@ -284,6 +284,12 @@
   // declare a 'test' mode. The toolbar button follows this map so it never
   // offers an action the engine would refuse.
   var TESTABLE = {};
+  // Languages whose runtime puts program arguments on argv. A run configuration
+  // for a language that answers false cannot honour "程序参数", so the field is
+  // disabled rather than accepted and dropped.
+  var ARGS_OK = {};
+  /** Runtime id per language, for messages that need to name it. */
+  var RUN_MODE = {};
   /**
    * Languages whose built-in (L1) completion is on.
    *
@@ -341,6 +347,8 @@
       // "the backend can act on this language": run it, check it, or both.
       SERVER_LANGS[l.id] = !!(l.supportsRun || l.hasLsp);
       TESTABLE[l.id] = !!l.supportsTest;
+      ARGS_OK[l.id] = !!l.supportsArgs;
+      if (l.runMode) RUN_MODE[l.id] = l.runMode;
       // L1 is opt-out only; a manifest that says nothing keeps it.
       LEXICAL[l.id] = l.lexical !== false;
       (l.extensions || []).forEach(function (e) { EXT_LANG[String(e).replace(/^[.]/, '').toLowerCase()] = l.id; });

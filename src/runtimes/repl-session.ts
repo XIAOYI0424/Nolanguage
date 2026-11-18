@@ -177,6 +177,8 @@ export class ReplSessionRunner implements Runner {
 export class ReplSessionRuntime implements RuntimeExtension {
   readonly id = 'repl-session';
   readonly version = '1.0.0';
+  /** a real process; args land after the bootstrap. */
+  readonly supportsArgs = true;
 
   validate(config: RunConfig): ValidationResult {
     const errors: string[] = [];

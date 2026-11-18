@@ -35,7 +35,7 @@ import { renderMarkdown, type MdFrontmatter, type MdHeading, type MdRenderResult
 import { defaultSample, type LanguageId, type RunMode } from './samples.js';
 import { LanguageRegistry, type RegistryChange, type RegistryRoot } from '../langs/Registry.js';
 import { RunnerFactory } from '../langs/RunnerFactory.js';
-import { defaultRuntimeRegistry } from '../runtimes/index.js';
+import { defaultRuntimeRegistry, runtimeSupportsArgs } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { setExtensionManifests } from '../langs/extensionIndex.js';
@@ -762,6 +762,20 @@ export class WorkspaceService {
 
     const sessionId = opts.sessionId ?? 'ide';
     const mode: RunMode = opts.mode ?? 'run';
+
+    // Arguments only mean something when the runtime puts them on argv. The panel
+    // greys the field out, but a stale client or a script can still send them —
+    // and a runtime that quietly drops them is the exact bug this flag exists to
+    // prevent. Say it once, then run without them.
+    const acceptsArgs = runtimeSupportsArgs(slot.manifest.run?.mode);
+    const extraArgs = acceptsArgs ? opts.args : undefined;
+    if (!acceptsArgs && opts.args?.length) {
+      this.kernel.logger.root().warn('Run arguments ignored: this runtime has no argv', {
+        language: id,
+        mode: slot.manifest.run?.mode,
+        dropped: opts.args.length,
+      });
+    }
     if (opts.reset) await slot.runner.resetSession(sessionId);
 
     // One live run per session: a second Run replaces the first (PyCharm stops
@@ -786,7 +800,7 @@ export class WorkspaceService {
         onData: opts.onData,
         onStdinReady: opts.onStdinReady,
         signal: ctl.signal,
-        ...(opts.args?.length ? { args: opts.args } : {}),
+        ...(extraArgs?.length ? { args: extraArgs } : {}),
         ...(opts.env ? { env: opts.env } : {}),
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
       });

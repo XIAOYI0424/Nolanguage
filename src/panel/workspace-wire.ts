@@ -10,6 +10,7 @@
  * `WorkspaceService.ts` and importing them back here would make the two files
  * import each other, which the architecture contract rejects (R2).
  */
+import { runtimeSupportsArgs } from '../runtimes/index.js';
 import {
   bufferName,
   primaryExtension,
@@ -183,6 +184,8 @@ export interface LanguageDescriptorWire {
   fileName: string;
   supportsRun: boolean;
   supportsTest: boolean;
+  /** The runtime puts `RunRequest.args` on argv; the UI greys the field out otherwise. */
+  supportsArgs: boolean;
   runMode?: string;
   hasLsp: boolean;
   lspServerName?: string;
@@ -224,6 +227,7 @@ export function languageList(view: WorkspaceView): LanguageDescriptorWire[] {
         fileName: bufferName(m),
         supportsRun: manifestSupportsRun(m),
         supportsTest: manifestSupportsTest(m),
+        supportsArgs: runtimeSupportsArgs(m.run?.mode),
         runMode: m.run?.mode,
         hasLsp: !!m.lsp && !m.lsp.disabled,
         lspServerName: m.lsp?.serverName,

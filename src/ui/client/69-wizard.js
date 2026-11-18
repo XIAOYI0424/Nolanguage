@@ -633,6 +633,10 @@
     if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
   }
 
+  function rcMode() {
+    return RUN_MODE[currentLang] || 'runtime';
+  }
+
   function rcMine() {
     return RC.items.filter(function (c) { return c.language === currentLang; });
   }
@@ -646,6 +650,9 @@
       document.body.appendChild(mask);
     }
     var mine = rcMine();
+    // A language whose runtime has no argv cannot honour this field. Disabling it
+    // is honest; accepting it and dropping it silently is what the flag prevents.
+    var argsOk = ARGS_OK[currentLang] !== false;
     var rows = '';
     if (!mine.length) {
       rows = '<div class="wiz-muted">' + esc(currentLang) + ' 还没有配置。填右边，点「保存」。</div>';
@@ -665,7 +672,9 @@
       + '<div class="wiz-col"><div class="wiz-sec">已保存</div>' + rows + '</div>'
       + '<div class="wiz-col">'
       + '<div class="wiz-field"><label>名称</label><input type="text" id="rcName" value="' + esc(RC.name) + '" placeholder="例如 带参数运行"></div>'
-      + '<div class="wiz-field"><label>程序参数</label><input type="text" id="rcArgs" value="' + esc(RC.args) + '" placeholder="--port 8080 &quot;two words&quot;"></div>'
+      + (argsOk
+        ? '<div class="wiz-field"><label>程序参数</label><input type="text" id="rcArgs" value="' + esc(RC.args) + '" placeholder="--port 8080 &quot;two words&quot;"></div>'
+        : '<div class="wiz-field"><label>程序参数</label><input type="text" id="rcArgs" value="" disabled placeholder="该语言的运行时没有 argv"><div class="wiz-muted">' + esc(currentLang) + ' 的运行时（' + esc(rcMode()) + '）不把参数交给程序，所以这一栏停用——存了也不会生效。</div></div>')
       + '<div class="wiz-field"><label>工作目录</label><input type="text" id="rcCwd" value="' + esc(RC.cwd) + '" placeholder="留空 = 语言默认"></div>'
       + '<div class="wiz-field"><label>环境变量（每行 KEY=VALUE）</label><textarea id="rcEnv" rows="4" style="width:100%;box-sizing:border-box;background:var(--input-bg,#1e1f22);color:inherit;border:1px solid var(--border);border-radius:4px;padding:4px 6px">' + esc(RC.env) + '</textarea></div>'
       + (RC.error ? '<div class="wiz-hint">' + esc(RC.error) + '</div>' : '')

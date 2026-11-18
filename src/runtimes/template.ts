@@ -107,6 +107,8 @@ export class TemplateRunner implements Runner {
 export class TemplateRuntime implements RuntimeExtension {
   readonly id = 'template';
   readonly version = '1.0.0';
+  /** a real process; args land after the source file. */
+  readonly supportsArgs = true;
 
   validate(config: RunConfig): ValidationResult {
     const errors: string[] = [];

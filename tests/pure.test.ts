@@ -57,6 +57,7 @@ import { windowUsable } from '../src/desktop/handshake';
 import { detectProjects } from '../src/scaffold/detect';
 import { planAdd } from '../src/scaffold/dependencies';
 import { parseEnv, RunConfigStore, splitArgs } from '../src/scaffold/runConfigs';
+import { runtimeSupportsArgs } from '../src/runtimes/index';
 import { TemplateRegistry } from '../src/scaffold/registry';
 import { safeRelativePath } from '../src/scaffold/types';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
@@ -976,6 +977,25 @@ describe('scaffold · templates', () => {
     const [item] = reg.list();
     expect(item.available).toBe(false);
     expect(item.reason).toBe('network unreachable');
+  });
+});
+
+describe('runtimes · which ones take program arguments', () => {
+  it('says yes only for the two that spawn a real process', () => {
+    // `args` is only meaningful when something puts it on argv. Saying so here is
+    // what lets the run-configuration dialog disable the field instead of
+    // accepting a value that would be dropped.
+    expect(runtimeSupportsArgs('template')).toBe(true);
+    expect(runtimeSupportsArgs('repl-session')).toBe(true);
+    expect(runtimeSupportsArgs('directory-session')).toBe(false);
+    expect(runtimeSupportsArgs('inline-vm')).toBe(false);
+    expect(runtimeSupportsArgs('script-host')).toBe(false);
+  });
+
+  it('answers no for a mode it has never heard of', () => {
+    expect(runtimeSupportsArgs(undefined)).toBe(false);
+    expect(runtimeSupportsArgs('')).toBe(false);
+    expect(runtimeSupportsArgs('telepathy')).toBe(false);
   });
 });
 
