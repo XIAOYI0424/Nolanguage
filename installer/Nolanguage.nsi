@@ -40,12 +40,22 @@ SetCompressor /SOLID lzma
 !define INSTLOG "$TEMP\Nolanguage-install.log"
 
 !macro LOGMSG text
+  ; nsExec pushes its result on the stack. Preserve $0 because the install
+  ; section keeps the previous command's exit code there while writing the log.
+  Push $0
+  Push $R9
   nsExec::Exec 'cmd /c echo [%DATE:~0,10% %TIME%] ${text}>>"%TEMP%\Nolanguage-install.log"'
+  Pop $R9
+  Pop $R9
   Pop $0
 !macroend
 
 !macro LOGVAL label value
+  Push $0
+  Push $R9
   nsExec::Exec 'cmd /c echo [%DATE:~0,10% %TIME%] ${label}=[${value}]>>"%TEMP%\Nolanguage-install.log"'
+  Pop $R9
+  Pop $R9
   Pop $0
 !macroend
 
@@ -133,6 +143,7 @@ Section "安装 ${APP_NAME}" SecInstall
   Delete "${INSTLOG}"
   !insertmacro LOGMSG "${APP_NAME} installer"
   !insertmacro LOGVAL "  INSTDIR" "$INSTDIR"
+  !insertmacro LOGVAL "  TEMP" "$TEMP"
   StrCpy $8 "no"
   IfSilent 0 +2
   StrCpy $8 "yes"
@@ -150,9 +161,10 @@ Section "安装 ${APP_NAME}" SecInstall
 
   ; ---- step 1: ask the helper to stop the instance under $INSTDIR ---------
   DetailPrint "正在检查是否已运行 ${APP_NAME}…"
-  nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
+  ; ExecToLog returns just the process exit code. ExecToStack adds stdout as a
+  ; second value and made the lock branch compare the wrong stack item.
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
   Pop $0
-  Pop $1
   !insertmacro LOGVAL "step1 helper exit" "$0"
 
   ; The helper exits 0 when the file is writable, 1 when it is *sure* it is not.
@@ -161,8 +173,10 @@ Section "安装 ${APP_NAME}" SecInstall
   ; Both non-zero cases fall through to the pid fallback below; only a proven
   ; lock may abort. Aborting on "could not ask" turned a working install into
   ; "the installer does nothing".
+  ; 0 = writable; 1 = sharing violation; 2 = ACCESS_DENIED (not a process lock).
   StrCpy $5 $0
-  StrCmp $5 "0" inst_writable
+  StrCmp $5 "0" inst_preflight
+  StrCmp $5 "2" inst_access_denied
 
   ; ---- step 2: the app recorded its own pid; use it ----------------------
   ; This is also the machine where the helper cannot run at all: a bare number
@@ -176,23 +190,31 @@ Section "安装 ${APP_NAME}" SecInstall
   inst_no_pid_kill:
   StrCmp $7 "" inst_after_pid
     !insertmacro LOGVAL "step2 session pid" "$7"
-    nsExec::ExecToStack 'taskkill /PID $7 /T /F'
+    nsExec::ExecToLog 'taskkill /PID $7 /T /F'
     Pop $0
-    Pop $1
     !insertmacro LOGVAL "step2 taskkill exit" "$0"
   inst_after_pid:
 
   ; Unknown verdict: the kill above may well have freed the file, and the
   ; extractor is the next thing that can tell. Do not abort on a guess.
-  StrCmp $5 "1" 0 inst_writable
+  StrCmp $5 "1" 0 inst_preflight
 
   ; Proven locked: ask the helper once more, now that the pid kill ran. It is
   ; what knows how to wait for the image to be unmapped, so its verdict decides.
-  nsExec::ExecToStack 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\stop-instance.ps1" -Exe "$INSTDIR\${APP_NAME}.exe"'
   Pop $0
-  Pop $1
   !insertmacro LOGVAL "step2 helper retry exit" "$0"
-  StrCmp $0 "1" inst_locked inst_writable
+  StrCmp $0 "0" inst_preflight
+  StrCmp $0 "2" inst_access_denied
+  StrCmp $0 "1" inst_locked inst_preflight
+
+  inst_access_denied:
+    !insertmacro LOGMSG "ABORT: access denied on target - see nl-stop-instance.log for Win32 error"
+    IfSilent 0 +3
+      SetErrorLevel 4
+      Quit
+    MessageBox MB_ICONSTOP|MB_OK "安装程序当前没有写入权限：$INSTDIR。目标文件访问被拒绝，并非确认有其他程序占用。$\r$\n$\r$\n如果从 WorkBuddy 附件预览或受限窗口启动，请关闭此窗口，在文件资源管理器中打开安装包所在文件夹，再双击 Nolanguage-Setup.exe。也可选择有写入权限的目录。$\r$\n$\r$\n日志：${INSTLOG}$\r$\n诊断：$TEMP\nl-stop-instance.log"
+    Abort
 
   inst_locked:
     !insertmacro LOGMSG "ABORT: payload still locked"
@@ -201,7 +223,16 @@ Section "安装 ${APP_NAME}" SecInstall
       Quit
     MessageBox MB_ICONSTOP|MB_OK "无法写入 $INSTDIR\${APP_NAME}.exe：文件仍被占用。$\r$\n$\r$\n请先退出 ${APP_NAME}（任务管理器里确认没有 ${APP_NAME}.exe），再重新运行安装程序。$\r$\n$\r$\n日志：${INSTLOG}"
     Abort
-  inst_writable:
+
+  ; Preflight directory ACL / integrity before staging the 85 MB payload.
+  ; A low-integrity launcher can read the exe but cannot create a file in this
+  ; directory, even when the ACL says Modify. Fail here with a useful reason.
+  inst_preflight:
+    ClearErrors
+    GetTempFileName $8 "$INSTDIR"
+    IfErrors inst_access_denied
+    Delete "$8"
+    !insertmacro LOGMSG "step2 directory write preflight passed"
 
   DetailPrint "正在解压 ${APP_NAME}.exe…"
   ; Staged under a different name, then swapped in.

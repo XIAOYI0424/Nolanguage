@@ -40,43 +40,61 @@ Get-Process -Name 'Nolanguage' | ForEach-Object {
   }
 }
 
-# Fallback: nothing matched by path, the file is still locked, and there are
-# processes whose path we could not read. Refusing to act leaves the upgrade
-# permanently blocked by an app the user cannot even see in Task Manager's
-# details — so close those, and only those. A process whose path *is* readable
-# and differs from ours is never touched: that is the portable copy and the
-# install-smoke, which must survive.
+$lastCode = 0
+$lastMessage = ''
+function Write-StopDiagnostic {
+  param([int]$Code, [string]$Message)
+  $diag = Join-Path $env:TEMP 'nl-stop-instance.log'
+  $clean = ($Message -replace '[\r\n]+', ' ').Trim()
+  "$(Get-Date -Format o)  target=$target  hresultLowWord=$Code  message=[$clean]  seen=[$($seen -join ', ')]" | Out-File -FilePath $diag -Append -Encoding utf8
+}
+
+# Test whether the exe is locked by a process, or whether this installer simply
+# cannot write here. Those are different failures. Low-integrity launchers (the
+# process TEMP ends in `Temp\Low`) get ACCESS_DENIED even when no process holds
+# the file; claiming "locked" made the old installer wait 12s and then fail in
+# the payload extractor with a misleading file-in-use dialog.
 function Test-Writable {
   try {
     $f = [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
     $f.Close()
     return $true
   } catch {
+    $script:lastCode = $_.Exception.HResult -band 0xffff
+    $script:lastMessage = $_.Exception.Message
     return $false
   }
 }
-if ($unknown.Count -and -not (Test-Writable)) {
-  $seen += "fallback-kill=[$($unknown -join ',')]"
-  foreach ($procId in $unknown) { Stop-Process -Id $procId -Force }
+
+if (-not (Test-Writable) -and $lastCode -eq 5) {
+  Write-StopDiagnostic -Code $lastCode -Message $lastMessage
+  exit 2
+}
+
+# The process path was unreadable, but a Nolanguage process is present and the
+# target is sharing-locked. Do not guess which same-name process owns this
+# install: return the lock verdict immediately and let NSIS use the app's exact
+# server.pid. That PID is recorded by this install, whereas killing an unreadable
+# candidate here could close a portable copy or the install-smoke process.
+if ($unknown.Count -and $lastCode -ne 5) {
+  Write-StopDiagnostic -Code $lastCode -Message $lastMessage
+  exit 1
 }
 
 # Wait for the lock, not for the process: Stop-Process returns before the image is
 # unmapped, and Windows can take a few seconds to finish tearing the process down.
 # 40 x 300 ms, returning as soon as the file is free instead of always paying it.
 #
-# Exit 1 only when it is certain: the process is gone and the file still will not
-# open for writing. The installer turns exactly that into "close the app and try
-# again"; any other outcome (no file, opened fine) is 0.
+# Exit 1 only for a real sharing/lock violation after the target process was
+# stopped. Exit 2 above means this context cannot write to the directory at all;
+# exit 0 means the payload's destination is ready.
 for ($i = 0; $i -lt 40; $i++) {
-  try {
-    $fs = [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
-    $fs.Close()
-    exit 0
-  } catch {
-    Start-Sleep -Milliseconds 300
+  if (Test-Writable) { exit 0 }
+  if ($lastCode -eq 5) {
+    Write-StopDiagnostic -Code $lastCode -Message $lastMessage
+    exit 2
   }
+  Start-Sleep -Milliseconds 300
 }
-
-$diag = Join-Path $env:TEMP 'nl-stop-instance.log'
-"$(Get-Date -Format o)  target=$target  seen=[$($seen -join ', ')]" | Out-File -FilePath $diag -Append -Encoding utf8
+Write-StopDiagnostic -Code $lastCode -Message $lastMessage
 exit 1

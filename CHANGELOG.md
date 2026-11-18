@@ -2,6 +2,43 @@
 
 ## 0.7.24 — 2026-11-15
 
+### 安装日志：修复「进程占用」误报与未走 PID 兜底
+
+**读取用户 16:45 的真实日志后，抓到安装器自己吞掉了 helper 的失败码。** 日志是从
+`%TEMP%\Low\Nolanguage-install.log` 写出的：
+
+```text
+step1 helper exit=[1]
+step3 extracting payload (staged)
+step3 staged
+```
+
+中间缺失的 `step2 session pid` 正是关键。`LOGVAL` 为写日志调用 `nsExec::Exec`，并把返回值
+`Pop $0`——覆盖了安装段刚刚存入 `$0` 的 helper 退出码。helper 明明返回 1（文件仍锁着），
+日志宏却把 `$0` 改成了 echo 的 0，PID 兜底随之被跳过；随后 NSIS 解压 `.new` 成功、删除旧 exe
+失败，弹出和原因不符的「文件占用」错误。
+
+- `LOGMSG` / `LOGVAL` 现在保存并恢复 `$0` / `$R9`；`ExecToLog` 只返回 helper 的退出码。
+- helper 遇到不可读的进程路径、但目标文件确实被锁时，立即返回 1，不猜着杀同名进程；NSIS
+  用程序自己写下的 `server.pid` 精确 `taskkill`，再调用 helper 确认文件已释放。
+- `ERROR_ACCESS_DENIED`（HRESULT 低位为 5）与共享锁分开：helper 返回 2 并写 `%TEMP%\nl-stop-instance.log`；安装器
+  在解压 85 MB 之前也会试写安装目录。若从 WorkBuddy 受限/Low 完整性入口启动，明确说明是
+  **启动上下文没有目录写权限**，并提示从资源管理器双击安装包，而不是误称有别的程序占用。
+- 载荷先写 `.new` 再 rename；若旧 exe 仍被锁，保留新载荷并报告 swap 步骤。
+
+**带运行中应用的回归实测通过**：
+
+```text
+step1 helper exit=[1]
+step2 session pid=[35252]
+step2 taskkill exit=[0]
+step2 helper retry exit=[0]
+step2 directory write preflight passed
+step3 staged → step3 swapped in → done: install completed
+```
+
+共 9 秒完成 payload 写入；安装后 Nolanguage 进程为 0。`%TEMP%\Nolanguage-install.log` 每步带时间戳。
+
 ### 启动：不再等一个语言服务，版本探测改为缓存
 
 启动耗时测出来之后（`npm run verify:startup` 之前是一组一次性探针），最大的一块不是内核，是**等 python 的服务**：`builtin/python@1.0.0` 是唯一 `lsp.eager: true` 的语言，`workspace.init()` 里同步等它握手。把它关掉，`init()` 从 **439–518 ms 掉到 138–150 ms**。
