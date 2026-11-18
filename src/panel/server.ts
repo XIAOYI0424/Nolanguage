@@ -41,6 +41,7 @@ import { renderProfileHtml } from '../ui/profile-ui.js';
 import { SAMPLES } from './samples.js';
 import { startTraffic } from './traffic.js';
 import { WorkspaceService } from './WorkspaceService.js';
+import { detectProjects } from '../scaffold/detect.js';
 import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
 import { FsService, FsError } from './FsService.js';
@@ -631,6 +632,17 @@ export async function main(
               message: (err as Error).message,
               field: (err as { field?: string }).field ?? null,
             });
+          }
+          break;
+        }
+
+        // ---------- import an existing project ----------
+        case 'projectsDetect': {
+          const dir = String(msg.dir ?? '') || workspace.projectRoot();
+          try {
+            reply({ kind: 'projectCandidates', reqId: msg.reqId, dir, items: detectProjects(dir) });
+          } catch (err) {
+            reply({ kind: 'projectCandidates', reqId: msg.reqId, dir, items: [], message: (err as Error).message });
           }
           break;
         }

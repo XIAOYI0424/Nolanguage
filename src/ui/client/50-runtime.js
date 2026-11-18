@@ -779,6 +779,9 @@
       case 'templates':
         wizOnTemplates(m);
         break;
+      case 'projectCandidates':
+        impOnCandidates(m);
+        break;
       case 'templateGenerated':
         wizOnGenerated(m);
         break;

@@ -420,3 +420,97 @@
     WIZ.error = (m && m.message) || '生成失败';
     wizPaint();
   }
+
+  // ------------------------------------------------------- import a project
+  //
+  // The files already exist, so this is not a wizard: pick a directory, see what
+  // markers it contains, and switch the explorer to it. One level deep — a deep
+  // scan of a home directory is slow and the answer is almost always a sibling.
+
+  var IMP = { dir: '', items: [], pick: null, busy: false };
+
+  function impOpen() {
+    wizStyle();
+    IMP.items = [];
+    IMP.pick = null;
+    IMP.dir = '';
+    impPaint();
+    BRIDGE.send({ kind: 'projectsDetect' });
+  }
+
+  function impClose() {
+    var mask = $('nlImp');
+    if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+  }
+
+  function impPaint() {
+    var mask = $('nlImp');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'nlImp';
+      mask.className = 'wiz-mask';
+      document.body.appendChild(mask);
+    }
+    var rows = '';
+    if (!IMP.items.length) {
+      rows = '<div class="wiz-muted">' + (IMP.busy ? '正在扫描…' : '这个目录下没有找到项目标记（Cargo.toml / package.json / pyproject.toml / go.mod / pom.xml / CMakeLists.txt）。') + '</div>';
+    } else {
+      for (var i = 0; i < IMP.items.length; i++) {
+        var it = IMP.items[i];
+        var sel = IMP.pick === it.dir;
+        rows += '<div class="wiz-card' + (sel ? ' sel' : '') + '" data-dir="' + esc(it.dir) + '">'
+          + '<div style="display:flex;align-items:center;gap:6px"><b>' + esc(it.name) + '</b>'
+          + '<span class="wiz-badge">' + esc(it.language) + '</span>'
+          + '<span class="wiz-badge">' + esc(it.marker) + '</span></div>'
+          + '<div class="wiz-muted">' + esc(it.dir) + (it.hints && it.hints.length ? ' · ' + esc(it.hints.join(' ')) : '') + '</div>'
+          + '</div>';
+      }
+    }
+    mask.innerHTML = '<div class="wiz-box" style="height:min(520px,80vh)">'
+      + '<div class="wiz-head"><span class="wiz-title">打开项目</span><span class="wiz-muted">Ctrl+Alt+O</span></div>'
+      + '<div class="wiz-body" style="grid-template-columns:1fr">'
+      + '<div class="wiz-col">'
+      + '<div class="wiz-sec">目录</div>'
+      + '<input type="text" id="impDir" placeholder="留空 = 当前工作区" value="' + esc(IMP.dir) + '" style="width:100%;box-sizing:border-box;background:var(--input-bg,#1e1f22);color:inherit;border:1px solid var(--border);border-radius:4px;padding:4px 6px">'
+      + '<div class="wiz-sec">找到 ' + IMP.items.length + ' 个项目</div>'
+      + rows
+      + '</div></div>'
+      + '<div class="wiz-foot">'
+      + '<button class="wiz-btn" id="impCancel">取消</button>'
+      + '<button class="wiz-btn primary" id="impOpenBtn"' + (IMP.pick ? '' : ' disabled') + '>打开</button>'
+      + '</div></div>';
+
+    var dirInput = mask.querySelector('#impDir');
+    if (dirInput) {
+      dirInput.addEventListener('input', function () { IMP.dir = dirInput.value; });
+      dirInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { IMP.busy = true; impPaint(); BRIDGE.send({ kind: 'projectsDetect', dir: IMP.dir }); }
+      });
+    }
+    mask.querySelectorAll('.wiz-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        IMP.pick = card.getAttribute('data-dir');
+        impPaint();
+      });
+      card.addEventListener('dblclick', function () { impOpenProject(card.getAttribute('data-dir')); });
+    });
+    var cancel = mask.querySelector('#impCancel');
+    if (cancel) cancel.addEventListener('click', impClose);
+    var openBtn = mask.querySelector('#impOpenBtn');
+    if (openBtn) openBtn.addEventListener('click', function () { if (IMP.pick) impOpenProject(IMP.pick); });
+  }
+
+  function impOpenProject(dir) {
+    if (!dir) return;
+    BRIDGE.send({ kind: 'openFolder', path: dir });
+    toast('已切换到 ' + dir);
+    impClose();
+  }
+
+  function impOnCandidates(m) {
+    IMP.busy = false;
+    IMP.items = Array.isArray(m.items) ? m.items : [];
+    if (typeof m.dir === 'string' && m.dir) IMP.dir = m.dir;
+    if (IMP.items.length === 1) IMP.pick = IMP.items[0].dir;
+    impPaint();
+  }

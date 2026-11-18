@@ -74,6 +74,7 @@
     // Ctrl+Alt+N: the wizard. Kept out of the editor's own keymap on purpose —
     // it opens a modal, so it must not depend on the caret having focus.
     if (e.ctrlKey && e.altKey && (e.key || '').toLowerCase() === 'n') { e.preventDefault(); wizOpen(); return; }
+    if (e.ctrlKey && e.altKey && (e.key || '').toLowerCase() === 'o') { e.preventDefault(); impOpen(); return; }
     if (e.altKey && e.key === 'F7') { e.preventDefault(); navReferences(); return; }
     if (e.shiftKey && e.key === 'F6') { e.preventDefault(); navRename(); return; }
     if (e.altKey && e.key === 'Enter') { e.preventDefault(); navCodeActions(); return; }

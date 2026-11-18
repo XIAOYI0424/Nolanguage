@@ -54,6 +54,7 @@ import { buildManagerPlugin } from '../src/langs/managerPlugins';
 import { toolchainEnv } from '../src/langs/toolchainEnv';
 import { cachedVersion, toolchainSignature, versionCachePath } from '../src/langs/versionCache';
 import { windowUsable } from '../src/desktop/handshake';
+import { detectProjects } from '../src/scaffold/detect';
 import { TemplateRegistry } from '../src/scaffold/registry';
 import { safeRelativePath } from '../src/scaffold/types';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
@@ -973,6 +974,38 @@ describe('scaffold · templates', () => {
     const [item] = reg.list();
     expect(item.available).toBe(false);
     expect(item.reason).toBe('network unreachable');
+  });
+});
+
+describe('scaffold · detecting existing projects', () => {
+  it('finds the root and one level of children, and skips build dirs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'nl-detect-'));
+    writeFileSync(join(root, 'package.json'), '{"name":"root-app"}');
+    mkdirSync(join(root, 'svc'), { recursive: true });
+    writeFileSync(join(root, 'svc/Cargo.toml'), '[package]\nname = "svc"\n');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    mkdirSync(join(root, 'node_modules/x'), { recursive: true });
+    writeFileSync(join(root, 'node_modules/x/package.json'), '{"name":"dep"}');
+
+    const found = detectProjects(root);
+    expect(found.map((c) => `${c.language}:${c.name}`)).toEqual(['javascript:root-app', 'rust:svc']);
+    expect(found[1].marker).toBe('Cargo.toml');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('falls back to the directory name when the marker has no name', () => {
+    const root = mkdtempSync(join(tmpdir(), 'nl-detect2-'));
+    writeFileSync(join(root, 'go.mod'), 'module example.com/x\n');
+    const [first] = detectProjects(root);
+    expect(first.language).toBe('go');
+    expect(first.name).toBe('example.com/x');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reports nothing for a directory without markers', () => {
+    const root = mkdtempSync(join(tmpdir(), 'nl-detect3-'));
+    expect(detectProjects(root)).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

@@ -1,8 +1,8 @@
 # 项目向导：manifest 声明模板，UI 不认识任何语言
 
 > 状态：P0 + 部分 P1 已实现（三栏、类型/语言/来源筛选、schema 表单、条件文件、目标目录校验、
-> 文件模板）。外部 provider（Initializr / cookiecutter / cargo-generate）尚未接入——它们的
-> **形状**已经定好。
+> 文件模板、导入现有项目）。外部 provider（Initializr / cookiecutter / cargo-generate）尚未
+> 接入——它们的**形状**已经定好。
 
 ## 一、为什么是三栏
 
@@ -56,6 +56,19 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 
 文件模板的**子目录写在路径里**（`tests/test_x.py`），所以表单只需要问文件名，底部位置条就是
 工作区根——不再多一个「放到哪个目录」的决策。左侧「类型」筛选就是 `kind` 的过滤。
+
+## 二点七、导入现有项目（Ctrl+Alt+O）
+
+文件已经存在，所以这不是向导：选一个目录，看它下面有哪些项目标记，把资源管理器切过去。
+
+- 只看**当前目录 + 一层子目录**：深扫一个 home 目录又慢又不准，答案几乎总在隔壁；
+- 跳过 `node_modules` / `target` / `dist` / `build` / `.venv` 等，它们不是项目根；
+- 标记表是数据（`Cargo.toml`→rust、`package.json`→javascript、`pyproject.toml`/`setup.py`→
+  python、`go.mod`→go、`pom.xml`→java、`CMakeLists.txt`→cpp），显示名优先从文件里读
+  （`name` / `module` / `<artifactId>`），读不到就用目录名；
+- **语言没装也能打开**：它只是一个目录，能看文件。
+
+打开 = 现有的 `openFolder`（`fs.setRoot`）。所以这个功能没有新的写入路径，只有新的**发现**路径。
 
 ## 三、代码分层
 
