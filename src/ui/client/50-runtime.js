@@ -519,6 +519,9 @@
   // the fallback: a language with no server (or a server without
   // 'documentFormattingProvider') must still be reformattable.
   var FMT_REQ = 0;
+  // Set while a save waits for the formatter's edits: onFormatResult applies
+  // them first, then writes the formatted buffer instead of only redrawing.
+  var FMT_SAVE_PENDING = false;
   function reformatLocally(reason) {
     var before = ta.value, after = basicFormat(before);
     if (after === before) { toast('Reformatted · nothing to change'); return; }
@@ -534,12 +537,26 @@
   }
   function onFormatResult(m) {
     if (m.requestId !== FMT_REQ) return;
-    if (m.unsupported) { reformatLocally(String(m.unsupported)); return; }
+    var pendingSave = FMT_SAVE_PENDING;
+    FMT_SAVE_PENDING = false;
+    if (m.unsupported) {
+      if (pendingSave) finishSaveAfterFormat();
+      else reformatLocally(String(m.unsupported));
+      return;
+    }
     var before = ta.value;
     var after = applyTextEdits(before, m.edits || []);
+    if (after !== before) setEditorText(after);
+    if (pendingSave) { finishSaveAfterFormat(); return; }
     if (after === before) { toast('Reformatted · nothing to change'); return; }
-    setEditorText(after);
     toast('Reformatted · ' + changedLines(before, after) + ' lines changed');
+  }
+  /** Write the buffer after a format-on-save round-trip. */
+  function finishSaveAfterFormat() {
+    if (!currentFile) return;
+    saveBuffer(currentFile);
+    setStatusHint('Saved ' + currentFile);
+    if (lspLang()) { pendingSaveCheck = true; requestCheck(); }
   }
   /**
    * Import hygiene: de-duplicate and sort the leading import block. Nothing is

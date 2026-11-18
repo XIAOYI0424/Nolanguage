@@ -524,6 +524,15 @@
     if (!currentFile || !BUFFERS[currentFile]) { reportError({ level: 'warn', title: 'Nothing to save', message: 'No document is open.' }); return; }
     if (ta.readOnly) { reportError({ level: 'warn', title: 'Read-only', message: currentFile + ' cannot be modified.' }); return; }
     var p = currentFile;
+    // Format-on-save: format first, then write the formatted buffer when the
+    // edits land (onFormatResult -> finishSaveAfterFormat). A language with no
+    // server saves immediately.
+    if (PREFS.formatOnSave && lspLang()) {
+      FMT_SAVE_PENDING = true;
+      reformatCode();
+      setStatusHint('Formatting ' + p + ' …');
+      return;
+    }
     saveBuffer(p);
     // No dialog: PyCharm writes straight to disk and only shows a transient
     // status-bar hint. The failure path is the one that talks.

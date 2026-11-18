@@ -379,21 +379,73 @@
     openProfile();
     BRIDGE.send({ kind: 'profile', code: ta.value, language: lg, timeoutMs: 60000 });
   }
-  /** Open the command palette (the UI surface for nlg run <script> -- <args>). */
+  // ---------- command palette ----------
+  // One box, two modes: "nlg ..." runs a script (the original surface); any
+  // other text filters MENUS and Enter runs the first match. The list is
+  // derived from MENUS, so a new menu item is searchable with no second
+  // registry to keep in sync.
+  function allCommands() {
+    var out = [];
+    Object.keys(MENUS).forEach(function (menu) {
+      MENUS[menu].forEach(function (it) {
+        if (it.sep || !it.act) return;
+        out.push({ menu: menu, label: it.label, sc: it.sc || '', act: it.act });
+      });
+    });
+    return out;
+  }
+  function commandMatches(q) {
+    var f = String(q || '').toLowerCase();
+    return allCommands().filter(function (c) {
+      return !f || c.label.toLowerCase().indexOf(f) !== -1 || c.menu.toLowerCase().indexOf(f) !== -1;
+    });
+  }
+  function renderCommandList(q) {
+    var out = $('palOut');
+    if (!out) return;
+    var list = commandMatches(q);
+    if (!list.length) { out.innerHTML = '<div style="padding:6px;color:var(--text-tertiary)">No matching command</div>'; return; }
+    out.innerHTML = list.map(function (c, i) {
+      return '<div data-pc="' + i + '" style="display:flex;gap:10px;padding:4px 6px;border-radius:4px;cursor:pointer">' +
+        '<span style="color:var(--text-tertiary);min-width:76px">' + esc(c.menu) + '</span>' +
+        '<span>' + esc(c.label) + '</span>' +
+        '<span style="margin-left:auto;color:var(--text-tertiary)">' + esc(c.sc) + '</span></div>';
+    }).join('');
+    out.querySelectorAll('[data-pc]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var c = list[+el.getAttribute('data-pc')];
+        closePalette();
+        c.act();
+      });
+    });
+  }
   function openPalette() {
     var p = $('palette');
     if (!p) return;
     p.classList.add('open');
     var inp = $('palInput');
-    if (inp) { inp.value = 'nlg run '; inp.focus(); inp.select(); }
+    if (inp) {
+      inp.value = '';
+      inp.oninput = function () { if (!/^nlg\b/i.test(inp.value.trim())) renderCommandList(inp.value); };
+      inp.focus();
+    }
+    renderCommandList('');
   }
   function closePalette() { var p = $('palette'); if (p) p.classList.remove('open'); }
-  /** Parse nlg [run] <script> [--] <args…> and run it server-side. */
+  /** Enter: "nlg ..." runs the script; anything else runs the first match. */
   function runPalette() {
     var inp = $('palInput');
     if (!inp) return;
     var raw = inp.value.trim();
     if (!raw) return;
+    if (/^nlg\b/i.test(raw)) { runPaletteScript(raw); return; }
+    var list = commandMatches(raw);
+    if (!list.length) { toast('No matching command'); return; }
+    closePalette();
+    list[0].act();
+  }
+  /** Parse nlg [run] <script> [--] <args…> and run it server-side. */
+  function runPaletteScript(raw) {
     var toks = tokenize(raw);
     var i = 0;
     if (toks[i] === 'nlg') i++;
@@ -404,6 +456,8 @@
     if (toks[i] === '--') i++;
     for (; i < toks.length; i++) args.push(toks[i]);
     PAL_BUSY = true;
+    var out = $('palOut');
+    if (out) out.innerHTML = '';
     appendPaletteOut('$ ' + raw + '\n', 'dim');
     BRIDGE.send({ kind: 'runScript', script: script, args: args });
     closePalette();
@@ -716,6 +770,7 @@
         { name: 'dark', label: 'Darcula theme (dark)', def: dark },
         { name: 'bars', label: 'Show tool window bars', def: bars },
         { name: 'status', label: 'Show status bar', def: sb },
+        { name: 'fmtSave', label: 'Format on save (language servers)', def: !!PREFS.formatOnSave },
         { name: 'zh', label: '界面语言：简体中文 (Chinese UI)', def: chinese }
       ],
       buttons: [
@@ -725,6 +780,7 @@
           $('strip').style.display = v.bars ? '' : 'none';
           var st = document.querySelector('.status'); if (st) st.style.display = v.status ? '' : 'none';
           savePrefs({ theme: v.dark ? 'darcula' : 'light' });
+          savePrefs({ formatOnSave: !!v.fmtSave });
           var next = v.zh ? 'zh-CN' : 'en';
           if (next !== activeLocale()) {
             savePrefs({ locale: next });
