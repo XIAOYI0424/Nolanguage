@@ -23,6 +23,19 @@
 `verify:ui-live` 增加一条门禁：500 行、30 次插入 **< 150 ms**（现在 35 ms · 1.2 ms/字符；
 修复前 286 ms）。这是这条套件第一次能抓到「每次击键都做重活」这类回归。
 
+**运行配置（Ctrl+Alt+R / File 菜单）。** 名称、程序参数、工作目录、环境变量四个字段，存
+`<home>/run-configs.json`（跟着用户走，不跟着项目走）。其余（解释器、超时）仍来自语言 manifest。
+
+接通过程中发现这条链**三处断点**，全部修了：`RunRequest.args` 声明了但 `WorkspaceService.run()`
+不转发；`steps.ts` 不把参数拼进 argv；**Python 的 `bootstrap.py` 把 `sys.argv` 重置成
+`[source]`**——最后一处最隐蔽，前两处修完仍是空。实测：`args: ['--x','a b']` →
+`sys.argv[1:] == ['--x','a b']`，`env` 也可见。
+
+参数只加在最后一个可运行步骤上（`go build` 不会被塞用户参数）；`splitArgs()` 只处理引号，
+不做 glob/变量/操作符展开。
+
+`npm test` 185 → **190**（store 增删改、名字/语言校验、引号切分、env 解析、坏文件不崩）。
+
 **添加依赖（Ctrl+Alt+D / File 菜单）。** 按项目标记选命令（`cargo add` / `go get` / `uv add` /
 `npm install`），在项目目录里跑工具链自己的命令，原样展示输出。不解析 lock 文件、不改版本号——
 那是工具链的事；这里只解决「用哪个命令、在哪个目录」这两个最容易做错的决定。

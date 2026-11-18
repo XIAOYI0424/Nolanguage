@@ -48,6 +48,7 @@ import { LspManager } from '../lsp/manager/LspManager.js';
 import { scheduleLspUpgrade, startSlotLsp, waitForUpgrade } from '../langs/lspLaunch.js';
 import { UsageLog } from '../perf/usageLog.js';
 import { templatesFor } from '../langs/templateRegistry.js';
+import { RunConfigStore } from '../scaffold/runConfigs.js';
 import type { GenerateResult, TemplateSummary } from '../scaffold/types.js';
 import { ProfileManager, type ResourceProfile } from '../langs/ProfileManager.js';
 import {
@@ -190,6 +191,8 @@ export class WorkspaceService {
   readonly lspManager: LspManager;
   /** Long-term usage data (JSONL), kept apart from the rotating app log. */
   readonly usage: UsageLog;
+  /** Saved run configurations: per user, not per project. */
+  readonly runConfigs: RunConfigStore;
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
@@ -202,6 +205,7 @@ export class WorkspaceService {
     });
     this.factory = new RunnerFactory(defaultRuntimeRegistry());
     this.usage = new UsageLog({ home: this.registry.home, appVersion: kernel.appVersion, sessionId: kernel.sessionId });
+    this.runConfigs = new RunConfigStore(this.registry.home);
     this.lspManager = new LspManager({
       kernel,
       home: this.registry.home,
@@ -737,6 +741,12 @@ export class WorkspaceService {
       onStdinReady?: (sink: (data: string) => void) => void;
       /** Host cancellation, merged with the internal per-session controller. */
       signal?: AbortSignal;
+      /** Program arguments from a run configuration; appended to the program step. */
+      args?: string[];
+      /** Extra environment, merged over the plugin's own. */
+      env?: Record<string, string>;
+      /** Working directory override (a run configuration's "working directory"). */
+      cwd?: string;
     } = {},
   ): Promise<WorkspaceRunResult> {
     const slot = this.requireSlot(id);
@@ -776,6 +786,9 @@ export class WorkspaceService {
         onData: opts.onData,
         onStdinReady: opts.onStdinReady,
         signal: ctl.signal,
+        ...(opts.args?.length ? { args: opts.args } : {}),
+        ...(opts.env ? { env: opts.env } : {}),
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
       });
 
       return {
@@ -924,6 +937,11 @@ export class WorkspaceService {
    * shape as the navigation requests so "no server" stays distinguishable from
    * "nothing to change".
    */
+  /** Plugin home: where run configurations and other per-user state live. */
+  homeDir(): string {
+    return this.registry.home;
+  }
+
   /**
    * Where the user's project lives.
    *

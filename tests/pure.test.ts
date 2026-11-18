@@ -56,6 +56,7 @@ import { cachedVersion, toolchainSignature, versionCachePath } from '../src/lang
 import { windowUsable } from '../src/desktop/handshake';
 import { detectProjects } from '../src/scaffold/detect';
 import { planAdd } from '../src/scaffold/dependencies';
+import { parseEnv, RunConfigStore, splitArgs } from '../src/scaffold/runConfigs';
 import { TemplateRegistry } from '../src/scaffold/registry';
 import { safeRelativePath } from '../src/scaffold/types';
 import { judgeTtl, summarizeIdle } from '../src/lsp/ttlStats';
@@ -975,6 +976,51 @@ describe('scaffold · templates', () => {
     const [item] = reg.list();
     expect(item.available).toBe(false);
     expect(item.reason).toBe('network unreachable');
+  });
+});
+
+describe('scaffold · run configurations', () => {
+  it('saves, updates and deletes a configuration on disk', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-rc-'));
+    const store = new RunConfigStore(home);
+    const saved = store.save({ name: 'dev', language: 'python', args: '--port 8080' });
+    expect(saved.id).toMatch(/^rc-/);
+    expect(store.list()).toHaveLength(1);
+
+    store.save({ id: saved.id, name: 'dev2', language: 'python', args: '' });
+    expect(store.list()[0].name).toBe('dev2');
+    expect(store.list()).toHaveLength(1);
+
+    expect(store.remove(saved.id)).toBe(true);
+    expect(store.list()).toHaveLength(0);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('refuses a configuration without a name or language', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-rc2-'));
+    const store = new RunConfigStore(home);
+    expect(() => store.save({ language: 'python' })).toThrow(/名字/);
+    expect(() => store.save({ name: 'x' })).toThrow(/语言/);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('splits arguments on whitespace but respects quotes', () => {
+    expect(splitArgs('--port 8080')).toEqual(['--port', '8080']);
+    expect(splitArgs('--msg "two words" --x')).toEqual(['--msg', 'two words', '--x']);
+    expect(splitArgs("  a   b  ")).toEqual(['a', 'b']);
+    expect(splitArgs('')).toEqual([]);
+  });
+
+  it('parses KEY=VALUE lines and ignores comments and junk', () => {
+    const env = parseEnv('# comment\nA=1\nBAD KEY=2\nB = two words \n\n');
+    expect(env).toEqual({ A: '1', B: 'two words' });
+  });
+
+  it('treats a corrupt file as empty instead of failing to start', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-rc3-'));
+    writeFileSync(join(home, 'run-configs.json'), '{not json');
+    expect(new RunConfigStore(home).list()).toEqual([]);
+    rmSync(home, { recursive: true, force: true });
   });
 });
 

@@ -103,6 +103,9 @@ export class ReplSessionRunner implements Runner {
     const bootstrap = this.config.bootstrap ? join(this.ctx.pluginDir, this.config.bootstrap) : '';
     const [bin, ...baseArgs] = this.command;
     const argv = bootstrap && existsSync(bootstrap) ? [...baseArgs, bootstrap] : [...baseArgs, sourcePath];
+    // A run configuration's arguments belong to the program. With a bootstrap they
+    // land after it, which is exactly where `sys.argv[1:]` starts looking.
+    if (opts.args?.length) argv.push(...opts.args);
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,

@@ -1,7 +1,7 @@
 # 项目向导：manifest 声明模板，UI 不认识任何语言
 
 > 状态：P0 + 部分 P1 已实现（三栏、类型/语言/来源筛选、schema 表单、条件文件、目标目录校验、
-> 文件模板、导入现有项目、添加依赖）。外部 provider（Initializr / cookiecutter /
+> 文件模板、导入现有项目、添加依赖、运行配置）。外部 provider（Initializr / cookiecutter /
 > cargo-generate）尚未接入——它们的**形状**已经定好。
 
 ## 一、为什么是三栏
@@ -85,6 +85,25 @@ IDEA 的生成器是「左侧选类别，右侧配参数」。Nolanguage 多一�
 `<spec>` 在**任何进程启动之前**按白名单校验（`lodash`、`@scope/pkg@1.2`、`serde@1`、
 `github.com/x/y@v1`）；空白和 shell 元字符一律拒绝——命令虽然不走 shell，但「看起来像第二个
 参数」的输入不该有机会。失败不写盘：工具链失败时项目原样不动，输出原样展示。
+
+## 二点九、运行配置（Ctrl+Alt+R）
+
+四个字段：名称、程序参数、工作目录、环境变量。其余（解释器、超时、覆盖）都来自语言 manifest，
+再存一份只会变旧。配置存 `<home>/run-configs.json`——**跟着用户走，不跟着项目走**。
+
+接通过程里发现这条链有**三处断点**，都修了：
+
+1. `RunRequest.args` 早就声明了，但 `WorkspaceService.run()` 不接受、也不转发；
+2. `template` 运行时（Rust/Go/C 等）的 `steps.ts` 不把参数拼进 argv；
+3. **`builtin/python@1.0.0/bootstrap.py` 把 `sys.argv` 重置成 `[source]`**——参数被它吞掉，
+   而且这一处最隐蔽：前两处修完仍然是空。
+
+现在的行为（实测）：`args: ['--x', 'a b']` → 程序里 `sys.argv[1:] == ['--x', 'a b']`；
+`env: { NL_TEST: 'from-config' }` → `os.environ` 里可见。参数只加在**最后一个可运行步骤**上，
+构建步骤（`go build`）不会被塞进用户参数。
+
+`splitArgs()` 只处理引号，不做 glob/`$VAR`/操作符展开——一个会展开 `$(rm -rf ~)` 的"运行配置"
+是安全漏洞，不是功能。
 
 ## 三、代码分层
 

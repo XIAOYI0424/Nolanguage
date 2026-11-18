@@ -637,6 +637,25 @@ export async function main(
           break;
         }
 
+        // ---------- run configurations ----------
+        case 'runConfigsList':
+          reply({ kind: 'runConfigs', reqId: msg.reqId, items: workspace.runConfigs.list() });
+          break;
+
+        case 'runConfigsSave':
+          try {
+            const saved = workspace.runConfigs.save((msg.config && typeof msg.config === 'object' ? msg.config : {}) as Record<string, unknown>);
+            reply({ kind: 'runConfigs', reqId: msg.reqId, items: workspace.runConfigs.list(), saved });
+          } catch (err) {
+            reply({ kind: 'runConfigs', reqId: msg.reqId, items: workspace.runConfigs.list(), message: (err as Error).message, field: (err as { field?: string }).field ?? null });
+          }
+          break;
+
+        case 'runConfigsDelete':
+          workspace.runConfigs.remove(String(msg.id ?? ''));
+          reply({ kind: 'runConfigs', reqId: msg.reqId, items: workspace.runConfigs.list() });
+          break;
+
         // ---------- add a dependency ----------
         case 'depsAdd': {
           const dir = String(msg.dir ?? '') || workspace.projectRoot();

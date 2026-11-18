@@ -81,6 +81,7 @@ export class TemplateRunner implements Runner {
       onData: opts.onData,
       onStdinReady: opts.onStdinReady,
       signal: opts.signal,
+      ...(opts.args?.length ? { args: opts.args } : {}),
     });
   }
 

@@ -39,6 +39,13 @@ export interface StepRunInput {
   onStdinReady?: (sink: (data: string) => void) => void;
   /** Host cancellation, forwarded to every step's `capture`. */
   signal?: AbortSignal;
+  /**
+   * Extra argv for the *program* step — the last runnable one.
+   *
+   * A run configuration's arguments belong to the thing being run, not to the
+   * build step that precedes it (`go build` with `-v` is not what the user typed).
+   */
+  args?: string[];
 }
 
 /**
@@ -86,11 +93,15 @@ export async function runSteps(input: StepRunInput): Promise<RunOutcome> {
     };
   };
 
+  const runnable = plan.steps.filter((step) => isRunnableStep(step));
+  const programStep = runnable[runnable.length - 1];
   for (const step of plan.steps) {
     if (!isRunnableStep(step)) continue;
     const line = substitute(step.cmd, { ...vars, toolchain: input.ctx.toolchain });
     const argv = splitCommand(line);
     const command = argv.shift() ?? '';
+    // Arguments go on the program, never on a build step.
+    if (step === programStep && input.args?.length) argv.push(...input.args);
     log.info('Running step', { role: step.role, command, args: argv.join(' ') });
 
     const res = await capture(command, argv, {

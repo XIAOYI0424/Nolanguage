@@ -29,7 +29,10 @@ if not source:
     raise SystemExit(2)
 
 namespace = {"__name__": "__main__", "__file__": source}
-sys.argv = [source]
+# Keep the arguments the interpreter was given after the bootstrap: a run
+# configuration's args must reach the program, and `[source]` alone silently
+# dropped them. argv[0] is the bootstrap itself, so the rest is the user's.
+sys.argv = [source] + sys.argv[1:]
 
 if globals_path and os.path.exists(globals_path):
     try:

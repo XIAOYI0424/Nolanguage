@@ -607,3 +607,137 @@
       BRIDGE.send({ kind: 'fsList', path: '.' });
     }
   }
+
+  // -------------------------------------------------- run configurations
+  //
+  // Four fields, because they are the four that change what runs: name, program
+  // arguments, working directory, environment. Everything else already comes from
+  // the language manifest, and a second source for it would go stale.
+
+  var RC = { items: [], pick: null, name: '', args: '', cwd: '', env: '', error: '' };
+
+  function rcOpen() {
+    wizStyle();
+    RC.pick = null;
+    RC.name = '';
+    RC.args = '';
+    RC.cwd = '';
+    RC.env = '';
+    RC.error = '';
+    rcPaint();
+    BRIDGE.send({ kind: 'runConfigsList' });
+  }
+
+  function rcClose() {
+    var mask = $('nlRc');
+    if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+  }
+
+  function rcMine() {
+    return RC.items.filter(function (c) { return c.language === currentLang; });
+  }
+
+  function rcPaint() {
+    var mask = $('nlRc');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'nlRc';
+      mask.className = 'wiz-mask';
+      document.body.appendChild(mask);
+    }
+    var mine = rcMine();
+    var rows = '';
+    if (!mine.length) {
+      rows = '<div class="wiz-muted">' + esc(currentLang) + ' 还没有配置。填右边，点「保存」。</div>';
+    } else {
+      for (var i = 0; i < mine.length; i++) {
+        var c = mine[i];
+        var sel = RC.pick && RC.pick.id === c.id;
+        rows += '<div class="wiz-card' + (sel ? ' sel' : '') + '" data-rc="' + esc(c.id) + '">'
+          + '<b>' + esc(c.name) + '</b>'
+          + '<div class="wiz-muted">' + esc(c.args || '(无参数)') + (c.cwd ? ' · ' + esc(c.cwd) : '') + '</div>'
+          + '</div>';
+      }
+    }
+    mask.innerHTML = '<div class="wiz-box" style="width:min(860px,94vw);height:min(560px,86vh)">'
+      + '<div class="wiz-head"><span class="wiz-title">运行配置</span><span class="wiz-badge">' + esc(currentLang) + '</span><span class="wiz-muted">Ctrl+Alt+R</span></div>'
+      + '<div class="wiz-body" style="grid-template-columns:1fr 1.4fr">'
+      + '<div class="wiz-col"><div class="wiz-sec">已保存</div>' + rows + '</div>'
+      + '<div class="wiz-col">'
+      + '<div class="wiz-field"><label>名称</label><input type="text" id="rcName" value="' + esc(RC.name) + '" placeholder="例如 带参数运行"></div>'
+      + '<div class="wiz-field"><label>程序参数</label><input type="text" id="rcArgs" value="' + esc(RC.args) + '" placeholder="--port 8080 &quot;two words&quot;"></div>'
+      + '<div class="wiz-field"><label>工作目录</label><input type="text" id="rcCwd" value="' + esc(RC.cwd) + '" placeholder="留空 = 语言默认"></div>'
+      + '<div class="wiz-field"><label>环境变量（每行 KEY=VALUE）</label><textarea id="rcEnv" rows="4" style="width:100%;box-sizing:border-box;background:var(--input-bg,#1e1f22);color:inherit;border:1px solid var(--border);border-radius:4px;padding:4px 6px">' + esc(RC.env) + '</textarea></div>'
+      + (RC.error ? '<div class="wiz-hint">' + esc(RC.error) + '</div>' : '')
+      + '</div></div>'
+      + '<div class="wiz-foot">'
+      + '<button class="wiz-btn" id="rcCancel">关闭</button>'
+      + '<button class="wiz-btn" id="rcDelete"' + (RC.pick ? '' : ' disabled') + '>删除</button>'
+      + '<button class="wiz-btn" id="rcSave">保存</button>'
+      + '<button class="wiz-btn primary" id="rcRun">保存并运行</button>'
+      + '</div></div>';
+
+    mask.querySelectorAll('.wiz-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        var id = card.getAttribute('data-rc');
+        var cfg = RC.items.filter(function (c) { return c.id === id; })[0];
+        if (!cfg) return;
+        RC.pick = cfg;
+        RC.name = cfg.name;
+        RC.args = cfg.args || '';
+        RC.cwd = cfg.cwd || '';
+        RC.env = cfg.env || '';
+        rcPaint();
+      });
+    });
+    ['rcName', 'rcArgs', 'rcCwd', 'rcEnv'].forEach(function (id) {
+      var el = mask.querySelector('#' + id);
+      if (!el) return;
+      el.addEventListener('input', function () {
+        if (id === 'rcName') RC.name = el.value;
+        if (id === 'rcArgs') RC.args = el.value;
+        if (id === 'rcCwd') RC.cwd = el.value;
+        if (id === 'rcEnv') RC.env = el.value;
+      });
+    });
+    var cancel = mask.querySelector('#rcCancel');
+    if (cancel) cancel.addEventListener('click', rcClose);
+    var save = mask.querySelector('#rcSave');
+    if (save) save.addEventListener('click', function () { rcSave(false); });
+    var run = mask.querySelector('#rcRun');
+    if (run) run.addEventListener('click', function () { rcSave(true); });
+    var del = mask.querySelector('#rcDelete');
+    if (del) del.addEventListener('click', function () {
+      if (!RC.pick) return;
+      BRIDGE.send({ kind: 'runConfigsDelete', id: RC.pick.id });
+      RC.pick = null;
+    });
+  }
+
+  function rcSave(andRun) {
+    RC.error = '';
+    if (!RC.name.trim()) { RC.error = '配置需要一个名字'; rcPaint(); return; }
+    BRIDGE.send({
+      kind: 'runConfigsSave',
+      config: { id: RC.pick ? RC.pick.id : '', name: RC.name, language: currentLang, args: RC.args, cwd: RC.cwd, env: RC.env },
+    });
+    if (andRun) {
+      BRIDGE.send({
+        kind: 'run',
+        code: ta.value,
+        language: currentLang,
+        sessionId: 'pycharm',
+        args: RC.args,
+        env: RC.env,
+        cwd: RC.cwd,
+      });
+      toast('运行 ' + RC.name.trim());
+      rcClose();
+    }
+  }
+
+  function rcOnList(m) {
+    RC.items = Array.isArray(m.items) ? m.items : [];
+    if (m && m.message) RC.error = m.message;
+    rcPaint();
+  }

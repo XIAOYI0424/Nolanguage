@@ -8,6 +8,7 @@
  * Nothing here branches on a language: the run block, the debug adapter and its
  * launch template all come from the language plugin's manifest.
  */
+import { parseEnv, splitArgs } from '../../scaffold/runConfigs.js';
 import { exec as execCb, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -212,6 +213,11 @@ export async function handleRun(
     // Announce the run so the UI can show a busy state before the toolchain boots.
     const st = stateFor(client);
     reply({ kind: 'runStart', runId: `pending-${Date.now()}`, sessionId, language, mode });
+    // A run configuration's arguments and environment. Parsed here rather than in
+    // the UI so the CLI and the panel share one definition of "an argument".
+    const extraArgs = typeof msg.args === 'string' ? splitArgs(msg.args) : [];
+    const extraEnv = typeof msg.env === 'string' ? parseEnv(msg.env) : {};
+    const cwd = typeof msg.cwd === 'string' && msg.cwd.trim() ? msg.cwd.trim() : undefined;
     const result = await workspace.run(language, code, {
       sessionId,
       reset: msg.reset === true,
@@ -219,6 +225,9 @@ export async function handleRun(
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       onData: (stream, text) => reply({ kind: 'runOut', stream, text }),
       onStdinReady: (sink) => { st.runSink = sink; },
+      ...(extraArgs.length ? { args: extraArgs } : {}),
+      ...(Object.keys(extraEnv).length ? { env: extraEnv } : {}),
+      ...(cwd ? { cwd } : {}),
     });
     st.runSink = undefined;
     reply({

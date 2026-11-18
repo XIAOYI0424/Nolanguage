@@ -32,6 +32,7 @@
       { label: 'New Project from Template...', sc: 'Ctrl+Alt+N', act: function () { wizOpen(); } },
       { label: 'Open Project...', sc: 'Ctrl+Alt+O', act: function () { impOpen(); } },
       { label: 'Add Dependency...', sc: 'Ctrl+Alt+D', act: function () { depOpen(); } },
+      { label: 'Run Configuration...', sc: 'Ctrl+Alt+R', act: function () { rcOpen(); } },
       { sep: true },
       { label: 'Open...', sc: 'Ctrl+O', act: openNativeFile },
       { label: 'Open Folder...', act: openNativeFolder },

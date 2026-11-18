@@ -785,6 +785,9 @@
       case 'depResult':
         depOnResult(m);
         break;
+      case 'runConfigs':
+        rcOnList(m);
+        break;
       case 'templateGenerated':
         wizOnGenerated(m);
         break;
