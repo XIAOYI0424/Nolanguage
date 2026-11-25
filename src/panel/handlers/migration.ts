@@ -45,16 +45,18 @@ export function envToolchains(): Record<string, string> {
  */
 export async function handleInterpreters(
   workspace: WorkspaceService,
+  rootOf: () => string,
   msg: Record<string, unknown>,
   reply: (p: unknown) => void,
 ): Promise<void> {
   const language = asLanguage(msg.language, workspace);
   const pinned = workspace.toolchains()[language];
+  const root = rootOf();
   try {
     // The plugin's own rules win; the engine's table is only a fallback for
     // plugins written before `run.interpreters` existed.
     const declared = workspace.manifests().find((m) => m.id === language)?.run?.interpreters;
-    const candidates = await discoverInterpreters(workspace.root, language, {
+    const candidates = await discoverInterpreters(root, language, {
       spec: declared,
       sdkName: typeof msg.sdkName === 'string' && msg.sdkName ? msg.sdkName : undefined,
     });
@@ -72,7 +74,10 @@ export async function handleInterpreters(
     reply({
       kind: 'interpreters',
       language,
-      root: workspace.root,
+      root,
+      // Echoed so a background auto-match reply cannot open the picker UI.
+      requestId: msg.requestId,
+      auto: msg.auto === true,
       candidates,
       creates,
       active: picked?.path ?? null,
@@ -82,7 +87,9 @@ export async function handleInterpreters(
     reply({
       kind: 'interpreters',
       language,
-      root: workspace.root,
+      root,
+      requestId: msg.requestId,
+      auto: msg.auto === true,
       candidates: [],
       active: null,
       pinned: pinned ?? null,
@@ -116,7 +123,7 @@ export async function handleImportIdea(
   msg: Record<string, unknown>,
   reply: (p: unknown) => void,
 ): Promise<void> {
-  const root = typeof msg.root === 'string' && msg.root.trim() ? msg.root.trim() : workspace.root;
+  const root = typeof msg.root === 'string' && msg.root.trim() ? msg.root.trim() : workspace.projectRoot();
   try {
     const result = await importIdeaProject(root);
     reply({ kind: 'ideaImport', ...result });

@@ -276,7 +276,7 @@
       "0"
     ],
     "preLaunch": {
-      "cmd": "\"{toolchain}\" --edition 2021 -g -o \"{workdir}/nl_dbg{exe}\" \"{file}\"",
+      "argv": ["{toolchain}", "--edition", "2021", "-g", "-o", "{workdir}/nl_dbg{exe}", "{file}"],
       "timeoutMs": 120000
     },
     "launch": {

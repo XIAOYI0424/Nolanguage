@@ -34,7 +34,12 @@
     // Browser reload/print, and nothing else. Ctrl+Alt+R is the run-configuration
     // shortcut: swallowing every Ctrl+R made that key unreachable, because this
     // runs in the capture phase and stops propagation before the editor sees it.
-    if (k === 'f5' || (e.ctrlKey && !e.altKey && (k === 'r' || k === 'p'))) { e.preventDefault(); e.stopPropagation(); }
+    if (k === 'f5' || (e.ctrlKey && !e.altKey && (k === 'r' || k === 'p'))) {
+      e.preventDefault();
+      // F5 and Ctrl+Shift+R still have to reach the app's own handlers; only
+      // plain Ctrl+R / Ctrl+P are fully consumed as browser accelerators.
+      if (k !== 'f5' && !(e.shiftKey && k === 'r')) e.stopPropagation();
+    }
   }, true);
   document.addEventListener('submit', function (e) { e.preventDefault(); }, true);
 })();
@@ -70,6 +75,19 @@
     (root || document).querySelectorAll('[data-ic]').forEach(function (el) {
       el.innerHTML = ic(el.getAttribute('data-ic'), el.getAttribute('data-size') || 16);
     });
+  }
+  // File-type badge: a 16px square with the extension, never an icon-font glyph.
+  // The language stays generic here — the extension is the only thing a file
+  // name tells us, and the real language comes from the manifest/plugin.
+  function badgeHtml(name) {
+    var dot = String(name || '').lastIndexOf('.');
+    var ext = dot < 0 ? '' : String(name).slice(dot + 1).toLowerCase();
+    var map = { py:['py','py'], pyi:['py','py'], java:['ja','java'], md:['md','md'],
+      yaml:['ym','yaml'], yml:['ym','yaml'], xml:['xm','xml'], json:['js','json'],
+      js:['js','js'], ts:['ts','ts'], go:['go','go'], rs:['rs','rs'], c:['c','c'],
+      cpp:['cpp','cpp'], h:['h','h'], txt:['tx','generic'], toml:['to','generic'] };
+    var pair = map[ext] || [ext.slice(0, 2) || 'fi', 'generic'];
+    return '<span class="file-badge file-badge--' + pair[1] + '" title="' + esc(ext || 'file') + '">' + esc(pair[0]) + '</span>';
   }
 
   // ---------- i18n (built-in localization plugins) ----------

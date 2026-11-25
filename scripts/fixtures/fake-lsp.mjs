@@ -41,6 +41,8 @@ const HANG = new Set(argsOf('hang'));
 const DIE_ON = arg('die-on', '');
 /** Record the initialize params, so a test can prove options were forwarded. */
 const LOG_INIT = flag('log-init');
+/** Advertise no inlay support: the client must say why, not paint nothing. */
+const NO_INLAY = flag('no-inlay');
 
 if (LOG) writeFileSync(LOG, '');
 const log = (method) => {
@@ -85,6 +87,7 @@ function handle(msg) {
         // Advertised so the folding request goes out; the answer below contains
         // one degenerate span, which the client's normaliser must drop.
         foldingRangeProvider: true,
+        ...(NO_INLAY ? {} : { inlayHintProvider: true }),
         // Formatting is deliberately absent: the fallback path for it is
         // exercised by the client's own indenter.
         documentFormattingProvider: false,
@@ -190,6 +193,26 @@ function handle(msg) {
             },
           },
         },
+      ]);
+      return;
+    case 'textDocument/inlayHint':
+      if (HANG.has('textDocument/inlayHint')) return;
+      reply(msg.id, [
+        // Out of order on purpose: hints are painted per position and the
+        // normaliser sorts, otherwise a repaint would reorder siblings.
+        { position: { line: 7, character: 2 }, label: 'string' },
+        // Array label: the parts are joined, the location is dropped (a jump
+        // target cannot live in an inline label). kind 2 = parameter.
+        {
+          position: { line: 3, character: 9 },
+          label: [{ value: 'count: ' }, { value: 'int', location: { uri: 'file:///x', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } } }],
+          kind: 2,
+          paddingLeft: true,
+        },
+        { position: { line: 3, character: 4 }, label: 'int', kind: 1 },
+        // Malformed on purpose: no position, and an empty label.
+        { label: 'no position' },
+        { position: { line: 5, character: 0 }, label: '' },
       ]);
       return;
     case 'textDocument/foldingRange':

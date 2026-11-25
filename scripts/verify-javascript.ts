@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JsRunner } from '../src/js/JsRunner.js';
 import { WorkspaceService } from '../src/panel/WorkspaceService.js';
-import { defaultSample } from '../src/panel/samples.js';
+import { defaultSample } from '../src/assets/samples.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 /** The javascript plugin's manifest — the same one the workspace reads. */

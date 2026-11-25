@@ -42,6 +42,8 @@ import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { gunzipSync, inflateRawSync } from 'node:zlib';
+import { parseSha256, sha256File } from '../util/hash.js';
+import { decodeOutput } from '../util/encoding.js';
 
 /** What a source string looks like, decided without touching the network. */
 export type SourceKind = 'dir' | 'zip' | 'tar' | 'git' | 'url' | 'unknown';
@@ -66,6 +68,29 @@ export interface ResolveOptions {
   timeoutMs?: number;
   /** `git clone` timeout (default 120 s). */
   gitTimeoutMs?: number;
+  /** Maximum archive entries, directories included (default 5000). */
+  maxEntries?: number;
+  /** Maximum uncompressed bytes in one entry (default 64 MB). */
+  maxEntryBytes?: number;
+  /** Maximum total uncompressed bytes in an archive (default 256 MB). */
+  maxExpandedBytes?: number;
+  /**
+   * Explicit opt-in for a remote install with no published hash.
+   *
+   * Off by default: a direct URL is executable code from a network peer, so
+   * "no hash supplied" is a refusal, not a warning. A caller that deliberately
+   * accepts the risk (an internal mirror, a one-off fork) must say so.
+   */
+  allowUnverifiedRemote?: boolean;
+  /**
+   * Expected SHA-256 of the downloaded bytes (bare hex or `sha256:<hex>`).
+   *
+   * Only a download can be checked against a published hash: a local directory
+   * or a git clone is the user's own input. When set, the bytes are hashed
+   * *before* anything is unpacked, so a tampered archive never reaches the
+   * filesystem as plugin code.
+   */
+  expectSha256?: string;
 }
 
 /** A source problem, as opposed to a registry problem. */
@@ -77,9 +102,18 @@ export class SourceError extends Error {
 }
 
 const DEFAULT_MAX_BYTES = 200 * 1024 * 1024;
+const DEFAULT_MAX_ENTRIES = 5000;
+const DEFAULT_MAX_ENTRY_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_EXPANDED_BYTES = 256 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_GIT_TIMEOUT_MS = 120_000;
 const MAX_REDIRECTS = 5;
+
+interface ArchiveLimits {
+  maxEntries: number;
+  maxEntryBytes: number;
+  maxExpandedBytes: number;
+}
 
 /**
  * Classify a source string. Pure: no I/O beyond a `stat`, so it can be tested
@@ -121,6 +155,11 @@ export function classifySource(target: string): SourceKind {
  */
 export async function resolveSource(target: string, opts: ResolveOptions = {}): Promise<ResolvedSource> {
   const kind = classifySource(target);
+  const limits: ArchiveLimits = {
+    maxEntries: opts.maxEntries ?? DEFAULT_MAX_ENTRIES,
+    maxEntryBytes: opts.maxEntryBytes ?? DEFAULT_MAX_ENTRY_BYTES,
+    maxExpandedBytes: opts.maxExpandedBytes ?? DEFAULT_MAX_EXPANDED_BYTES,
+  };
 
   if (kind === 'dir') {
     const dir = resolve(target);
@@ -131,7 +170,7 @@ export async function resolveSource(target: string, opts: ResolveOptions = {}): 
   }
 
   if (kind === 'zip' || kind === 'tar') {
-    const dir = await unpackArchive(target, kind);
+    const dir = await unpackArchive(target, kind, limits);
     return finish(dir, target, kind);
   }
 
@@ -141,19 +180,27 @@ export async function resolveSource(target: string, opts: ResolveOptions = {}): 
   }
 
   if (kind === 'url') {
+    if (opts.expectSha256 === undefined && !opts.allowUnverifiedRemote) {
+      throw new SourceError(
+        'refusing a remote plugin with no sha256 — pass --sha256, or --allow-unverified to accept the risk explicitly',
+      );
+    }
     const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const { file, name } = await download(target, { maxBytes, timeoutMs });
+    // Verify before unpacking: the archive is about to become executable plugin
+    // code, and a mirror or a proxy is exactly what a hash protects against.
+    await verifyDownload(file, opts.expectSha256);
     // The name in the URL decides how to unpack; a bare URL with no extension
     // is refused rather than guessed at, because guessing means executing.
     const lower = name.toLowerCase();
     if (lower.endsWith('.zip')) {
-      const dir = await unpackArchive(file, 'zip');
+      const dir = await unpackArchive(file, 'zip', limits);
       await safeRm(file);
       return finish(dir, target, kind);
     }
     if (/\.(?:tar|tgz|tar\.gz|tar\.bz2)$/.test(lower)) {
-      const dir = await unpackArchive(file, 'tar');
+      const dir = await unpackArchive(file, 'tar', limits);
       await safeRm(file);
       return finish(dir, target, kind);
     }
@@ -182,6 +229,28 @@ async function safeRm(path: string): Promise<void> {
 }
 
 /**
+ * Hash a download and refuse it on a mismatch.
+ *
+ * Both the payload and the temp directory `download()` created are removed on
+ * failure, so a rejected archive leaves nothing behind for a later step to
+ * pick up by accident.
+ */
+async function verifyDownload(file: string, expect: string | undefined): Promise<void> {
+  if (expect === undefined) return;
+  const expected = parseSha256(expect);
+  if (!expected) {
+    await safeRm(dirname(file));
+    throw new SourceError('the expected sha256 is not 64 hex characters — refusing to install an unverifiable download');
+  }
+  const actual = sha256File(file);
+  if (actual === expected) return;
+  await safeRm(dirname(file));
+  throw new SourceError(
+    `hash mismatch: expected ${expected} but got ${actual ?? 'an unreadable file'} — the download was not installed`,
+  );
+}
+
+/**
  * Archives usually wrap everything in one folder. Accept a manifest at the root
  * or in a single top-level folder; anything else is reported, not guessed.
  */
@@ -205,7 +274,7 @@ async function finish(dir: string, origin: string, kind: SourceKind): Promise<Re
 
 // ---------------------------------------------------------------- archives
 
-async function unpackArchive(file: string, kind: 'zip' | 'tar'): Promise<string> {
+async function unpackArchive(file: string, kind: 'zip' | 'tar', limits: ArchiveLimits): Promise<string> {
   const dest = mkdtempSync(join(tmpdir(), 'nlg-lang-'));
   try {
     // Read through the cap first: an archive is untrusted input.
@@ -215,8 +284,11 @@ async function unpackArchive(file: string, kind: 'zip' | 'tar'): Promise<string>
       throw new SourceError(`archive is larger than the ${Math.round(maxBytes / 1024 / 1024)} MB limit`);
     }
     const raw = readFileSync(file);
-    const entries = kind === 'zip' ? parseZip(raw) : parseTar(untarMaybeGunzip(raw, file));
-    writeEntries(entries, dest);
+    const entries =
+      kind === 'zip'
+        ? parseZip(raw, limits)
+        : parseTar(untarMaybeGunzip(raw, file, limits.maxExpandedBytes), limits);
+    writeEntries(entries, dest, limits);
     return dest;
   } catch (err) {
     await safeRm(dest);
@@ -224,9 +296,20 @@ async function unpackArchive(file: string, kind: 'zip' | 'tar'): Promise<string>
   }
 }
 
-function untarMaybeGunzip(buf: Buffer, file: string): Buffer {
+function untarMaybeGunzip(buf: Buffer, file: string, maxExpandedBytes: number): Buffer {
   const lower = file.toLowerCase();
-  if (lower.endsWith('.gz') || lower.endsWith('.tgz')) return gunzipSync(buf);
+  // The decompression cap stops a tiny .gz from becoming gigabytes before the
+  // tar reader ever gets a chance to count entries.
+  if (lower.endsWith('.gz') || lower.endsWith('.tgz')) {
+    try {
+      return gunzipSync(buf, { maxOutputLength: maxExpandedBytes });
+    } catch (err) {
+      if (/larger than/i.test((err as Error).message)) {
+        throw new SourceError(`archive expands to more than ${maxExpandedBytes} bytes — refused`);
+      }
+      throw err;
+    }
+  }
   if (lower.endsWith('.bz2')) {
     throw new SourceError('.tar.bz2 is not supported — use .tar.gz or .zip');
   }
@@ -260,7 +343,20 @@ export function safeJoin(root: string, name: string): string | null {
   return out;
 }
 
-function writeEntries(entries: ArchiveEntry[], dest: string): void {
+function writeEntries(entries: ArchiveEntry[], dest: string, limits: ArchiveLimits): void {
+  if (entries.length > limits.maxEntries) {
+    throw new SourceError(`archive has ${entries.length} entries — limit is ${limits.maxEntries}`);
+  }
+  let total = 0;
+  for (const entry of entries) {
+    if (entry.data.length > limits.maxEntryBytes) {
+      throw new SourceError(`archive entry "${entry.name}" expands to ${entry.data.length} bytes — limit is ${limits.maxEntryBytes}`);
+    }
+    total += entry.data.length;
+    if (total > limits.maxExpandedBytes) {
+      throw new SourceError(`archive expands to more than ${limits.maxExpandedBytes} bytes — refused`);
+    }
+  }
   for (const entry of entries) {
     const target = safeJoin(dest, entry.name);
     if (!target) {
@@ -295,9 +391,11 @@ function mkdirSyncRecursive(dir: string): void {
 }
 
 /** Minimal tar reader: ustar, plus GNU long names and pax `path=`. */
-function parseTar(buf: Buffer): ArchiveEntry[] {
+function parseTar(buf: Buffer, limits: ArchiveLimits): ArchiveEntry[] {
   const out: ArchiveEntry[] = [];
   let offset = 0;
+  let headers = 0;
+  let expanded = 0;
   let longName: string | null = null;
   let paxPath: string | null = null;
 
@@ -311,6 +409,9 @@ function parseTar(buf: Buffer): ArchiveEntry[] {
       }
     }
     if (zero) break; // two zero blocks end the archive
+    if (++headers > limits.maxEntries) {
+      throw new SourceError(`archive has more than ${limits.maxEntries} entries — refused`);
+    }
 
     const field = (start: number, len: number): string => {
       const raw = header.subarray(start, start + len);
@@ -325,6 +426,13 @@ function parseTar(buf: Buffer): ArchiveEntry[] {
     const prefix = field(345, 155);
     if (prefix) name = `${prefix}/${name}`;
 
+    if (size > limits.maxEntryBytes) {
+      throw new SourceError(`archive entry "${name}" declares ${size} bytes — limit is ${limits.maxEntryBytes}`);
+    }
+    if (expanded + size > limits.maxExpandedBytes) {
+      throw new SourceError(`archive expands to more than ${limits.maxExpandedBytes} bytes — refused`);
+    }
+    expanded += size;
     const dataStart = offset + 512;
     const data = buf.subarray(dataStart, dataStart + size);
     const next = dataStart + Math.ceil(size / 512) * 512;
@@ -360,7 +468,7 @@ function parseTar(buf: Buffer): ArchiveEntry[] {
 }
 
 /** Minimal zip reader: central directory + stored(0)/deflate(8) entries. */
-function parseZip(buf: Buffer): ArchiveEntry[] {
+function parseZip(buf: Buffer, limits: ArchiveLimits): ArchiveEntry[] {
   const EOCD = 0x06054b50;
   const CENTRAL = 0x02014b50;
   const LOCAL = 0x04034b50;
@@ -376,7 +484,12 @@ function parseZip(buf: Buffer): ArchiveEntry[] {
   if (eocd < 0) throw new SourceError('not a zip archive (no end-of-central-directory record)');
 
   const count = buf.readUInt16LE(eocd + 10);
+  if (count > limits.maxEntries) {
+    throw new SourceError(`archive has ${count} entries — limit is ${limits.maxEntries}`);
+  }
   let ptr = buf.readUInt32LE(eocd + 16);
+  let expanded = 0;
+  let actual = 0;
   const out: ArchiveEntry[] = [];
 
   for (let i = 0; i < count; i++) {
@@ -395,6 +508,13 @@ function parseZip(buf: Buffer): ArchiveEntry[] {
     if (compressed === 0xffffffff || uncompressed === 0xffffffff) {
       throw new SourceError(`zip64 entry "${name}" is not supported`);
     }
+    if (uncompressed > limits.maxEntryBytes) {
+      throw new SourceError(`zip entry "${name}" declares ${uncompressed} bytes — limit is ${limits.maxEntryBytes}`);
+    }
+    if (expanded + uncompressed > limits.maxExpandedBytes) {
+      throw new SourceError(`archive expands to more than ${limits.maxExpandedBytes} bytes — refused`);
+    }
+    expanded += uncompressed;
     if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== LOCAL) {
       throw new SourceError(`malformed zip archive (bad local header for "${name}")`);
     }
@@ -408,7 +528,7 @@ function parseZip(buf: Buffer): ArchiveEntry[] {
       data = Buffer.from(raw);
     } else if (method === 8) {
       try {
-        data = inflateRawSync(raw);
+        data = inflateRawSync(raw, { maxOutputLength: limits.maxEntryBytes });
       } catch (err) {
         throw new SourceError(`could not inflate "${name}": ${(err as Error).message}`);
       }
@@ -416,6 +536,12 @@ function parseZip(buf: Buffer): ArchiveEntry[] {
       throw new SourceError(`unsupported compression method ${method} for "${name}"`);
     }
 
+    // The central-directory sizes are untrusted: check what inflate actually
+    // produced as well, so a lying header cannot bypass the total cap.
+    actual += data.length;
+    if (actual > limits.maxExpandedBytes) {
+      throw new SourceError(`archive expands to more than ${limits.maxExpandedBytes} bytes — refused`);
+    }
     out.push({ name, kind: name.endsWith('/') ? 'dir' : 'file', data });
     ptr += 46 + nameLen + extraLen + commentLen;
   }
@@ -523,7 +649,7 @@ function gitClone(url: string, timeoutMs: number): Promise<string> {
     });
     let err = '';
     child.stderr?.on('data', (c: Buffer) => {
-      if (err.length < 4096) err += c.toString('utf8');
+      if (err.length < 4096) err += decodeOutput(c);
     });
     let settled = false;
     const timer = setTimeout(() => {

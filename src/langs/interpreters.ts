@@ -15,7 +15,7 @@
  * plugin boundary intact.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, delimiter, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { probeVersion } from './discover.js';
 import type { EnvironmentCreateSpec, InterpretersSpec } from '../runtimes/types.js';
@@ -131,6 +131,10 @@ export interface DiscoverInterpretersOptions {
   maxProbe?: number;
   /** Whether a path is a file. Injected so tests need no real binaries. */
   isFile?: (p: string) => boolean;
+  /** How many parent folders may supply an environment (default: 4). */
+  envSearchUp?: number;
+  /** How deep below the opened folder environments are searched (default: 4). */
+  envSearchDown?: number;
   /**
    * The plugin's declared `run.interpreters`. Wins over the engine's fallback
    * table; absent means "use the table" (built-ins written before the field).
@@ -145,6 +149,104 @@ const KIND_ORDER: Record<InterpreterKind, number> = {
   'version-manager': 3,
   path: 4,
 };
+
+/**
+ * A workspace is not always a single project: a monorepo can keep the shared
+ * environment at its root while the folder you actually open is a subproject,
+ * and a subproject can equally carry its own `.venv`. Discovery therefore walks
+ * both ways — up to the nearest parents and down into shallow children — using
+ * only the plugin's declared environment names and marker.
+ *
+ * The bounds are policy, not language knowledge: nobody wants a picker that
+ * crawls an entire disk or a `node_modules` tree to answer one question.
+ */
+const ENV_SEARCH_UP = 4;
+const ENV_SEARCH_DOWN = 4;
+const ENV_SCAN_LIMIT = 1500;
+const ENV_SKIP_DIRS = new Set([
+  '.git', '.hg', '.svn', 'node_modules', 'bower_components', 'site-packages',
+  'dist', 'build', 'out', 'target', '__pycache__', '.pytest_cache',
+  '.mypy_cache', '.ruff_cache', '.tmp', 'coverage',
+]);
+
+interface EnvDirHit {
+  dir: string;
+  source: string;
+  /** 0 = opened folder, 1 = parent, 2 = child; then distance. */
+  rank: number;
+}
+
+function pathKey(p: string): string {
+  const abs = resolve(p);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+function relSource(root: string, dir: string): string {
+  const rel = relative(root, dir) || basename(dir);
+  return rel.split(sep).join('/');
+}
+
+/**
+ * Environment directories around `rootDir`, nearest first.
+ *
+ * Environment directories themselves are never descended into: a venv can be
+ * hundreds of megabytes, and its `site-packages` is not a place to look for
+ * another venv.
+ */
+function collectEnvDirs(
+  rootDir: string,
+  spec: InterpreterSpec,
+  upLimit = ENV_SEARCH_UP,
+  downLimit = ENV_SEARCH_DOWN,
+): EnvDirHit[] {
+  const root = resolve(rootDir);
+  const hits: EnvDirHit[] = [];
+  const seen = new Set<string>();
+  const add = (dir: string, source: string, rank: number): void => {
+    const key = pathKey(dir);
+    if (seen.has(key)) return;
+    seen.add(key);
+    hits.push({ dir, source, rank });
+  };
+
+  let current = root;
+  for (let up = 0; up <= upLimit; up++) {
+    for (const name of spec.envDirs) {
+      const dir = join(current, name);
+      add(dir, relSource(root, dir), up === 0 ? 0 : 100 + up);
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  let scanned = 0;
+  while (queue.length && scanned < ENV_SCAN_LIMIT) {
+    const item = queue.shift()!;
+    scanned++;
+    if (item.depth >= downLimit) continue;
+    let entries;
+    try {
+      entries = readdirSync(item.dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (spec.envDirs.indexOf(entry.name) !== -1) {
+        const dir = join(item.dir, entry.name);
+        add(dir, relSource(root, dir), 200 + item.depth + 1);
+        continue;
+      }
+      if (ENV_SKIP_DIRS.has(entry.name)) continue;
+      queue.push({ dir: join(item.dir, entry.name), depth: item.depth + 1 });
+    }
+  }
+
+  hits.sort((a, b) => a.rank - b.rank || a.source.localeCompare(b.source));
+  return hits;
+}
 
 function kindLabel(kind: InterpreterKind): string {
   switch (kind) {
@@ -195,6 +297,7 @@ export async function discoverInterpreters(
   const isFile = opts.isFile ?? ((p: string) => existsSync(p) && fileSize(p) > 0);
   const found: InterpreterCandidate[] = [];
   const seen = new Set<string>();
+  const envRank = new Map<string, number>();
 
   const add = (path: string, kind: InterpreterKind, source: string): void => {
     const key = process.platform === 'win32' ? path.toLowerCase() : path;
@@ -203,17 +306,24 @@ export async function discoverInterpreters(
     found.push({ path, label: '', kind, source });
   };
 
-  // 1. Project-local environments (`.venv`, `venv`, …). Without a marker file
-  // there is no way to tell an environment from an ordinary directory, so the
-  // whole step is skipped rather than treating every entry as one.
-  for (const dir of spec.marker ? spec.envDirs : []) {
-    const envDir = join(rootDir, dir);
-    if (!existsSync(join(envDir, spec.marker))) continue;
-    for (const bin of spec.envBins) {
-      const p = join(envDir, bin);
-      if (isFile(p)) {
-        add(p, 'venv', dir);
-        break;
+  // 1. Project environments — the opened folder, its parents and its shallow
+  // children. Without a marker there is no way to tell an environment from an
+  // ordinary directory, so the whole step is skipped rather than guessing.
+  if (spec.marker) {
+    for (const hit of collectEnvDirs(
+      rootDir,
+      spec,
+      opts.envSearchUp ?? ENV_SEARCH_UP,
+      opts.envSearchDown ?? ENV_SEARCH_DOWN,
+    )) {
+      if (!existsSync(join(hit.dir, spec.marker))) continue;
+      for (const bin of spec.envBins) {
+        const p = join(hit.dir, bin);
+        if (isFile(p)) {
+          add(p, 'venv', hit.source);
+          envRank.set(pathKey(p), hit.rank);
+          break;
+        }
       }
     }
   }
@@ -312,6 +422,11 @@ export async function discoverInterpreters(
   found.sort((a, b) => {
     if (a.sdkMatch !== b.sdkMatch) return a.sdkMatch ? -1 : 1;
     if (KIND_ORDER[a.kind] !== KIND_ORDER[b.kind]) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
+    if (a.kind === 'venv' && b.kind === 'venv') {
+      const ra = envRank.get(pathKey(a.path)) ?? Number.MAX_SAFE_INTEGER;
+      const rb = envRank.get(pathKey(b.path)) ?? Number.MAX_SAFE_INTEGER;
+      if (ra !== rb) return ra - rb;
+    }
     return a.path.localeCompare(b.path);
   });
   return found;
@@ -361,7 +476,9 @@ export function planEnvironment(o: PlanEnvironmentOptions): EnvironmentPlan {
   // The environment is part of the project, so a path that resolves outside it is
   // a mistake, not an advanced option: the runner and the language server both
   // assume the project root contains their environment.
-  if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('the environment must live inside the project');
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`the environment must live inside the project (${root})`);
+  }
 
   const version = (o.version ?? '').trim();
   if (spec.wantsVersion && !version) throw new Error(`provider "${provider}" needs a version (for example 3.12)`);

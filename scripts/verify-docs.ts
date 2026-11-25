@@ -58,26 +58,41 @@ const LIVE = [
   'docs/添加新语言指南.md',
   'docs/lsp-manager.md',
   'docs/project-wizard.md',
+  'docs/STATUS.md',
 ];
 
 /** A snapshot with a date. Allowed to be old, not allowed to be undated. */
 const DATED = [
   'CHANGELOG.md',
   '项目现状报告.md',
-  'docs/Tauri搁置说明.md',
-  'docs/环境与包管理方案评审.md',
-  'docs/新增语言与C-CMake评估.md',
-  'docs/系统评估_20261027.md',
-  'docs/评估_20261102.md',
-  'docs/评估_20261107.md',
-  'docs/评估_20261110.md',
-  'docs/LSP能力测试清单_20261114.md',
-  'docs/评估_20261115.md',
-  'docs/补全与依赖修复方案_20261115.md',
+  'docs/ai-panel-protocol.md',
+  'docs/测试方案_20261125.md',
+  'docs/安装版MCP_NeroSama_验收报告_20261125.md',
+];
+
+/**
+ * A document that describes a past state, kept for the reasoning rather than the
+ * facts. It must say when it was archived and what replaced it — an archived doc
+ * that still reads like current advice is how the evaluation reports went stale
+ * seven versions without anyone noticing.
+ */
+const ARCHIVED = [
+  'docs/archive/Tauri搁置说明.md',
+  'docs/archive/环境与包管理方案评审.md',
+  'docs/archive/新增语言与C-CMake评估.md',
+  'docs/archive/系统评估_20261027.md',
+  'docs/archive/评估_20261102.md',
+  'docs/archive/评估_20261107.md',
+  'docs/archive/评估_20261110.md',
+  'docs/archive/评估_20261115.md',
+  'docs/archive/LSP能力测试清单_20261114.md',
+  'docs/archive/补全与依赖修复方案_20261115.md',
+  'docs/archive/IDE差距评估_20261122.md',
 ];
 
 const live = new Set(LIVE);
 const dated = new Set(DATED);
+const archived = new Set(ARCHIVED);
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -85,8 +100,8 @@ const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 // failure, not a skip: otherwise deleting a live doc silences every check that
 // would have run against it. That is the same silent-skip trap this gate exists
 // to close, so it is closed here first.
-const absent = [...live, ...dated].filter((f) => !existsSync(join(ROOT, f)));
-const textOf = new Map([...live, ...dated].filter((f) => existsSync(join(ROOT, f))).map((f) => [f, read(f)]));
+const absent = [...live, ...dated, ...archived].filter((f) => !existsSync(join(ROOT, f)));
+const textOf = new Map([...live, ...dated, ...archived].filter((f) => existsSync(join(ROOT, f))).map((f) => [f, read(f)]));
 
 // --------------------------------------------------------------- D1 coverage
 
@@ -97,11 +112,19 @@ const textOf = new Map([...live, ...dated].filter((f) => existsSync(join(ROOT, f
   const docsMd = readdirSync(join(ROOT, 'docs'))
     .filter((n) => n.endsWith('.md'))
     .map((n) => `docs/${n}`);
-  const unclassified = [...rootMd, ...docsMd].filter((f) => !live.has(f) && !dated.has(f));
+  const archiveDir = join(ROOT, 'docs', 'archive');
+  const archiveMd = existsSync(archiveDir)
+    ? readdirSync(archiveDir)
+        .filter((n) => n.endsWith('.md'))
+        .map((n) => `docs/archive/${n}`)
+    : [];
+  const unclassified = [...rootMd, ...docsMd, ...archiveMd].filter(
+    (f) => !live.has(f) && !dated.has(f) && !archived.has(f),
+  );
   check(
     'docs: every markdown file is classified as live or dated',
     unclassified.length === 0,
-    unclassified.length ? `${unclassified.join(', ')} — add it to LIVE or DATED in scripts/verify-docs.ts` : `${live.size} live · ${dated.size} dated`,
+    unclassified.length ? `${unclassified.join(', ')} — add it to LIVE, DATED or ARCHIVED in scripts/verify-docs.ts` : `${live.size} live · ${dated.size} dated · ${archived.size} archived`,
   );
 }
 
@@ -270,10 +293,51 @@ function summaryIsStale(summaryPath: string): boolean {
   );
 }
 
+// ------------------------------------------------------- D10 archived documents
+
+{
+  const bad: string[] = [];
+  for (const [file, body] of textOf) {
+    if (!archived.has(file)) continue;
+    const date = /^>\s*归档于\s*(20\d\d-\d\d-\d\d)/m.exec(body)?.[1];
+    if (!date) bad.push(`${file} — no "> 归档于 YYYY-MM-DD" line`);
+    else if (!/\[STATUS\.md\]\(\.\.\/STATUS\.md\)/.test(body)) {
+      bad.push(`${file} — archived but does not point at ../STATUS.md`);
+    }
+  }
+  check(
+    'docs: every archived document states its archive date and its successor',
+    bad.length === 0,
+    bad.join(' · ') || `${archived.size} archived`,
+  );
+}
+
+{
+  // A live doc that names an archived file by its old path is telling a reader to
+  // open a snapshot as if it were current. The `docs/archive/` prefix is the only
+  // honest way to refer to one.
+  const stale: string[] = [];
+  const names = [...archived].map((f) => f.slice('docs/archive/'.length));
+  for (const [file, body] of textOf) {
+    // A dated snapshot may cite the path that was correct when it was written;
+    // rewriting its history would make the snapshot a lie. Live docs may not.
+    if (!live.has(file)) continue;
+    for (const name of names) {
+      const bare = new RegExp(`docs/${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-])`);
+      if (bare.test(body)) stale.push(`${file} → docs/${name}`);
+    }
+  }
+  check(
+    'docs: live docs point at archived snapshots through docs/archive/',
+    stale.length === 0,
+    stale.join(' · ') || 'ok',
+  );
+}
+
 // ------------------------------------------------------------------- verdict
 
 const passed = results.filter((r) => r.ok).length;
-console.log(`\n${passed}/${results.length} checks passed · ${live.size} live · ${dated.size} dated · ${relative(ROOT, join(ROOT, 'docs')).split('\\').join('/')}/`);
+console.log(`\n${passed}/${results.length} checks passed · ${live.size} live · ${dated.size} dated · ${archived.size} archived`);
 if (passed !== results.length) {
   for (const r of results) if (!r.ok) console.log(`  FAILED: ${r.name} ${r.detail}`);
   process.exitCode = 1;

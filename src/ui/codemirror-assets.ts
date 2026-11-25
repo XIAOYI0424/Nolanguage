@@ -53,7 +53,7 @@ const THEME_CSS = `
 #cmHost .CodeMirror-cursor { border-left:1px solid var(--accent); }
 #cmHost .CodeMirror-selected { background:var(--sel-bg, rgba(53,116,240,.22)); }
 #cmHost .CodeMirror-focused .CodeMirror-selected { background:var(--sel-bg, rgba(53,116,240,.22)); }
-#cmHost .CodeMirror-activeline-background { background:var(--bg-hover); }
+#cmHost .CodeMirror-activeline-background { background:var(--current-line); }
 #cmHost .CodeMirror-matchingbracket { color:var(--accent) !important; border-bottom:1px solid var(--accent); }
 #cmHost .CodeMirror-nonmatchingbracket { color:var(--error) !important; }
 #cmHost .cm-keyword { color:var(--syn-keyword); }

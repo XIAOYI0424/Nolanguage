@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
 import { ulid } from '../util/ulid.js';
+import { OutputDecoder, decodeOutput } from '../util/encoding.js';
 
 /**
  * `script-host` OS-level memory budget.
@@ -229,8 +230,10 @@ export class ScriptHostRunner implements Runner {
         opts.onData?.(isErr ? 'stderr' : 'stdout', line + '\n');
       };
 
+      const stdoutDecoder = new OutputDecoder();
+      const stderrDecoder = new OutputDecoder();
       child.stdout?.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString('utf8');
+        buffer += stdoutDecoder.push(chunk);
         let nl = buffer.indexOf('\n');
         while (nl >= 0) {
           handleLine(buffer.slice(0, nl), false);
@@ -238,7 +241,7 @@ export class ScriptHostRunner implements Runner {
           nl = buffer.indexOf('\n');
         }
       });
-      child.stderr?.on('data', (chunk: Buffer) => handleLine(chunk.toString('utf8').replace(/\r?\n$/, ''), true));
+      child.stderr?.on('data', (chunk: Buffer) => handleLine(stderrDecoder.push(chunk).replace(/\r?\n$/, ''), true));
       child.on('error', (err) => {
         clearTimeout(timer);
         stderr.push(`${err.message}\n`);
@@ -246,6 +249,9 @@ export class ScriptHostRunner implements Runner {
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        buffer += stdoutDecoder.flush();
+        const errTail = stderrDecoder.flush();
+        if (errTail) handleLine(errTail.replace(/\r?\n$/, ''), true);
         if (buffer.trim()) handleLine(buffer, false);
         done(code, timedOut);
       });

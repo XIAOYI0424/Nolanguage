@@ -22,7 +22,7 @@
  */
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   LspClient,
@@ -32,14 +32,14 @@ import {
   type LspLaunchSpec,
 } from '../lsp/LspClient.js';
 import { renderMarkdown, type MdFrontmatter, type MdHeading, type MdRenderResult, type MdStats } from '../markdown/MdRenderer.js';
-import { defaultSample, type LanguageId, type RunMode } from './samples.js';
+import { defaultSample, type LanguageId, type RunMode } from '../assets/samples.js';
 import { LanguageRegistry, type RegistryChange, type RegistryRoot } from '../langs/Registry.js';
 import { RunnerFactory } from '../langs/RunnerFactory.js';
 import { defaultRuntimeRegistry, runtimeSupportsArgs } from '../runtimes/index.js';
 import type { HostContext, Runner } from '../runtimes/types.js';
 import { resolveBundledFallback } from '../lsp/bundledFallback.js';
 import { setExtensionManifests } from '../langs/extensionIndex.js';
-import { unsupported, type CodeAction, type FoldingRange, type Location, type NavResult, type SignatureHelp, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
+import { unsupported, type CodeAction, type FoldingRange, type InlayHint, type Location, type NavResult, type SignatureHelp, type SymbolInformation, type TextEdit } from '../lsp/navigation.js';
 import { discoverBinary, type BinaryResolution } from '../langs/discover.js';
 import { cachedVersion } from '../langs/versionCache.js';
 import { resolveServer } from '../langs/serverInstall.js';
@@ -165,7 +165,12 @@ const SEVERITY_NAMES: Record<number, string> = {
 
 export class WorkspaceService {
   private slots = new Map<string, Slot>();
+  /** Temp directory holding the language buffers. Never the user's project. */
   private rootDir = '';
+  /** The folder the user is actually working in. */
+  private projectDir?: string;
+  /** Serialises `openFolder` repoints so two rapid folder changes cannot race. */
+  private rootChain: Promise<void> = Promise.resolve();
   private ready = false;
   private readonly opts: WorkspaceServiceOptions;
   private readonly registry: LanguageRegistry;
@@ -196,6 +201,7 @@ export class WorkspaceService {
 
   constructor(private kernel: Kernel, opts: WorkspaceServiceOptions = {}) {
     this.opts = opts;
+    this.projectDir = opts.projectDir;
     this.registry =
       opts.registry ??
       new LanguageRegistry({
@@ -463,7 +469,9 @@ export class WorkspaceService {
   private async syncManagerPlugins(): Promise<void> {
     const plugins = await buildManagerPlugins(this.registry, {
       home: this.registry.home,
-      workspaceRoot: this.rootDir || undefined,
+      // Project-root discovery must follow the opened folder, not the scratch
+      // directory where language buffers happen to live.
+      workspaceRoot: this.projectRoot() || undefined,
     });
     for (const plugin of plugins) this.lspManager.register(plugin);
     const wanted = new Set(plugins.map((p) => p.id));
@@ -509,15 +517,15 @@ export class WorkspaceService {
    *     updated its own state, and `scan()` emits `rescan` — which would call
    *     this method again, forever. (This bug shipped once; the symptom was a
    *     package that never finished enabling anything.)
-   *   - it does not react to `rescan`. A rescan means "the directory was read",
-   *     not "the language set changed"; `applyRegistryChange` is idempotent,
-   *     so there is nothing to do anyway.
+   *   - it does not trigger another scan. A `rescan` can absolutely change the
+   *     language set (opening a project with `.nolanguage/languages` is the
+   *     common case), so it is reconciled like any other change — but the
+   *     reconciliation itself never calls `scan()` again.
    */
   async applyRegistryChange(change: RegistryChange): Promise<{ added: string[]; removed: string[] }> {
     // The manager's routing table is built from the registry, so it has to see
     // the same change the slots are about to see.
     await this.syncManagerPlugins().catch(() => undefined);
-    if (change.type === 'rescan') return { added: [], removed: [] };
     if (this.syncing) return { added: [], removed: [] };
     this.syncing = true;
     try {      const wanted = new Set(this.registry.all().map((m) => m.id));
@@ -572,7 +580,7 @@ export class WorkspaceService {
     if (override) return { bin: override, source: 'override' };
     // The project root is where `.python-version` / `.nvmrc` / `go.mod` live;
     // discovery reads them to pick among already-installed toolchains.
-    return discoverBinary(manifest.run?.discovery, { root: this.rootDir || process.cwd() });
+    return discoverBinary(manifest.run?.discovery, { root: this.projectRoot() });
   }
 
   private async hostContext(manifest: LanguageManifest, toolchain: BinaryResolution): Promise<HostContext> {
@@ -747,6 +755,11 @@ export class WorkspaceService {
       env?: Record<string, string>;
       /** Working directory override (a run configuration's "working directory"). */
       cwd?: string;
+      /** Test selector substituted into `{filter}`; validated by the caller. */
+      filter?: string;
+      /** Project-mode classpath and entry class, validated by the caller. */
+      classpath?: string;
+      mainClass?: string;
     } = {},
   ): Promise<WorkspaceRunResult> {
     const slot = this.requireSlot(id);
@@ -803,6 +816,9 @@ export class WorkspaceService {
         ...(extraArgs?.length ? { args: extraArgs } : {}),
         ...(opts.env ? { env: opts.env } : {}),
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
+        ...(opts.filter ? { filter: opts.filter } : {}),
+        ...(opts.classpath !== undefined ? { classpath: opts.classpath } : {}),
+        ...(opts.mainClass !== undefined ? { mainClass: opts.mainClass } : {}),
       });
 
       return {
@@ -963,7 +979,33 @@ export class WorkspaceService {
    * and a project generated there disappears with the session.
    */
   projectRoot(): string {
-    return this.opts.projectDir ?? this.rootDir ?? process.cwd();
+    return this.projectDir ?? this.opts.projectDir ?? this.rootDir ?? process.cwd();
+  }
+
+  /**
+   * Repoint the project context after File > Open Folder.
+   *
+   * The registry's `project` plugin tier, toolchain discovery, templates and
+   * any host that asks `projectRoot()` must all see the same folder. The work
+   * is chained: two rapid folder switches have to finish in order, or the
+   * older scan can overwrite the newer one's language set.
+   */
+  setProjectRoot(dir: string): Promise<void> {
+    const next = resolve(dir);
+    this.projectDir = next;
+    this.opts.projectDir = next;
+    this.rootChain = this.rootChain
+      .then(async () => {
+        await this.registry.setProjectDir(next);
+        await this.pluginsSynced();
+      })
+      .catch((err: unknown) => {
+        this.kernel.logger.root().warn('Project context could not be fully applied', {
+          root: next,
+          error: (err as Error).message,
+        });
+      });
+    return this.rootChain;
   }
 
   /** Templates from every enabled manifest; the registry owns the rules. */
@@ -1020,6 +1062,18 @@ export class WorkspaceService {
   /** Foldable spans, for the editor's gutter. `unsupported` means "use braces". */
   async foldingRanges(id: LanguageId, code: string): Promise<NavResult<FoldingRange[]>> {
     return this.navRequest('foldingRange', id, code, (lsp, uri) => lsp.foldingRanges(uri));
+  }
+
+  /**
+   * Inline hints for `[fromLine, toLine]`, inclusive.
+   *
+   * Clamped here rather than in the client so a stale viewport can never ask a
+   * server for a negative range.
+   */
+  async inlayHints(id: LanguageId, code: string, fromLine: number, toLine: number): Promise<NavResult<InlayHint[]>> {
+    const from = Number.isFinite(fromLine) ? Math.max(0, Math.floor(fromLine)) : 0;
+    const to = Number.isFinite(toLine) ? Math.max(from, Math.floor(toLine)) : from;
+    return this.navRequest('inlayHint', id, code, (lsp, uri) => lsp.inlayHints(uri, from, to));
   }
 
   async definition(id: LanguageId, code: string, line: number, character: number): Promise<NavResult<Location[]>> {

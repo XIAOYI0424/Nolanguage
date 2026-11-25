@@ -58,7 +58,7 @@ nlg lang ls                         # 源码树里用 nlg（Windows: nlg.cmd）�
 | 命令 | 行为 |
 |---|---|
 | `lang ls` | 列出已安装插件（id / 版本 / kind / 启用 / 运行模式 / 扩展名） |
-| `lang add <目录\|zip\|tar.gz\|url\|git\|id>` | 安装并启用；`--strict` 在运行时依赖缺失时拒绝安装；裸 id 从插件索引解析 |
+| `lang add <目录\|zip\|tar.gz\|url\|git\|id>` | 安装并启用；`--strict` 在运行时依赖缺失时拒绝安装；远程安装默认要求 `--sha256`，裸 id 从插件索引解析 |
 | `lang search [query]` | 从插件索引检索（`--source <url>` 追加索引） |
 | `lang on <id>` / `off <id>` | 启用 / 禁用 |
 | `lang info <id>` | 单个插件全量信息 |
@@ -68,11 +68,15 @@ nlg lang ls                         # 源码树里用 nlg（Windows: nlg.cmd）�
 
 ```bash
 Nolanguage.exe lang add ./examples/cpp@1.0.0
-Nolanguage.exe lang add https://example.org/cpp.zip
+Nolanguage.exe lang add https://example.org/cpp.zip --sha256 <64位hex>
 Nolanguage.exe lang add https://github.com/someone/nolang-rust.git
 Nolanguage.exe lang search lsp
 Nolanguage.exe lang ls
 ```
+
+`http(s)` 下载默认要求可校验的 SHA-256：索引里的条目没有 hash 或你直接给 URL 时，安装会被拒绝并提示
+`--sha256 <hex>`。只有在你明确接受风险时（内部镜像、一次性 fork）才加 `--allow-unverified`；
+git URL 和本地目录不是下载物，不受这条约束。zip/tar 解压还有条目数、单条目与总展开字节上限。
 
 旧的 `lang-install` 脚本仍然可用，与上表共享同一套保证：
 
@@ -133,17 +137,55 @@ Nolanguage.exe --dump-plugins
 
 ```bash
 npm run ci:pure          # CI 快门：typecheck + 单测 + 纯逻辑套件（约 15 秒）
-npm run verify           # 53 套件（真进程，含打包 exe smoke + 打包 exe 的 MCP 面板 + 语言一致性门禁 + 池化语言服务管理器）；断言总数以本次输出为准
-npm test                 # vitest 单测（2 个文件 38 用例；丢了文件会失败）
+npm run verify           # 58 套件（真进程，含打包 exe smoke + 打包 exe 的 MCP 面板 + 语言一致性门禁 + 池化语言服务管理器）；断言总数以本次输出为准
+npm test                 # vitest 单测（套件与用例数由本次输出给出；丢了文件会失败）
 npm run typecheck        # tsc --noEmit，0 错误
 npm run verify:sidecar   # 校验 dist 与 Tauri sidecar 的 sha256 一致
 npm run verify:ui-live   # 可选：真浏览器（headless Edge + CDP）跑编辑器与导航按键；缺 Edge 则 SKIP
 ```
 
-`verify:ui-live` **不在** `verify` 的 49 套里：它需要 Edge、一个空闲端口和打包好的 exe，把无头浏览器设为必过项在 CI runner 上只会带来抖动。改动编辑器、键位或导航分片之后手动跑一次——jsdom 看不到 CodeMirror 拥有文档、真实焦点、真实按键这些最容易悄悄坏掉的部分。
+`verify:ui-live` **不在** `verify` 的 58 套里：它需要 Edge、一个空闲端口和打包好的 exe，把无头浏览器设为必过项在 CI runner 上只会带来抖动。改动编辑器、键位或导航分片之后手动跑一次——jsdom 看不到 CodeMirror 拥有文档、真实焦点、真实按键这些最容易悄悄坏掉的部分。
+
+几条门禁值得单独说明，因为它们守的是"看起来有、实际不生效"这类缺陷：
+
+| 门禁 | 守什么 |
+|---|---|
+| `verify:protocol` | 每条消息 kind 在引擎 `switch` 和页面 `handle(m)` 里都要有分支；漏接一端就报 `file:line` |
+| `verify:client` | 页面片段不能有反引号或 `${`，不能被执行字符串，不能重名声明，不能漏注册 |
+| `verify:perf` | 首页体积、冷启动、开机外网请求三条预算（本机实测：1.19 MB 原始 / 311 KB gzip / 冷启动约 0.8 s / 开机外网请求 0） |
+| `verify:panel-auth` | 非回环监听必须带 token；401、cookie、三种携带方式逐条验证 |
+| `verify:langsource` | 插件来源的 zip/tar 防逃逸、解压上限、无 hash 远程安装拒绝与显式放行 |
+| `verify:langparity` | 引擎层不许按语言名分支；脚手架生成的插件六个运行模式都能加载 |
 
 CI（`.github/workflows/ci.yml`）把上述全部当作阻塞闸门，另外会构建 NSIS 安装包、静默安装并探测 `/health`。
 每个步骤都是一个 npm 脚本，所以 `npm run ci:pure` 在本机跑的就是 CI 快门；`npm run verify:ci` 检查 workflow 里每个命令都真实存在。
+
+## 和 PyCharm / VS Code 差在哪
+
+写这张表不是为了排名，是为了让"这个项目能做到什么"有一个诚实的边界。✅ = 现在可用且有门禁；
+⚠️ = 可用但受上游能力或实现范围限制；❌ = 明确不做（理由见下一节）。
+
+| 能力 | 本项目 | PyCharm | VS Code | 说明 |
+|---|---|---|---|---|
+| 多语言运行 | ✅ 五种运行模式 | ⚠️ 按解释器/插件 | ✅ 靠 tasks/扩展 | 引擎只认 manifest，不认语言名 |
+| 补全 / 悬停 / 跳转 / 引用 / 重命名 / 格式化 / 折叠 / 内联提示 | ✅ | ✅ | ✅ | 能力由语言服务器声明，未声明时如实说 `does not advertise`，不静默失败 |
+| 测试树（单用例重跑、失败跳行） | ✅ Go | ✅ | ✅ 扩展 | 其他语言目前按纯输出处理，树只对声明了 `testFormat` 的格式生效 |
+| 断点调试（DAP） | ✅ Python / Go | ✅ | ✅ | 通过 `debugpy` / `delve` |
+| 重构（Extract / Move / Change Signature） | ⚠️ 重命名走服务器返回的编辑；Extract / Move / Change Signature 明确不做 | ✅ 内建 | ⚠️ 扩展 | 跨文件 WorkspaceEdit 先校验全部目标，再原子替换并按需回滚；未保存缓冲区会拒绝整批 |
+| 终端 | ⚠️ 命令面板（一次命令一次 `spawn`） | ✅ 真 PTY | ✅ 真 PTY | 无交互式程序、无作业控制；不要当 vim 用 |
+| 工作区 | ⚠️ 单根 | ✅ 多根 | ✅ 多根 | 每个窗口有独立项目根；`openFolder` 后解释器、依赖、模板与调试路径同步换根 |
+| 多光标 | ❌ | ✅ | ✅ | CodeMirror 5 的限制，换编辑器是重写级工作 |
+| 覆盖率 | ⚠️ Python | ✅ | ⚠️ 扩展 | 其他语言要各写 instrumentation |
+| MCP | ⚠️ stdio | — | ⚠️ 扩展 | 无 HTTP/SSE transport |
+| 插件市场 | ⚠️ 索引 + `sha256` | ✅ | ✅ | 远程安装默认要求 hash，无 hash 需显式放行；**没有签名**：hash 只保证下载物与索引一致 |
+| AI 助手 | ⚠️ 单轮流式 | ✅ | ✅ | 无会话历史、无代码库索引、无工具调用 |
+
+## 不打算做的事
+
+写下来是为了不再反复讨论，也为了不让"待补"列表无限增长：多光标、多根工作区、PTY 终端、
+非 stdio 的 MCP、非 Python 的覆盖率、语义级"删除未使用 import"、脚手架期间联网拉依赖、
+插件签名链。前六项受实现选择限制（编辑器版本、单根模型、传输层），后两项需要信任根，
+在没有密钥体系之前做了也只是装饰。
 
 ## 安装包
 
@@ -176,8 +218,12 @@ npm run tauri -- build --bundles nsis            # → src-tauri/target/release/
 
 ## 文档
 
-- `逻辑文档/` — 架构、项目框架、安装与语言支持现状、项目评估
-- `docs/` — 架构契约（`ARCHITECTURE.md`）、插件作者指南（`添加新语言指南.md` 等）、按日期归档的评估
+- `docs/STATUS.md` — **现状**：能做什么、缺什么、明确的非目标；每条能力对应的门禁
+- `docs/ARCHITECTURE.md` — 分层与预算契约（数字由 `verify:arch` 校验，抄错会失败）
+- `docs/添加新语言指南.md` — 一门语言 = 一个目录 + 一份 manifest；先跑 `npm run scaffold:lang`
+- `docs/lsp-manager.md`、`docs/project-wizard.md`、`docs/ai-panel-protocol.md` — 语言服务管理器、项目向导、AI 面板协议
+- `docs/archive/` — 历史评估，每份都带归档日期，**不再更新**
+- `逻辑文档/` — 早期架构与设计记录
 - `installer/README.md` — 安装器与卸载路径
 
 ## 依赖

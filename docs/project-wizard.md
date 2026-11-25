@@ -99,6 +99,20 @@ Gradle 与 Maven **没有** `add dependency` 命令——它们的依赖声明�
 `github.com/x/y@v1`、`com.example:core:1.2.3`）；空白和 shell 元字符一律拒绝——命令虽然不走 shell，但「看起来像第二个
 参数」的输入不该有机会。失败不写盘：工具链失败时项目原样不动，输出原样展示。
 
+### 二点八点一、从路径安装
+
+Packages 面板另有 `From Path…`：装的是工作区里的一份 checkout（`pip install -e ./pkg`），
+而不是注册表里的名字。两种命令形状不同——`-e` 这类标志要排在路径**前面**，且没有版本号要解析——
+所以差异写在插件 manifest（`dependencies.local`，按 kind 声明 `args` / `label`），引擎里没有
+`if (pm === 'pip')`。Python 插件声明了 `editable`（`-e`）与 `file`（wheel/sdist）两种。
+
+对话框的选项直接来自依赖报告的 `installLocal`，一个没声明 `local` 的语言根本不会出现这个按钮：
+**有哪些 kind 是插件的事，UI 不认识任何一种**。协议里用 `installKind` 而非 `kind` 传 kind（`kind`
+是协议自身的判别字段）。路径在 spawn 之前校验：必须在项目内、必须存在，绝对/相对路径都按
+`resolve(root, path)` 归一后再检查边界——装一个下次 checkout 拿不到的东西没有意义。清单里的
+`local` 必须有配套的 `install` 命令，且 `args` 是字符串数组、`label` 非空，否则 `validateManifest`
+在装载时就拒绝。
+
 ## 二点九、运行配置（Ctrl+Alt+R）
 
 四个字段：名称、程序参数、工作目录、环境变量。其余（解释器、超时、覆盖）都来自语言 manifest，
@@ -201,13 +215,16 @@ Gradle 与 Maven **没有** `add dependency` 命令——它们的依赖声明�
 
 | 层 | 位置 |
 |---|---|
-| 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出、文件模板只写一个文件；Gradle/Maven 坐标编辑与六种同步计划 |
-| 端到端 | CDP 冒烟：Ctrl+Alt+N → 选卡片 → 创建 → 文件出现在工作区；文件模式 7 张卡片筛到 3 张，生成 `main_test.go`；Ctrl+Alt+O 打开项目；Ctrl+Alt+D 识别 `cargo add` 并拒绝非法 spec |
+| 单元 | `tests/pure.test.ts`：展开、条件文件、pattern、非空目录、路径逃逸、不可用模板仍列出、文件模板只写一个文件；Gradle/Maven 坐标编辑与六种同步计划；从路径安装的参数顺序、项目边界与 manifest 校验 |
+| 端到端 | CDP 冒烟：Ctrl+Alt+N → 选卡片 → 创建 → 文件出现在工作区；文件模式 7 张卡片筛到 3 张，生成 `main_test.go`；Ctrl+Alt+O 打开项目；Ctrl+Alt+D 识别 `cargo add` 并拒绝非法 spec；`verify:ui` 覆盖 From Path 对话框按报告给出 kind、发送路径而非包名 |
 | 插件门禁 | `verify:langplugins`：把每个已发布模板按默认参数真生成一遍，断言无未解析 `{{key}}`、框架关键文件存在；同时校验无 LSP 插件的模板声明 |
+| 外部项目实测 | `npm run verify:workspace-env` 启动真实面板，打开 `D:/15936/Documents/NeroSama`，用 `openFolder`、`interpreters`、`setInterpreter`、`dependencyInstall`、`run` 完成 `.venv` 选择、子项目发现父级环境与依赖安装；脚本位于 `scripts/verify-workspace-env.ts` |
 | 架构 | `scaffold` 层 = 3，只能被更高层引用 |
 
 ## 七、还没做
 
 - 外部 provider 的 `availability()`（检查命令/网络）与真正的 `generate()` 调用；
 - 依赖多选的分组 UI（schema 已支持 `options[].group`，UI 目前平铺）；
-- 「在工作区内新建子项目」与「新建工作区」的模式切换（现在统一用工作区根 + 子目录）。
+- 「在工作区内新建子项目」与「新建工作区」的模式切换（现在统一用工作区根 + 子目录）；
+- `envCreate` 仍以启动时的 workspace 根为边界；`openFolder` 之后的解释器发现已经跟随资源管理器，
+  并会向父目录与浅层子目录查找环境，见 `scripts/verify-workspace-env.ts`。

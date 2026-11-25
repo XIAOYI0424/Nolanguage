@@ -46,3 +46,7 @@ tmp/
 .codebudy/
 .obsidian/
 .cargo/config.toml
+
+# Python bytecode caches created by probes and debug fixtures.
+__pycache__/
+*.pyc

@@ -70,8 +70,9 @@ function makePipe(): Pipe {
  */
 class FakeConn extends EventEmitter {
   sent: string[] = [];
+  closed = 0;
   send(text: string): void { this.sent.push(text); }
-  close(): void { this.emit('close'); }
+  close(): void { this.closed++; this.emit('close'); }
   /** Deliver an inbound frame the way the real connection does. */
   frame(text: string): void { this.emit('message', text); }
 }
@@ -132,6 +133,8 @@ function compareTransports(): void {
   let threw = false;
   try { t.send({ kind: 'ping' }); } catch { threw = true; }
   check('transport: a dead peer never throws from send', !threw);
+  check('transport: a broken write closes the dead connection', dead.closed === 1,
+    `close() calls=${dead.closed}`);
 
   const brokenPipe = makePipe();
   brokenPipe.toPeer.destroy(new Error('pipe gone'));

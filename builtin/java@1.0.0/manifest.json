@@ -354,6 +354,15 @@
             "cmd": "\"{toolchain}\" \"{file}\""
           }
         ]
+      },
+      "project": {
+        "timeoutMs": 180000,
+        "steps": [
+          {
+            "role": "run",
+            "cmd": "\"{toolchain}\" -cp \"{classpath}\" {mainClass}"
+          }
+        ]
       }
     }
   }

@@ -38,13 +38,15 @@ export const PYCHARM_SHELL = `
       <button class="tbtn primary" id="runBtn" title="Run 'main'  (Shift+F10)" data-i18n-title="toolbar.Run"><span class="ic" data-ic="run" data-size="16"></span><span data-i18n="toolbar.Run">Run</span></button>
       <button class="tbtn" id="testBtn" hidden title="Run the test entry point  (Ctrl+Shift+F10)"><span class="ic" data-ic="check" data-size="16"></span><span>Test</span></button>
       <button class="tbtn" id="debugBtn" title="Debug 'main'  (Shift+F9)" data-i18n-title="toolbar.Debug"><span class="ic" data-ic="debug" data-size="16"></span><span data-i18n="toolbar.Debug">Debug</span></button>
-      <button class="tbtn iconly" id="covBtn" title="Run with coverage" data-i18n-title="toolbar.Coverage"><span class="ic" data-ic="coverage" data-size="16"></span></button>
       <button class="tbtn iconly" id="stopBtn" title="Stop" data-i18n-title="toolbar.Stop"><span class="ic" data-ic="stop" data-size="16"></span></button>
+      <button class="tbtn iconly" id="buildBtn" title="Build / Check current file"><span class="ic" data-ic="build" data-size="16"></span></button>
+      <button class="tbtn iconly" id="covBtn" title="Run with coverage" data-i18n-title="toolbar.Coverage"><span class="ic" data-ic="coverage" data-size="16"></span></button>
     </div>
     <span class="spacer"></span>
     <button class="tbtn iconly" id="mdPrevBtn" title="Markdown Preview  (Alt+P)" data-i18n-title="toolbar.Preview"><span class="ic" data-ic="file" data-size="16"></span></button>
-    <button class="tbtn iconly" id="searchBtn" title="Search Everywhere  (double Shift)" data-i18n-title="toolbar.Search"><span class="ic" data-ic="search" data-size="16"></span></button>
-    <button class="tbtn iconly" id="themeBtn" title="Toggle theme" data-i18n-title="toolbar.Theme"><span class="ic" data-ic="ai" data-size="16"></span></button>
+    <button class="tbtn toolbar__search" id="searchBtn" title="Search Everywhere  (Ctrl+K / double Shift)" data-i18n-title="toolbar.Search"><span class="ic" data-ic="search" data-size="16"></span><span class="lbl">Search Everywhere</span><span class="kbd">Ctrl K</span></button>
+    <button class="tbtn iconly" id="assistantToggle" title="Toggle AI Assistant"><span class="assistant-mark">AI</span></button>
+    <button class="tbtn iconly" id="themeBtn" title="Toggle theme" data-i18n-title="toolbar.Theme"><span class="ic theme-glyph theme-glyph-sun" data-ic="sun" data-size="16"></span><span class="ic theme-glyph theme-glyph-moon" data-ic="moon" data-size="16"></span></button>
     <button class="tbtn iconly" id="settingsBtn" title="Settings  (Ctrl+Alt+S)" data-i18n-title="toolbar.Settings"><span class="ic" data-ic="settings" data-size="16"></span></button>
   </div>
 
@@ -53,6 +55,8 @@ export const PYCHARM_SHELL = `
     <div class="strip" id="strip"></div>
     <div class="panel hidden" id="leftPanel">
       <div class="tw-head">
+        <button class="tw-tab is-active" data-project-view="project">Project</button>
+        <button class="tw-tab" data-project-view="structure">Structure</button>
         <span class="title" id="panelTitle">Project</span>
         <button class="tbtn" id="collapseBtn" title="Collapse all"><span class="ic" data-ic="collapse" data-size="16"></span></button>
         <button class="tbtn" id="newBtn" title="New file in project root">+</button>
@@ -63,8 +67,10 @@ export const PYCHARM_SHELL = `
       </div>
       <div class="tw-body" id="panelBody" data-ctx="panel"></div>
     </div>
+    <div class="ide-splitter ide-splitter-v" id="leftResize" role="separator" aria-orientation="vertical" aria-label="Resize Project tool window" aria-valuemin="176" aria-valuemax="480" tabindex="0"></div>
     <div class="center">
       <div class="etabs" id="etabs" data-ctx="tab"></div>
+      <div class="breadcrumbs" id="breadcrumbs" data-ctx="breadcrumbs"></div>
       <div class="edwrap" data-ctx="editor">
         <div class="gutter" id="gutter"><div class="glines" id="glines"></div></div>
         <div class="codewrap">
@@ -91,6 +97,7 @@ export const PYCHARM_SHELL = `
             <div class="mdhtml" id="mdHtml"></div>
           </div>
         </div>
+        <div class="minimap" id="minimap" title="Click to scroll · viewport follows the editor"><div class="minimap__lines" id="minimapLines"></div><div class="minimap__viewport" id="minimapViewport"></div></div>
         <div class="cmp" id="cmp"></div>
         <div class="hover-tip" id="hoverTip"></div>
       </div>
@@ -101,7 +108,21 @@ export const PYCHARM_SHELL = `
         </div>
         <div class="dock-body" id="dockBody"></div>
       </div>
+      <div class="dock-resizer" id="dockResize" role="separator" aria-orientation="horizontal" aria-label="Resize bottom tool window" aria-valuemin="120" aria-valuemax="560" tabindex="0"></div>
     </div>
+    <div class="ide-splitter ide-splitter-v hidden" id="rightResize" role="separator" aria-orientation="vertical" aria-label="Resize AI Assistant" aria-valuemin="210" aria-valuemax="390" tabindex="0"></div>
+    <aside class="assistant-drawer hidden" id="assistantPanel" aria-label="AI Assistant">
+      <div class="assistant-head">
+        <span class="assistant-mark">AI</span><span class="assistant-title" id="assistantTitle">AI Assistant</span>
+        <span class="grow"></span>
+        <button class="tbtn iconly" id="assistantClose" title="Hide AI Assistant"><span class="ic" data-ic="close" data-size="14"></span></button>
+      </div>
+      <div class="assistant-messages" id="assistantMessages"></div>
+      <div class="assistant-compose" id="assistantForm">
+        <input class="assistant-input" id="assistantInput" placeholder="Ask about this project" autocomplete="off" spellcheck="false" aria-label="Ask the AI Assistant" />
+        <button class="assistant-send" type="button" title="Send" aria-label="Send message"><span class="ic" data-ic="send" data-size="16"></span></button>
+      </div>
+    </aside>
   </div>
 
   <!-- status bar -->
@@ -134,6 +155,7 @@ export const PYCHARM_SHELL = `
   <div class="mtop"><span class="ic" data-ic="search" data-size="18"></span><input id="searchInput" placeholder="Search Everything (files, symbols, actions)…" /><button class="tbtn iconly" id="searchClose"><span class="ic" data-ic="close" data-size="16"></span></button></div>
   <div class="chips" id="searchChips">
     <button class="chip on" data-tab="all">All</button>
+    <button class="chip" data-tab="classes">Classes</button>
     <button class="chip" data-tab="files">Files</button>
     <button class="chip" data-tab="symbols">Symbols</button>
     <button class="chip" data-tab="actions">Actions</button>

@@ -467,7 +467,7 @@
       }
     }
     mask.innerHTML = '<div class="wiz-box" style="height:min(520px,80vh)">'
-      + '<div class="wiz-head"><span class="wiz-title">打开项目</span><span class="wiz-muted">Ctrl+Alt+O</span></div>'
+      + '<div class="wiz-head"><span class="wiz-title">打开项目</span><span class="wiz-muted">Ctrl+Alt+Shift+O</span></div>'
       + '<div class="wiz-body" style="grid-template-columns:1fr">'
       + '<div class="wiz-col">'
       + '<div class="wiz-sec">目录</div>'
@@ -502,7 +502,7 @@
 
   function impOpenProject(dir) {
     if (!dir) return;
-    BRIDGE.send({ kind: 'openFolder', path: dir });
+    openProject(dir);
     toast('已切换到 ' + dir);
     impClose();
   }
@@ -620,19 +620,23 @@
 
   // -------------------------------------------------- run configurations
   //
-  // Four fields, because they are the four that change what runs: name, program
-  // arguments, working directory, environment. Everything else already comes from
-  // the language manifest, and a second source for it would go stale.
+  // The fields that change what runs: name, mode, arguments, working directory,
+  // environment, and — for a multi-module project — classpath plus entry class.
+  // The command itself still comes from the language manifest; a project mode
+  // just fills in the two placeholders the plugin declared.
 
-  var RC = { items: [], pick: null, name: '', args: '', cwd: '', env: '', error: '' };
+  var RC = { items: [], pick: null, name: '', mode: 'run', args: '', cwd: '', env: '', classpath: '', mainClass: '', error: '' };
 
   function rcOpen() {
     wizStyle();
     RC.pick = null;
     RC.name = '';
+    RC.mode = 'run';
     RC.args = '';
     RC.cwd = '';
     RC.env = '';
+    RC.classpath = '';
+    RC.mainClass = '';
     RC.error = '';
     rcPaint();
     BRIDGE.send({ kind: 'runConfigsList' });
@@ -672,7 +676,8 @@
         var sel = RC.pick && RC.pick.id === c.id;
         rows += '<div class="wiz-card' + (sel ? ' sel' : '') + '" data-rc="' + esc(c.id) + '">'
           + '<b>' + esc(c.name) + '</b>'
-          + '<div class="wiz-muted">' + esc(c.args || '(无参数)') + (c.cwd ? ' · ' + esc(c.cwd) : '') + '</div>'
+          + '<div class="wiz-muted">' + esc(c.mode || 'run') + ' · ' + esc(c.args || '(无参数)') + (c.cwd ? ' · ' + esc(c.cwd) : '') + '</div>'
+          + (c.mode === 'project' ? '<div class="wiz-muted">' + esc(c.mainClass || '(无入口类)') + '</div>' : '')
           + '</div>';
       }
     }
@@ -682,6 +687,15 @@
       + '<div class="wiz-col"><div class="wiz-sec">已保存</div>' + rows + '</div>'
       + '<div class="wiz-col">'
       + '<div class="wiz-field"><label>名称</label><input type="text" id="rcName" value="' + esc(RC.name) + '" placeholder="例如 带参数运行"></div>'
+      + '<div class="wiz-field"><label>模式</label><select id="rcMode" style="width:100%;box-sizing:border-box;background:var(--input-bg,#1e1f22);color:inherit;border:1px solid var(--border);border-radius:4px;padding:4px 6px">'
+      + '<option value="run"' + (RC.mode === 'run' ? ' selected' : '') + '>运行（清单默认）</option>'
+      + '<option value="test"' + (RC.mode === 'test' ? ' selected' : '') + '>测试（清单 test 模式）</option>'
+      + '<option value="project"' + (RC.mode === 'project' ? ' selected' : '') + '>项目（清单 project 模式）</option>'
+      + '</select></div>'
+      + (RC.mode === 'project'
+        ? '<div class="wiz-field"><label>Classpath（; 分隔，支持 *）</label><input type="text" id="rcClasspath" value="' + esc(RC.classpath) + '" placeholder="D:\\repo\\module\\target\\classes;D:\\repo\\lib\\*"></div>'
+          + '<div class="wiz-field"><label>入口类</label><input type="text" id="rcMainClass" value="' + esc(RC.mainClass) + '" placeholder="com.example.app.Application"></div>'
+        : '')
       + (argsOk
         ? '<div class="wiz-field"><label>程序参数</label><input type="text" id="rcArgs" value="' + esc(RC.args) + '" placeholder="--port 8080 &quot;two words&quot;"></div>'
         : '<div class="wiz-field"><label>程序参数</label><input type="text" id="rcArgs" value="" disabled placeholder="该语言的运行时没有 argv"><div class="wiz-muted">' + esc(currentLang) + ' 的运行时（' + esc(rcMode()) + '）不把参数交给程序，所以这一栏停用——存了也不会生效。</div></div>')
@@ -703,13 +717,16 @@
         if (!cfg) return;
         RC.pick = cfg;
         RC.name = cfg.name;
+        RC.mode = cfg.mode || 'run';
         RC.args = cfg.args || '';
         RC.cwd = cfg.cwd || '';
         RC.env = cfg.env || '';
+        RC.classpath = cfg.classpath || '';
+        RC.mainClass = cfg.mainClass || '';
         rcPaint();
       });
     });
-    ['rcName', 'rcArgs', 'rcCwd', 'rcEnv'].forEach(function (id) {
+    ['rcName', 'rcArgs', 'rcCwd', 'rcEnv', 'rcClasspath', 'rcMainClass'].forEach(function (id) {
       var el = mask.querySelector('#' + id);
       if (!el) return;
       el.addEventListener('input', function () {
@@ -717,7 +734,14 @@
         if (id === 'rcArgs') RC.args = el.value;
         if (id === 'rcCwd') RC.cwd = el.value;
         if (id === 'rcEnv') RC.env = el.value;
+        if (id === 'rcClasspath') RC.classpath = el.value;
+        if (id === 'rcMainClass') RC.mainClass = el.value;
       });
+    });
+    var modeEl = mask.querySelector('#rcMode');
+    if (modeEl) modeEl.addEventListener('change', function () {
+      RC.mode = modeEl.value;
+      rcPaint();
     });
     var cancel = mask.querySelector('#rcCancel');
     if (cancel) cancel.addEventListener('click', rcClose);
@@ -738,7 +762,12 @@
     if (!RC.name.trim()) { RC.error = '配置需要一个名字'; rcPaint(); return; }
     BRIDGE.send({
       kind: 'runConfigsSave',
-      config: { id: RC.pick ? RC.pick.id : '', name: RC.name, language: currentLang, args: RC.args, cwd: RC.cwd, env: RC.env },
+      config: {
+        id: RC.pick ? RC.pick.id : '', name: RC.name, language: currentLang, mode: RC.mode,
+        args: RC.args, cwd: RC.cwd, env: RC.env,
+        classpath: RC.mode === 'project' ? RC.classpath : '',
+        mainClass: RC.mode === 'project' ? RC.mainClass : '',
+      },
     });
     if (andRun) {
       BRIDGE.send({
@@ -746,9 +775,12 @@
         code: ta.value,
         language: currentLang,
         sessionId: 'pycharm',
+        mode: RC.mode,
         args: RC.args,
         env: RC.env,
         cwd: RC.cwd,
+        classpath: RC.mode === 'project' ? RC.classpath : undefined,
+        mainClass: RC.mode === 'project' ? RC.mainClass : undefined,
       });
       toast('运行 ' + RC.name.trim());
       rcClose();

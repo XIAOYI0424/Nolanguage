@@ -22,6 +22,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { commandExists } from '../lsp/LspClient.js';
+import { decodeOutput } from '../util/encoding.js';
 import type { BinaryDiscoverySpec, VersionFileSpec } from '../runtimes/types.js';
 
 export interface DiscoverOptions {
@@ -262,10 +263,10 @@ export function probeVersion(bin: string, args: string[], timeoutMs = 4000): Pro
         done(null);
       }, timeoutMs);
       child.stdout?.on('data', (c: Buffer) => {
-        out += c.toString('utf8');
+        out += decodeOutput(c);
       });
       child.stderr?.on('data', (c: Buffer) => {
-        out += c.toString('utf8');
+        out += decodeOutput(c);
       });
       child.on('error', () => {
         clearTimeout(timer);

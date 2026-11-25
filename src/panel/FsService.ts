@@ -25,6 +25,7 @@
  *    syscall failure is reported as a per-entry status rather than thrown.
  */
 import { readFile, writeFile, readdir, stat, mkdir, rename, rm, realpath } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { languageForName } from '../langs/extensionIndex.js';
@@ -327,6 +328,42 @@ export class FsService {
     await writeFile(abs, content ?? '', 'utf8').catch((err) => {
       throw new FsError(`cannot save file: ${(err as Error).message}`, 'io');
     });
+    const after = await stat(abs).catch(() => undefined);
+    return {
+      path: this.toRel(abs),
+      name: basename(abs),
+      content: content ?? '',
+      size: after?.size ?? Buffer.byteLength(content ?? '', 'utf8'),
+      mtime: after?.mtimeMs ?? Date.now(),
+      languageId: languageOf(basename(abs)),
+      truncated: false,
+    };
+  }
+
+  /**
+   * Write through a sibling temp file and replace the target in one rename.
+   *
+   * A multi-file refactor must never leave a file half-written: a crash, an
+   * antivirus lock or a failed rename would otherwise expose truncated source.
+   * The temp file lives in the same directory so the rename stays on one
+   * volume, and it is removed if the replace fails.
+   */
+  async commitAtomic(rel: string, content: string): Promise<FsFile> {
+    const abs = this.resolveSafe(rel);
+    const current = await stat(abs).catch(() => undefined);
+    if (current?.isDirectory()) throw new FsError(`not a file: ${rel}`, 'is-dir');
+    await mkdir(dirname(abs), { recursive: true });
+    const tmp = join(
+      dirname(abs),
+      `.${basename(abs)}.nlg-${process.pid}-${randomBytes(6).toString('hex')}.tmp`,
+    );
+    await writeFile(tmp, content ?? '', 'utf8');
+    try {
+      await rename(tmp, abs);
+    } catch (err) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw new FsError(`cannot replace file: ${(err as Error).message}`, 'io');
+    }
     const after = await stat(abs).catch(() => undefined);
     return {
       path: this.toRel(abs),

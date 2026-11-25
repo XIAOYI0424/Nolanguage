@@ -34,6 +34,7 @@ import type { RegistryRoot } from './types.js';
 
 export type { RegistryRoot } from './types.js';
 import { applyOverride, readOverride } from './overrides.js';
+import { decodeOutput } from '../util/encoding.js';
 
 
 /** One id found in more than one layer; the loser is kept for `--dump-plugins`. */
@@ -190,6 +191,25 @@ export class LanguageRegistry {
   /** The tiers this registry scans, in scan order. */
   pluginLayers(): PluginLayer[] {
     return [...this.layers];
+  }
+
+  /**
+   * Repoint the `project` plugin tier when the IDE opens a different folder.
+   *
+   * The registry used to keep the startup `cwd` for its whole lifetime, so a
+   * panel opened at one folder and later repointed to another still loaded
+   * plugins from the first one. Only the layer list is rebuilt here; callers
+   * that own slots listen for the `rescan` emitted by `scan()` and reconcile.
+   * A host that supplied explicit `layers`/`roots` keeps them — those are a
+   * deliberate override, not a default to be guessed from a folder path.
+   */
+  async setProjectDir(dir: string): Promise<void> {
+    const next = resolve(dir);
+    const fold = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p);
+    if (fold(this.opts.projectDir ?? '') === fold(next)) return;
+    this.opts.projectDir = next;
+    this.layers = this.resolveLayers();
+    await this.scan();
   }
 
   // ---------------- paths ----------------
@@ -634,7 +654,7 @@ export class LanguageRegistry {
     });
     await new Promise<void>((resolvePromise, rejectPromise) => {
       let err = '';
-      child.stderr?.on('data', (c: Buffer) => (err += c.toString('utf8')));
+      child.stderr?.on('data', (c: Buffer) => (err += decodeOutput(c)));
       child.on('error', rejectPromise);
       // 0 is the only acceptable exit: a half-migrated data directory is worse
       // than a failed upgrade, so the install aborts with the old body intact.

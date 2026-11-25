@@ -29,11 +29,19 @@ const stages = [
   { name: 'Startup · baseline, first keystroke, stable', script: 'scripts/verify-startup.ts' },
   { name: 'Stage 1 · minimal kernel', script: 'scripts/verify-stage1.ts' },
   { name: 'Stage 2 · dev panel (WebSocket + UI)', script: 'scripts/verify-panel.ts' },
+  // The exposed-bind rule: a non-loopback PANEL_HOST without PANEL_TOKEN must
+  // refuse to start, and a guarded panel must demand the token on pages + sockets.
+  { name: 'Stage 2 · panel exposure requires a token', script: 'scripts/verify-panel-auth.ts' },
   { name: 'Stage 2 · panel UI self-containment', script: 'scripts/check-panel-html.ts', pure: true },
   { name: 'Stage 2 · LSP log collector parsing', script: 'scripts/test-logcollector.ts', pure: true },
   { name: 'Stage 3 · Python + pyright closed loop', script: 'scripts/verify-stage3.ts' },
   { name: 'Stage 4 · Python workspace (backend)', script: 'scripts/verify-ide.ts' },
+  // Fragment sources before the assembled page: a backtick or an unknown ${seed}
+  // is reported with file:line here instead of "the page did not mount".
+  { name: 'Workspace · client fragments are text-safe', script: 'scripts/check-client-fragments.ts', pure: true },
   { name: 'Workspace · PyCharm shell (mount + self-containment)', script: 'scripts/verify-pycharm.ts' },
+  // Weight, latency and silence: budgets no correctness suite can catch.
+  { name: 'Panel · shell weight, cold start, silent boot', script: 'scripts/verify-perf.ts' },
   { name: 'MCP · client (config + stdio lifecycle)', script: 'scripts/verify-mcp.ts' },
   { name: 'Doctor · diagnostics (pure)', script: 'scripts/verify-doctor.ts', pure: true },
   // Launch-time build handshake: liveness is not identity. A freshly installed
@@ -61,6 +69,9 @@ const stages = [
   { name: 'Debug · sanitize a recording', script: 'scripts/verify-sanitize.ts' },
   // The architecture contract: layers, cycles, product boundary, budgets.
   { name: 'Arch · contract', script: 'scripts/verify-architecture.ts', pure: true },
+  // The frame register in src/panel/protocol.ts against the two switches that
+  // implement it: an undocumented kind, or a documented one nobody handles, fails.
+  { name: 'Panel · protocol register covers both sides', script: 'scripts/verify-protocol.ts', pure: true },
   // Language parity: every plugin is the same shape, and no core layer knows a
   // language by name. A ratchet on the existing literals, not a cliff.
   { name: 'Plugins · language parity (manifest shape + literal ratchet)', script: 'scripts/verify-langparity.ts', pure: true },
@@ -113,6 +124,10 @@ const stages = [
   // `nlg lang search` / `add <id>`: a static JSON index (file or https), multiple
   // sources merged by highest version, query filtering, and graceful offline.
   { name: 'Plugins · catalog / online index (search + resolve)', script: 'scripts/verify-langcatalog.ts' },
+  // The AI panel's engine seam: a loopback provider proves the key only travels
+  // as a header, a second ask is refused while one streams, and Stop closes the
+  // socket. Nothing here needs a real model.
+  { name: 'AI · provider streaming, config + cancel', script: 'scripts/verify-ai.ts' },
   // Phase 3 + 4: install/uninstall/enable/disable applied live, the memory
   // budget (LRU + idle + the eager exemption), and upgrade migration scripts.
   { name: 'Plugins · lifecycle, budget + migrations', script: 'scripts/verify-plugins.ts' },
@@ -185,7 +200,12 @@ function run(script, env = {}) {
       const skips = [];
       for (const line of out.split('\n')) {
         const k = /^SKIP\s{2}(.+?)(?:\s{2}\u2014\s(.+))?$/.exec(line);
-        if (k) skips.push({ name: k[1].trim(), reason: (k[2] ?? 'no reason given').trim() });
+        if (k) {
+          // A skip may put its reason in parentheses instead of after an em dash;
+          // reporting 'no reason given' there hides the instruction the line carries.
+          const paren = /\(([^()]+)\)\s*$/.exec(k[1]);
+          skips.push({ name: k[1].trim(), reason: (k[2] ?? paren?.[1] ?? 'no reason given').trim() });
+        }
       }
       resolve({
         code,

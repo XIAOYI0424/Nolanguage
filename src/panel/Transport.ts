@@ -38,6 +38,24 @@ function trace(direction: 'in' | 'out', line: string): void {
   }
 }
 
+/**
+ * One reply function per client, with a one-way "dead" latch. Keeping the guard
+ * here (rather than in the router) means a broken peer can never re-enter a
+ * message handler, and routers stay under the architecture line budget.
+ */
+export function guardedReply(transport: Transport): (payload: unknown) => void {
+  let alive = true;
+  return (payload: unknown): void => {
+    if (!alive) return;
+    try {
+      transport.send(payload);
+    } catch {
+      alive = false;
+      void transport.close().catch(() => {});
+    }
+  };
+}
+
 export interface Transport {
   /** Deliver one payload to the peer. Never throws. */
   send(payload: unknown): void;
@@ -63,10 +81,19 @@ export class WsTransport implements Transport {
   constructor(private readonly conn: WebSocketConnection) {}
 
   send(payload: unknown): void {
+    let frame: string;
     try {
-      this.conn.send(JSON.stringify(payload));
+      frame = JSON.stringify(payload);
     } catch {
-      /* client gone */
+      return; // a frame we cannot serialise is not a reason to kill a client
+    }
+    try {
+      this.conn.send(frame);
+    } catch {
+      // A broken pipe during send means the peer is already gone. Close this
+      // connection so the normal cleanup path unregisters it; never let the
+      // exception escape into the message handler that produced the reply.
+      void this.close();
     }
   }
 

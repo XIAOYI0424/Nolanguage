@@ -61,6 +61,8 @@ interface Knobs {
   dieOn?: string;
   logInit?: boolean;
   initOptions?: Record<string, unknown>;
+  /** Advertise no inlayHintProvider: the negative half of the capability contract. */
+  noInlay?: boolean;
 }
 
 function fakeManifest(k: Knobs): LanguageManifest {
@@ -69,6 +71,7 @@ function fakeManifest(k: Knobs): LanguageManifest {
   for (const m of k.hang ?? []) args.push('--hang', m);
   if (k.dieOn) args.push('--die-on', k.dieOn);
   if (k.logInit) args.push('--log-init');
+  if (k.noInlay) args.push('--no-inlay');
   return {
     id: k.id,
     file: { extensions: [k.id] },
@@ -275,6 +278,47 @@ async function main(): Promise<void> {
       folds.ok && folds.value[1]?.kind === 'region' && folds.value[0]?.kind === undefined,
       folds.ok ? JSON.stringify(folds.value.map((r) => r.kind)) : folds.reason,
     );
+
+    // Inline hints: the fake server sends them out of order, one as an array of
+    // parts carrying a location, and two that cannot be drawn (no position, empty
+    // label). Only the three paintable ones may reach the editor.
+    const hints = await entry.inlayHints(uri, 0, 9);
+    check(
+      'nav: inlay hints are flattened, sorted, and undrawable ones dropped',
+      hints.ok &&
+        hints.value.length === 3 &&
+        hints.value[0]?.line === 3 &&
+        hints.value[0]?.character === 4 &&
+        hints.value[1]?.label === 'count: int' &&
+        hints.value[2]?.line === 7,
+      hints.ok ? JSON.stringify(hints.value) : hints.reason,
+    );
+    check(
+      'nav: hint kinds map to the two the panel styles, padding only when sent',
+      hints.ok &&
+        hints.value[0]?.kind === 'type' &&
+        hints.value[1]?.kind === 'parameter' &&
+        hints.value[1]?.paddingLeft === true &&
+        hints.value[0]?.paddingLeft === undefined,
+      hints.ok ? JSON.stringify(hints.value.map((h) => [h.kind, h.paddingLeft])) : hints.reason,
+    );
+    check('nav: the inlay request reached the server once', frames(log, 'textDocument/inlayHint') === 1);
+    await manager.close();
+  }
+
+  // ============================================ inlay hints: absent capability
+  // The capability is rarer than folding, so "the server never declared it" is the
+  // common path. It must be a reason the panel can show, and no request at all.
+  {
+    const log = join(SANDBOX, 'noinlay.log');
+    const { manager, entry, uri } = await setup({ id: 'noinlay', log, noInlay: true }, 'noinlay');
+    const r = await entry.inlayHints(uri, 0, 20);
+    check(
+      'inlay: a server without the capability says why',
+      !r.ok && /does not advertise/.test(r.ok ? '' : r.reason),
+      r.ok ? `${r.value.length} hint(s)` : r.reason,
+    );
+    check('inlay: nothing is sent to a server that cannot answer', frames(log, 'textDocument/inlayHint') === 0);
     await manager.close();
   }
 

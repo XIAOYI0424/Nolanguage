@@ -500,11 +500,24 @@ async function testNavigation(): Promise<void> {
     afterForeign === beforeForeign,
     afterForeign === beforeForeign ? 'buffer unchanged' : 'BUFFER WAS REWRITTEN',
   );
+  // Cross-file edits are no longer silently skipped: they go to the engine,
+  // which preflights every target. An engine refusal must be shown, not eaten.
+  const foreignApply = socket.lastSentOf('applyWorkspaceEdits');
+  check(
+    'nav: a foreign edit is forwarded to the engine, not dropped',
+    !!foreignApply && Array.isArray(foreignApply.edits),
+    JSON.stringify(foreignApply?.kind ?? null),
+  );
+  socket.deliver({
+    kind: 'workspaceEditsApplied', requestId: foreignApply?.requestId,
+    ok: false, reason: 'utils.py: outside the workspace', rolledBack: true,
+  });
+  await settle(w);
   const foreignNote = (q(w, '#dlgRoot')?.textContent ?? '');
   check(
-    'nav: the skipped edit is reported, not swallowed',
-    foreignNote.indexOf('another file') >= 0,
-    foreignNote.slice(0, 60) || '(no dialog)',
+    'nav: an engine refusal is reported, not swallowed',
+    foreignNote.indexOf('outside the workspace') >= 0,
+    foreignNote.slice(0, 80) || '(no dialog)',
   );
 
   // "unsupported" must not look like "nothing found".
@@ -561,6 +574,81 @@ async function testNoEmoji(): Promise<void> {
   }
 }
 
+// =============================================================== cross-file edits
+
+async function testCrossFileEdits(): Promise<void> {
+  FakeSocket.instances = [];
+  const { window: w, socket } = mountPage(renderPyCharmHtml(7310));
+  await settle(w);
+  socket.deliver({ kind: 'hello', appVersion: '0.7.24', arch: 'x64', os: 'Windows 11' });
+  socket.deliver({
+    kind: 'workspace',
+    languages: [{ id: 'python', displayName: 'Python', supportsRun: true, hasLsp: true, extensions: ['py'] }],
+  });
+  await settle(w);
+
+  // Open two clean buffers, as the project explorer would.
+  for (const p of ['main.py', 'pkg/util.py']) {
+    socket.deliver({ kind: 'fsFile', file: { path: p, content: 'def old_name():\n    return 1\n', editable: true, truncated: false, mtime: 1 } });
+  }
+  await settle(w);
+  check('rename: two clean buffers are open',
+    !!qa(w, '.etab').find((b: any) => b.getAttribute('data-tab') === 'main.py') &&
+    !!qa(w, '.etab').find((b: any) => b.getAttribute('data-tab') === 'pkg/util.py'));
+
+  const requestRename = async () => {
+    fire(w, q(w, '#ta'), 'keydown', { key: 'F6', shiftKey: true });
+    await settle(w);
+    const input = q(w, '#dlgRoot input');
+    if (input) input.value = 'new_name';
+    fire(w, q(w, '#dlgRoot .dlg-btn.primary') ?? q(w, '#dlgRoot button'), 'click');
+    await settle(w);
+    const rename = socket.lastSentOf('renameSymbol');
+    if (!rename) return undefined;
+    socket.deliver({
+      kind: 'renameResult', requestId: rename.requestId,
+      edits: [
+        { uri: 'file:///main.py', line: 0, character: 4, endLine: 0, endCharacter: 12, newText: 'new_name' },
+        { uri: 'file:///pkg/util.py', line: 0, character: 4, endLine: 0, endCharacter: 12, newText: 'new_name' },
+      ],
+    });
+    await settle(w);
+    return socket.lastSentOf('applyWorkspaceEdits');
+  };
+
+  const apply = await requestRename();
+  check('rename: a cross-file WorkspaceEdit is sent to the engine',
+    !!apply && Array.isArray(apply.edits) && (apply.edits as unknown[]).length === 2,
+    JSON.stringify(apply && { kind: apply.kind, edits: (apply.edits as unknown[]).length }));
+
+  // The engine preflighted both files; a failure must leave both buffers alone.
+  socket.deliver({
+    kind: 'workspaceEditsApplied', requestId: apply?.requestId, ok: false,
+    reason: 'pkg/util.py: read-only', rolledBack: true,
+  });
+  await settle(w);
+  check('rename: a refused multi-file edit leaves the editor untouched',
+    q(w, '#ta')?.value === 'def old_name():\n    return 1\n' &&
+      !/Updated/.test(q(w, '#statusHint')?.textContent ?? ''),
+    JSON.stringify(q(w, '#ta')?.value));
+
+  // Now the happy path: the engine reports both files with their new content.
+  const apply2 = await requestRename();
+  socket.deliver({
+    kind: 'workspaceEditsApplied', requestId: apply2?.requestId, ok: true, applied: 2,
+    files: [
+      { path: 'main.py', content: 'def new_name():\n    return 1\n', mtime: 2, size: 24 },
+      { path: 'pkg/util.py', content: 'def new_name():\n    return 1\n', mtime: 2, size: 24 },
+    ],
+  });
+  await settle(w);
+  check('rename: a successful cross-file edit refreshes the open buffer',
+    q(w, '#ta')?.value === 'def new_name():\n    return 1\n', JSON.stringify(q(w, '#ta')?.value));
+  check('rename: refreshed buffers are not marked dirty',
+    !qa(w, '#etabs .etab').some((b: any) => b.querySelector('.dirty')));
+  w.close();
+}
+
 // =============================================================== run
 
 await testMonitor();
@@ -568,6 +656,8 @@ console.log('');
 await testPerf();
 console.log('');
 await testNavigation();
+console.log('');
+await testCrossFileEdits();
 console.log('');
 await testNoEmoji();
 

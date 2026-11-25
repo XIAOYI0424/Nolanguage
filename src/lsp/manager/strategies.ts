@@ -11,6 +11,7 @@
  * decides whether to reuse an index.
  */
 import { spawn } from 'node:child_process';
+import { decodeOutput } from '../../util/encoding.js';
 import { readdir, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import type { DirtyReport, IncrementalStrategy, IndexMetadata } from './types.js';
@@ -57,10 +58,10 @@ function git(root: string, args: string[]): Promise<GitResult> {
     let err = '';
     const done = (ok: boolean): void => resolve({ ok, out, err });
     child.stdout?.on('data', (c: Buffer) => {
-      out += c.toString('utf8');
+      out += decodeOutput(c);
     });
     child.stderr?.on('data', (c: Buffer) => {
-      err += c.toString('utf8');
+      err += decodeOutput(c);
     });
     child.on('error', (e) => {
       err += e.message;

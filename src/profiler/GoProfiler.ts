@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { Kernel } from '../kernel/Kernel.js';
 import { resolveGoBin } from '../go/discover.js';
+import { decodeOutput } from '../util/encoding.js';
 import type { ProfileHotspot, ProfileOptions, ProfileResult } from './types.js';
 
 const GO_MOD = `module nolanguage/profile
@@ -116,8 +117,8 @@ export class GoProfiler {
         const child = spawn(cmd, argv, { cwd: dir, env, windowsHide: true });
         let out = '';
         let err = '';
-        child.stdout?.on('data', (c: Buffer) => (out += c.toString('utf8')));
-        child.stderr?.on('data', (c: Buffer) => (err += c.toString('utf8')));
+        child.stdout?.on('data', (c: Buffer) => (out += decodeOutput(c)));
+        child.stderr?.on('data', (c: Buffer) => (err += decodeOutput(c)));
         const timer = setTimeout(() => {
           timedOut = true;
           child.kill('SIGKILL');

@@ -15,8 +15,8 @@
  */
 import type { WorkspaceService } from '../WorkspaceService.js';
 import type { ProfilerService } from '../../profiler/ProfilerService.js';
-import type { FlameSampler, FlameSink } from '../flame.js';
-import { runPythonCoverage } from '../coverage.js';
+import type { FlameSampler, FlameSink } from '../../perf/flame.js';
+import { runPythonCoverage } from '../../runtimes/coverage.js';
 import { asLanguage } from './languages.js';
 
 export type Reply = (payload: unknown) => void;

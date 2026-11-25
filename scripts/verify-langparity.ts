@@ -31,6 +31,8 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildLanguagePlugin, RUN_MODES } from '../src/langs/scaffoldPlugin.js';
+import { validateManifest } from '../src/langs/manifest.js';
 
 const ROOT = process.cwd();
 const BUILTIN = join(ROOT, 'builtin');
@@ -283,6 +285,29 @@ async function main(): Promise<void> {
   const total = [...counts.values()].reduce((a, b) => a + b, 0);
   const budgetTotal = Object.values(LITERAL_BUDGET).reduce((a, b) => a + b, 0);
   check('language literals stay within their budget', overBudget.length === 0, overBudget.join('; ') || `${total} across ${counts.size} file(s), budget ${budgetTotal}`);
+
+  // ---- scaffold generator ------------------------------------------------
+  // The generator is the guide as code: if it can emit a manifest the loader
+  // rejects, the first five minutes of every new language are a debugging session
+  // about `requires` strings. Checked per run mode, because each emits a different
+  // `run` block, and the grammar rules are compiled the way the loader compiles
+  // them (sticky) so a generator bug shows up here and not at install time.
+  const scaffoldProblems: string[] = [];
+  for (const run of RUN_MODES) {
+    const built = buildLanguagePlugin({ id: 'golden', extensions: ['gld'], run, lspCommand: 'golden-lsp' });
+    const verdict = validateManifest(built.manifest);
+    if (!verdict.ok) scaffoldProblems.push(`${run}: ${verdict.issues.map((i) => `${i.field}: ${i.message}`).join(', ')}`);
+    for (const rule of built.manifest.grammar?.rules ?? []) {
+      try {
+        new RegExp(rule.re, rule.flags ?? 'y');
+      } catch (err) {
+        scaffoldProblems.push(`${run}: grammar rule ${rule.cls} does not compile (${(err as Error).message})`);
+      }
+    }
+    if (run === 'none' && built.manifest.run !== undefined) scaffoldProblems.push('none: emitted a run block');
+    if (run !== 'none' && built.manifest.run === undefined) scaffoldProblems.push(`${run}: no run block`);
+  }
+  check('the scaffold generator emits loadable plugins for every run mode', scaffoldProblems.length === 0, scaffoldProblems.join('; ') || `${RUN_MODES.length} modes`);
 
   // ---- report (informational) -------------------------------------------
   console.log('\n  capability coverage (not enforced — a product decision):');

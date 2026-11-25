@@ -9,8 +9,15 @@
  */
 import type { ChildProcess } from 'node:child_process';
 import type { DapClient } from '../dap/DapClient.js';
+import { FsService } from './FsService.js';
 
 export interface ConnState {
+  /**
+   * This connection's project explorer. `openFolder` repoints only this
+   * instance, so two IDE windows can work in different projects without one
+   * window's File > Open Folder silently moving the other one's file tree.
+   */
+  projectFs?: FsService;
   runSink?: (d: string) => void;
   termChild?: ChildProcess;
   /**
@@ -28,6 +35,24 @@ export interface ConnState {
    * "notStopped" and the toolbar silently does nothing.
    */
   dapThreadId?: number;
+  /**
+   * The test run this connection started.
+   *
+   * A test run is a normal `workspace.run` with `mode: 'test'`, so it already
+   * has a cancellation path through the workspace's per-session controller —
+   * but the Tests view's Stop must not also stop a Run the user launched, and
+   * the run button's Stop must not silently kill a test run. The controller is
+   * that separation: the handler aborts exactly the run it started.
+   */
+  testAbort?: AbortController;
+  /**
+   * The AI answer streaming to this connection, if any.
+   *
+   * One answer at a time: the panel renders a single transcript, and a second
+   * request would interleave two providers' tokens into it. Stop and window
+   * close both abort through this handle, which destroys the HTTP socket.
+   */
+  aiAbort?: AbortController;
 }
 
 const connState = new Map<unknown, ConnState>();
@@ -36,6 +61,17 @@ export function stateFor(conn: unknown): ConnState {
   let s = connState.get(conn);
   if (!s) { s = {}; connState.set(conn, s); }
   return s;
+}
+
+/**
+ * Get (or create) this connection's project explorer. New windows inherit the
+ * most recently opened folder, supplied by the caller as a getter so it is
+ * read only when a connection is first seen.
+ */
+export function projectFsFor(conn: object, initialRoot: () => string): FsService {
+  const s = stateFor(conn);
+  if (!s.projectFs) s.projectFs = new FsService(initialRoot());
+  return s.projectFs;
 }
 
 /** Read the state without creating an entry (for read-only handlers). */

@@ -9,6 +9,7 @@
  *    console window over the editor.
  */
 import { spawn } from 'node:child_process';
+import { OutputDecoder } from '../util/encoding.js';
 import type { RuntimeLogger, RunStep } from './types.js';
 
 export interface CaptureOptions {
@@ -96,18 +97,41 @@ export interface Substitutions {
   data: string;
   /** Resolved toolchain path, for `{toolchain}` in a step command. */
   toolchain?: string;
+  /**
+   * Test selector, for `{filter}` in a test step command.
+   *
+   * A test run is the same pipeline as a run with one extra argv fragment
+   * (`-run ^TestFoo$` for Go); keeping it in the substitution table means the
+   * engine still learns nothing about Go, and a manifest that never mentions
+   * `{filter}` is unaffected. Empty when the whole suite runs.
+   */
+  filter?: string;
+  /** Classpath for `{classpath}` in a project-mode step. */
+  classpath?: string;
+  /** Entry class for `{mainClass}` in a project-mode step. */
+  mainClass?: string;
 }
 
-/** Replace `{file}` / `{workdir}` / `{basename}` / `{exe}` / `{data}` / `{toolchain}`. */
+/**
+ * Replace every placeholder in one pass. A single pass matters: values from the
+ * client (classpath, filter) are data, and must never be re-scanned as template
+ * text — otherwise a classpath containing `{file}` could redirect the command.
+ */
 export function substitute(text: string, vars: Substitutions): string {
   const exe = process.platform === 'win32' ? '.exe' : '';
-  return text
-    .replace(/\{file\}/g, vars.file)
-    .replace(/\{workdir\}/g, vars.workdir)
-    .replace(/\{basename\}/g, vars.basename)
-    .replace(/\{data\}/g, vars.data)
-    .replace(/\{toolchain\}/g, vars.toolchain ?? '')
-    .replace(/\{exe\}/g, exe);
+  const values: Record<string, string> = {
+    file: vars.file,
+    workdir: vars.workdir,
+    basename: vars.basename,
+    data: vars.data,
+    toolchain: vars.toolchain ?? '',
+    filter: vars.filter ?? '',
+    classpath: vars.classpath ?? '',
+    mainClass: vars.mainClass ?? '',
+    exe,
+  };
+  return text.replace(/\{(file|workdir|basename|data|toolchain|filter|classpath|mainClass|exe)\}/g,
+    (_match, key: string) => values[key] ?? '');
 }
 
 /** True when a step's command is fully specified (non-empty). */
@@ -134,10 +158,36 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
     let timedOut = false;
     let cancelled = false;
     let settled = false;
+    const decoders = { stdout: new OutputDecoder(), stderr: new OutputDecoder() };
+
+    /** Decode, cap, relay and log one accepted slice of child output. */
+    function acceptText(stream: 'stdout' | 'stderr', text: string): void {
+      if (!text) return;
+      const list = stream === 'stdout' ? stdout : stderr;
+      list.push(text);
+      opts.onData?.(stream, text);
+      if (!opts.captureLines) return;
+      const sink = opts.userLog ?? opts.log;
+      if (!sink) return;
+      for (const raw of text.split('\n')) {
+        const line = raw.replace(/\r$/, '');
+        if (!line.trim()) continue;
+        if (logLines >= logLineLimit) { logLinesTruncated = true; continue; }
+        let logged = line;
+        if (logged.length > 16 * 1024) { logged = logged.slice(0, 16 * 1024) + '… [line truncated]'; logLinesTruncated = true; }
+        logLines++;
+        const fields = { stream, runId: opts.runId, line: logLines };
+        if (stream === 'stderr') sink.warn(logged, fields);
+        else sink.info(logged, fields);
+      }
+    }
 
     const finish = (exitCode: number | null, signal: string | null): void => {
       if (settled) return;
       settled = true;
+      // A dangling partial multi-byte sequence must not vanish at process exit.
+      acceptText('stdout', decoders.stdout.flush());
+      acceptText('stderr', decoders.stderr.flush());
       opts.signal?.removeEventListener('abort', onAbort);
       resolve({
         exitCode,
@@ -188,43 +238,22 @@ export function capture(command: string, argv: string[], opts: CaptureOptions): 
     }
 
     const onChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
-      const text = chunk.toString('utf8');
-      const list = stream === 'stdout' ? stdout : stderr;
       const used = stream === 'stdout' ? stdoutBytes : stderrBytes;
       const streamLimit = stream === 'stdout' ? stdoutCaptureLimit : stderrCaptureLimit;
       const remaining = Math.max(0, streamLimit - used);
-      const bytes = Buffer.byteLength(text);
-      let accepted = text;
-      if (bytes > remaining) {
-        let lo = 0, hi = text.length;
-        while (lo < hi) {
-          const mid = Math.ceil((lo + hi) / 2);
-          if (Buffer.byteLength(text.slice(0, mid)) <= remaining) lo = mid;
-          else hi = mid - 1;
-        }
-        accepted = text.slice(0, lo);
+      // Cap *bytes*, not decoded characters: a GBK character becomes a UTF-8
+      // character of the same length in the string, but the byte budget must be
+      // applied to what the child actually wrote.
+      const acceptedBuffer = chunk.subarray(0, Math.min(chunk.length, remaining));
+      if (acceptedBuffer.length < chunk.length) {
         if (stream === 'stdout') stdoutTruncated = true; else stderrTruncated = true;
       }
-      if (accepted) list.push(accepted);
-      const acceptedBytes = Buffer.byteLength(accepted);
-      if (stream === 'stdout') stdoutBytes += acceptedBytes; else stderrBytes += acceptedBytes;
+      const accepted = decoders[stream].push(acceptedBuffer);
+      const rawBytes = acceptedBuffer.length;
+      if (stream === 'stdout') stdoutBytes += rawBytes; else stderrBytes += rawBytes;
       // Cap the live WebSocket stream as well as the retained result. The UI
       // adds a visible truncation notice when the final runResult arrives.
-      if (accepted) opts.onData?.(stream, accepted);
-      if (!opts.captureLines) return;
-      const sink = opts.userLog ?? opts.log;
-      if (!sink) return;
-      for (const raw of accepted.split('\n')) {
-        const line = raw.replace(/\r$/, '');
-        if (!line.trim()) continue;
-        if (logLines >= logLineLimit) { logLinesTruncated = true; continue; }
-        let logged = line;
-        if (logged.length > 16 * 1024) { logged = logged.slice(0, 16 * 1024) + '… [line truncated]'; logLinesTruncated = true; }
-        logLines++;
-        const fields = { stream, runId: opts.runId, line: logLines };
-        if (stream === 'stderr') sink.warn(logged, fields);
-        else sink.info(logged, fields);
-      }
+      acceptText(stream, accepted);
     };
 
     child.stdout?.on('data', onChunk('stdout'));

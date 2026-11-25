@@ -129,6 +129,9 @@ export class DirectorySessionRunner implements Runner {
       onData: opts.onData,
       onStdinReady: opts.onStdinReady,
       signal: opts.signal,
+      filter: opts.filter,
+      classpath: opts.classpath,
+      mainClass: opts.mainClass,
     });
   }
 

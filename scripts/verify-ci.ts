@@ -84,7 +84,96 @@ function runBlocks(text: string): string[] {
   return out;
 }
 
-const allRuns = workflows.flatMap((w) => runBlocks(w.text).map((cmd) => ({ file: w.file, cmd })));
+/**
+ * The values a workflow's matrix declares, keyed by variable name.
+ *
+ * Only inline lists (`lang: [go, javascript, markdown]`) are read: that is the
+ * shape this repository uses, and guessing at `include:`/`exclude:` would let the
+ * gate report a green light for a matrix GitHub may expand differently.
+ */
+function matrixValues(text: string): Map<string, string[]> {
+  const values = new Map<string, string[]>();
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^\s+matrix:\s*$/.test(l));
+  if (at < 0) return values;
+  const indent = lines[at].search(/\S/);
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '') continue;
+    // Left the matrix block: a line at or above its indentation that is not a
+    // nested `include:`/`exclude:` key.
+    if (line.search(/\S/) <= indent && !/^\s*(include|exclude):/.test(line)) break;
+    const m = /^\s+([A-Za-z0-9_-]+):\s*\[([^\]]*)\]\s*$/.exec(line);
+    if (!m) continue;
+    values.set(
+      m[1],
+      m[2]
+        .split(',')
+        .map((v) => v.trim().replace(/^['"]|['"]$/g, ''))
+        .filter((v) => v.length > 0),
+    );
+  }
+  return values;
+}
+
+interface ExpandedRun {
+  file: string;
+  cmd: string;
+  /** The templated form, so a report can name the line the author wrote. */
+  source: string;
+  /** `${{ … }}` expressions the workflow used that this matrix cannot expand. */
+  unknown: string[];
+}
+
+const MATRIX_EXPR = /\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}/g;
+
+/**
+ * Expand `${{ matrix.x }}` in a `run:` value into one command per value.
+ *
+ * Without this, `npm run verify:${{ matrix.lang }}` is checked as the script
+ * `verify:` — a false failure that invites the author to inline three explicit
+ * steps and lose the matrix. Expressions that are not matrix lookups (a
+ * `github.ref` inside a shell line) are left alone and reported as unknown, so a
+ * templated command can never pass by being silently not checked.
+ */
+function expandRun(file: string, cmd: string, values: Map<string, string[]>): ExpandedRun[] {
+  const source = cmd;
+  const unknown: string[] = [];
+  for (const m of cmd.matchAll(/\$\{\{\s*([^}]*)\s*\}\}/g)) {
+    const inner = m[1].trim();
+    const asMatrix = /^matrix\.([A-Za-z0-9_-]+)$/.exec(inner);
+    if (asMatrix && values.has(asMatrix[1])) continue; // expanded below
+    unknown.push(inner);
+  }
+  if (!MATRIX_EXPR.test(cmd)) return [{ file, cmd, source, unknown }];
+  MATRIX_EXPR.lastIndex = 0;
+
+  // split() with one capture group alternates literal / whole match, so the
+  // variable name comes from applying MATRIX_EXPR to each whole match.
+  const pieces = cmd.split(/(\$\{\{\s*matrix\.[A-Za-z0-9_-]+\s*\}\})/);
+  const segments: Array<{ text: string } | { key: string }> = [];
+  for (let i = 0; i < pieces.length; i++) {
+    if (i % 2 === 0) segments.push({ text: pieces[i] });
+    else {
+      const m = /matrix\.([A-Za-z0-9_-]+)/.exec(pieces[i]);
+      segments.push({ key: m ? m[1] : '' });
+    }
+  }
+  const build = (index: number, acc: string): string[] => {
+    if (index >= segments.length) return [acc];
+    const seg = segments[index];
+    if ('text' in seg) return build(index + 1, acc + seg.text);
+    const list = values.get(seg.key) ?? [];
+    return list.flatMap((value) => build(index + 1, acc + value));
+  };
+  const expanded = build(0, '');
+  return (expanded.length ? expanded : [cmd]).map((cmd) => ({ file, cmd, source, unknown }));
+}
+
+const allRuns = workflows.flatMap((w) => {
+  const values = matrixValues(w.text);
+  return runBlocks(w.text).flatMap((cmd) => expandRun(w.file, cmd, values));
+});
 
 /**
  * The npm scripts a command line invokes.
@@ -114,6 +203,16 @@ function npmScriptsIn(cmd: string): string[] {
     }
   }
   check('ci: every npm command in a workflow is a real script', missing.length === 0, missing.join(' · ') || `${allRuns.length} commands`);
+
+  const matrixRuns = allRuns.filter((r) => r.source !== r.cmd);
+  const unknownExpr = [...new Set(allRuns.flatMap((r) => r.unknown))];
+  check(
+    'ci: matrix expressions expand to commands that are checked',
+    unknownExpr.length === 0,
+    unknownExpr.length
+      ? `unexpanded: ${unknownExpr.join(', ')}`
+      : `${matrixRuns.length} expanded variant(s) from ${new Set(matrixRuns.map((r) => r.source)).size} templated command(s)`,
+  );
 }
 
 {

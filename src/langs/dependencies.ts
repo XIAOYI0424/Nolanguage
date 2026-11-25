@@ -18,6 +18,8 @@
  * a worse pip, and a wrong dependency list is more damaging than a short one.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { decodeOutput } from '../util/encoding.js';
+import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -54,7 +56,25 @@ export interface DependencySpec {
    * resolved interpreter/compiler; the package name is appended.
    */
   install?: string[];
+  /**
+   * Installing something from disk (`pip install -e ./pkg`) is a different
+   * command shape from installing a name: the flag goes *before* the path, and
+   * there is no version to resolve. Declared per kind so the difference lives in
+   * the manifest instead of a `if (pm === 'uv')` in the engine.
+   */
+  local?: Record<string, LocalInstallSpec>;
 }
+
+/** One "install from disk" flavour: `editable` (pip -e), `file` (wheel/sdist). */
+export interface LocalInstallSpec {
+  /** Args inserted before the path, e.g. `["-e"]`. */
+  args?: string[];
+  /** Shown in the Packages dialog. */
+  label?: string;
+}
+
+/** What to install: a registry name, or a path inside the project. */
+export type InstallTarget = string | { kind: string; value: string };
 
 export interface Dependency {
   name: string;
@@ -80,6 +100,8 @@ export interface DependencyReport {
   installable: boolean;
   /** The installer prefix, so the UI can show the command before running it. */
   installTemplate?: string[];
+  /** "Install from disk" flavours this language declares (`editable`, `file`, …). */
+  installLocal?: Array<{ kind: string; label: string }>;
   /** Why the list is empty, when it is. */
   note?: string;
 }
@@ -474,6 +496,9 @@ export async function readDependencies(
     undeclared: [],
     installable: Array.isArray(spec.install) && spec.install.length > 0,
     ...(spec.install ? { installTemplate: spec.install } : {}),
+    ...(spec.local
+      ? { installLocal: Object.entries(spec.local).map(([kind, s]) => ({ kind, label: s.label ?? kind })) }
+      : {}),
   };
   if (!found) {
     // Not an error: a new project has no dependency file yet, and the first
@@ -502,7 +527,7 @@ export async function readDependencies(
  */
 export function installPackage(
   spec: DependencySpec | undefined,
-  packageName: string,
+  target: InstallTarget,
   toolchain: string | undefined,
   cwd: string,
   hooks: InstallHooks,
@@ -521,8 +546,25 @@ export function installPackage(
   if (!spec?.install?.length) {
     return Promise.resolve(fail('this language does not declare an install command'));
   }
-  const problem = packageNameProblem(packageName);
-  if (problem) return Promise.resolve(fail(problem));
+  const want = typeof target === 'string' ? { kind: 'registry', value: target } : target;
+  let tail: string[];
+  if (want.kind === 'registry') {
+    const problem = packageNameProblem(want.value);
+    if (problem) return Promise.resolve(fail(problem));
+    tail = [want.value];
+  } else {
+    const local = spec.local?.[want.kind];
+    if (!local) return Promise.resolve(fail(`this language does not declare a "${want.kind}" install`));
+    const path = String(want.value ?? '').trim();
+    if (!path) return Promise.resolve(fail('a path is required'));
+    const abs = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+    // Same boundary as every other file operation: a path outside the project is
+    // refused, because installing it would make the project depend on something
+    // the next checkout does not have.
+    if (!inside(resolve(cwd), abs)) return Promise.resolve(fail('the package must live inside the project'));
+    if (!existsSync(abs)) return Promise.resolve(fail(`no such path: ${path}`));
+    tail = [...(local.args ?? []), abs];
+  }
 
   // `{toolchain}` is the interpreter/compiler the run block discovered. Without
   // it the installer would have to be on PATH under a fixed name, which is the
@@ -530,7 +572,7 @@ export function installPackage(
   const subst = (s: string): string => s.replace(/\{toolchain\}/g, toolchain ?? '');
   const [head, ...rest] = spec.install;
   const command = subst(head);
-  const args = [...rest.map(subst), packageName];
+  const args = [...rest.map(subst), ...tail];
   const shown = [command, ...args].join(' ');
   if (!command) return Promise.resolve(fail('the toolchain for this language could not be resolved'));
 
@@ -548,7 +590,7 @@ export function installPackage(
     hooks.onSpawn?.(child);
 
     const take = (stream: 'stdout' | 'stderr') => (d: Buffer): void => {
-      const text = d.toString('utf8');
+      const text = decodeOutput(d);
       if (bytes < OUTPUT_CAP) {
         chunks.push(text);
         hooks.onData(stream, text);

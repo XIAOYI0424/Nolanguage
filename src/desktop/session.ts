@@ -27,6 +27,7 @@ import { isAlive, killTree } from '../util/killTree.js';
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { appDataPath } from '../util/appData.js';
+import { decodeOutput } from '../util/encoding.js';
 
 /**
  * Append one line to `%LOCALAPPDATA%\Nolanguage\desktop.log`.
@@ -230,7 +231,7 @@ export async function findWindowProcesses(profile: string, port?: number): Promi
       return;
     }
     child.stdout?.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8');
+      out += decodeOutput(chunk);
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
     child.on('error', () => resolve([]));
@@ -291,7 +292,7 @@ export async function findVisibleWindows(pids: number[]): Promise<number[]> {
       return;
     }
     child.stdout?.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8');
+      out += decodeOutput(chunk);
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
     child.on('error', () => resolve([]));

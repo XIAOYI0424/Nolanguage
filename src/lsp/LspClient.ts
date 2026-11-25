@@ -28,12 +28,14 @@ import {
   normalizeLocations,
   normalizeSymbols,
   normalizeFoldingRanges,
+  normalizeInlayHints,
   normalizeSignatureHelp,
   normalizeWorkspaceEdit,
   supported,
   unsupported,
   type CodeAction,
   type FoldingRange,
+  type InlayHint,
   type Location,
   type NavFeature,
   type NavResult,
@@ -578,6 +580,22 @@ export class LspClient extends EventEmitter {
    */
   foldingRanges(uri: string): Promise<NavResult<FoldingRange[]>> {
     return this.nav('foldingRange', 'textDocument/foldingRange', { textDocument: { uri } }, normalizeFoldingRanges);
+  }
+
+  /**
+   * Inline type/parameter hints for a line window.
+   *
+   * The window is sent to the server because inlay hints are the one request
+   * whose answer grows with the file: asking for a 5000-line document to render
+   * 40 visible lines would cost a transcript-sized reply for a decoration.
+   */
+  inlayHints(uri: string, fromLine: number, toLine: number): Promise<NavResult<InlayHint[]>> {
+    return this.nav(
+      'inlayHint',
+      'textDocument/inlayHint',
+      { textDocument: { uri }, range: { start: { line: fromLine, character: 0 }, end: { line: toLine, character: 0 } } },
+      normalizeInlayHints,
+    );
   }
 
   /** Ask for diagnostics explicitly (pull) when the server supports it. */

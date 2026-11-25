@@ -94,6 +94,11 @@ export function renderPluginsHtml(): string {
     <div class="scroll" id="list"><div class="meta">loading…</div></div>
   </section>
   <section>
+    <div class="head">Plugin index
+      <input type="text" id="catQ" placeholder="search id, name or category…" style="max-width:220px" />
+      <button id="catGo">Search</button>
+    </div>
+    <div class="scroll" id="catalog" style="max-height:220px"><div class="meta">search an index to install by id</div></div>
     <div class="head">Resources <button id="reclaim" style="margin-left:auto">Reclaim now</button></div>
     <div class="scroll">
       <div id="budget" class="budget"></div>
@@ -113,6 +118,7 @@ export function renderPluginsHtml(): string {
   var list = document.getElementById('list'), events = document.getElementById('events');
   var budget = document.getElementById('budget'), runtimes = document.getElementById('runtimes');
   var shadowed = document.getElementById('shadowed');
+  var catalog = document.getElementById('catalog');
   var reqId = 0;
   function setConn(on){ dot.className = 'dot' + (on ? ' on' : ''); connTxt.textContent = on ? 'connected' : 'disconnected'; }
   ws.onopen = function () { setConn(true); send({ kind: 'listPlugins' }); };
@@ -264,6 +270,54 @@ export function renderPluginsHtml(): string {
     return b;
   }
 
+  /*
+    The index is a different kind of list from "installed": nothing here is on
+    disk yet, and each row's install is a download. Rows without a sha256 are
+    marked, because the installer refuses them — better to say why up front than
+    to fail on click. An "unavailable" field means no index answered, which is
+    not the same fact as "the index has no match".
+  */
+  function renderCatalog(m) {
+    catalog.innerHTML = '';
+    if (m.unavailable) {
+      var warn = document.createElement('div');
+      warn.className = 'meta';
+      warn.textContent = 'index unavailable: ' + m.unavailable;
+      catalog.appendChild(warn);
+    }
+    var rows = m.entries || [];
+    if (!rows.length) {
+      var empty = document.createElement('div');
+      empty.className = 'meta';
+      empty.textContent = m.unavailable ? '' : (m.query ? 'no plugin matches "' + m.query + '"' : 'the index is empty');
+      if (empty.textContent) catalog.appendChild(empty);
+      return;
+    }
+    rows.forEach(function (e) {
+      var d = document.createElement('div');
+      d.className = 'card';
+      var html = '<div class="name">' + esc(e.displayName) + ' <span class="meta">' + esc(e.id) + ' v' + esc(e.version) + '</span></div>';
+      if (e.description) html += '<div class="meta" style="font-family:inherit">' + esc(e.description) + '</div>';
+      if (!e.sha256) html += '<div class="issues">no sha256 published — the installer will refuse it</div>';
+      html += '<div class="actions"></div>';
+      d.innerHTML = html;
+      var actions = d.querySelector('.actions');
+      actions.appendChild(btn(e.installed ? 'Installed' : 'Install', function () {
+        if (e.installed) return;
+        send({ kind: 'langInstall', id: e.id, version: e.version, reqId: ++reqId });
+        log('ev', 'installing ' + e.id + '@' + e.version + ' from the index');
+      }, false, e.installed || !e.sha256));
+      catalog.appendChild(d);
+    });
+  }
+
+  function searchIndex() {
+    send({ kind: 'catalogSearch', query: document.getElementById('catQ').value.trim() });
+  }
+
+  document.getElementById('catGo').onclick = searchIndex;
+  document.getElementById('catQ').onkeydown = function (e) { if (e.key === 'Enter') searchIndex(); };
+
   document.getElementById('installBtn').onclick = function () {
     var dir = document.getElementById('installDir').value.trim();
     if (!dir) return;
@@ -286,6 +340,7 @@ export function renderPluginsHtml(): string {
       log(m.ok ? 'ok' : 'err', (m.op || '') + ' ' + (m.id || '') + (m.ok ? '' : ' — ' + m.error));
       if (m.ok) send({ kind: 'listPlugins' });
     }
+    else if (m.kind === 'catalog') { renderCatalog(m); }
     else if (m.kind === 'resources') { renderBudget(m.resource); }
   };
 })();

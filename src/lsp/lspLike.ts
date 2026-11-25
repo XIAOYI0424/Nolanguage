@@ -18,7 +18,7 @@ import type {
   Range,
   ServerCapabilities,
 } from './LspClient.js';
-import type { CodeAction, FoldingRange, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from './navigation.js';
+import type { CodeAction, FoldingRange, InlayHint, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from './navigation.js';
 
 export interface LspStatus {
   running: boolean;
@@ -58,5 +58,7 @@ export interface LspLike {
   signatureHelp(uri: string, position: Position, onId?: (id: number) => void): Promise<NavResult<SignatureHelp>>;
   /** Foldable spans; `unsupported` means the caller keeps its own finders. */
   foldingRanges(uri: string): Promise<NavResult<FoldingRange[]>>;
+  /** Inline hints for `[fromLine, toLine]`; `unsupported` means none are drawn. */
+  inlayHints(uri: string, fromLine: number, toLine: number): Promise<NavResult<InlayHint[]>>;
   stop(): Promise<void>;
 }

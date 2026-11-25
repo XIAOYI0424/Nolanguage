@@ -9,13 +9,17 @@
  *
  * Network and git are exercised only through `classifySource` — they are the
  * two paths that need a network or a toolchain a suite must not assume. Every
- * check that could reach the network is deliberately a pure classification.
+ * check that could reach the network is deliberately a pure classification,
+ * except the sha256 block: it serves its own bytes from a loopback server so
+ * the hash comparison is a real download, not a stub.
  */
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { sha256Hex } from '../src/util/hash.js';
 import {
   SourceError,
   classifySource,
@@ -295,6 +299,74 @@ async function main(): Promise<void> {
     const empty = join(work, 'empty.zip');
     await writeFile(empty, buildStoredZip([{ name: 'readme.txt', data: Buffer.from('hi') }]));
     await rejects('zip: no manifest anywhere is refused', () => resolveSource(empty), 'manifest.json');
+
+    // ---- expansion bombs are bounded before anything is written ----
+    await rejects(
+      'zip bomb: the entry count is capped',
+      () => resolveSource(zipPath, { maxEntries: 0 }),
+      'entries',
+    );
+    await rejects(
+      'zip bomb: a single entry has an uncompressed cap',
+      () => resolveSource(zipPath, { maxEntryBytes: 1 }),
+      'declares',
+    );
+    await rejects(
+      'zip bomb: total expanded bytes are capped',
+      () => resolveSource(zipPath, { maxExpandedBytes: 1 }),
+      'expands',
+    );
+    await rejects(
+      'tar bomb: total expanded bytes are capped',
+      () => resolveSource(tarPath, { maxExpandedBytes: 1 }),
+      'expands',
+    );
+
+    // ---- sha256: a download is hashed before anything is unpacked ----
+    // A loopback server is the only network here, and it serves bytes from this
+    // process — the point is the *check*, not the transport.
+    const served = buildStoredZip([{ name: 'manifest.json', data: Buffer.from(MANIFEST) }]);
+    const server = createServer((req, res) => {
+      if (req.url === '/plugin.zip') {
+        res.writeHead(200, { 'content-type': 'application/zip' });
+        res.end(served);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((ready) => server.listen(0, '127.0.0.1', () => ready()));
+    const port = (server.address() as { port: number }).port;
+    const url = `http://127.0.0.1:${port}/plugin.zip`;
+    try {
+      const good = sha256Hex(served);
+      const verified = await resolveSource(url, { expectSha256: good });
+      check('sha256: a matching hash installs', existsSync(join(verified.dir, 'manifest.json')));
+      await disposeSource(verified);
+      const prefixed = await resolveSource(url, { expectSha256: `sha256:${good}` });
+      check('sha256: the sha256: prefix is accepted', existsSync(join(prefixed.dir, 'manifest.json')));
+      await disposeSource(prefixed);
+      await rejects(
+        'sha256: a mismatch is refused',
+        () => resolveSource(url, { expectSha256: 'a'.repeat(64) }),
+        'hash mismatch',
+      );
+      await rejects(
+        'sha256: a malformed expectation is refused',
+        () => resolveSource(url, { expectSha256: 'not-a-hash' }),
+        'not 64 hex',
+      );
+      await rejects(
+        'sha256: a remote install with no expectation is refused by default',
+        () => resolveSource(url),
+        'no sha256',
+      );
+      const optedIn = await resolveSource(url, { allowUnverifiedRemote: true });
+      check('sha256: an explicit opt-in allows an unverified remote install', existsSync(optedIn.dir));
+      await disposeSource(optedIn);
+    } finally {
+      await new Promise<void>((done) => server.close(() => done()));
+    }
   } finally {
     await rm(work, { recursive: true, force: true });
   }

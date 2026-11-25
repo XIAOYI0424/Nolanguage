@@ -100,10 +100,11 @@
       pane('terminal', termPane()) +
       pane('packages', packagesPane()) +
       pane('perf', perfPane()) +
+      pane('tests', testsPaneHtml()) +
       pane('logs', logsPane()) +
       pane('find', findPane()) +
       pane('problems', '<div id="probOut"><div class="empty">No problems.</div></div>');
-    wireLogs(); wireTerm(); wireFind(); wireDbg(); wireDebugViews(); wirePackages();
+    wireLogs(); wireTerm(); wireFind(); wireDbg(); wireDebugViews(); wirePackages(); wireTests();
     var ri = $('runIn');
     if (ri) ri.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
@@ -115,6 +116,7 @@
     if (activeBottom === 'perf') renderPerf(lastMetrics);
     if (activeBottom === 'terminal') { renderTermOut(); var ti = $('termIn'); if (ti) ti.focus(); }
     if (activeBottom === 'packages') { renderPkg(); requestDeps(); }
+    if (activeBottom === 'tests') renderTests();
   }
   // ---- Find in Files (bottom dock, Ctrl+Shift+F) ----
   // Searches the documents currently held in memory (open buffers) plus any
@@ -122,72 +124,310 @@
   // line number and the snippet, and double-clicking jumps to it.
   function findPane() {
     return '<div class="find-bar">' +
-      '<input id="findIn" placeholder="Find in files…" spellcheck="false" autocapitalize="off" autocomplete="off" />' +
+      '<input id="findIn" placeholder="Find in project…" spellcheck="false" autocapitalize="off" autocomplete="off" />' +
+      '<input id="findMask" class="find-mask" placeholder="*.py, *.js" spellcheck="false" />' +
       '<label class="dlg-check" style="margin-left:8px"><input type="checkbox" id="findCS" />Case sensitive</label>' +
-      '</div><div id="findOut" class="find-out"><div class="empty">Type to search open files.</div></div>';
+      '<label class="dlg-check"><input type="checkbox" id="findWord" />Whole word</label>' +
+      '<label class="dlg-check"><input type="checkbox" id="findRegex" />Regex</label>' +
+      '</div><div class="find-bar find-replace-bar">' +
+      '<input id="findRep" class="find-rep" placeholder="Replace with…" spellcheck="false" />' +
+      '<button class="tbtn" id="findPreview">Preview Replace</button>' +
+      '</div><div id="findOut" class="find-out"><div class="empty">Type to search the project.</div></div>';
   }
   var FIND_MAX_TOTAL = 1000, FIND_MAX_PER_FILE = 250, FIND_SCAN_LIMIT = 16 * 1024 * 1024, findTimer = 0;
-  function queueFind(q, cs) {
+  // Project-wide results arrive asynchronously. Open-buffer hits stay visible
+  // immediately; these extra hits are merged in without stealing focus.
+  var FINDPROJ_SEQ = 800000;
+  var FINDPROJ_PENDING = Object.create(null);
+  var FINDPROJ_SCAN = null;
+  var FINDPROJ_HITS = [];
+  var FINDPROJ_CTX = { q: '', cs: false, rx: false, word: false, mask: '' };
+  // Replacement never writes from the preview. It builds LSP-style edits that
+  // the server validates as a batch and applies with history snapshots.
+  var FINDPROJ_REPLACE = false;
+  var FINDPROJ_REP = '';
+  var FINDPROJ_HITV = [];
+  var FINDPROJ_SELECTED = Object.create(null);
+  var FINDPROJ_APPLYING = false;
+  function findHitSpans(ctx, line) {
+    var source = String(line || ''), pattern;
+    if (ctx.rx) pattern = ctx.word ? '\\b(?:' + ctx.q + ')\\b' : String(ctx.q);
+    else {
+      var literal = String(ctx.q).replace(/[.*+?^$()|[\]\\{}]/g, '\\$&');
+      pattern = ctx.word ? '\\b(?:' + literal + ')\\b' : literal;
+    }
+    var flags = (ctx.cs ? '' : 'i') + 'g', out = [];
+    try {
+      var re = new RegExp(pattern, flags), at;
+      while ((at = re.exec(source)) !== null) {
+        var replacement = FINDPROJ_REP;
+        if (ctx.rx) replacement = at[0].replace(new RegExp(pattern, ctx.cs ? '' : 'i'), FINDPROJ_REP);
+        out.push({ start: at.index, end: at.index + at[0].length, replacement: replacement });
+        if (at[0].length === 0) re.lastIndex++;
+        if (out.length >= 50) break;
+      }
+    } catch (e) { return []; }
+    return out;
+  }
+  function findHitId(path, line, start, end) { return path + ':' + line + ':' + start + ':' + end; }
+  function findSelectedEdits() {
+    var out = [];
+    FINDPROJ_HITV.forEach(function (h) {
+      if (!FINDPROJ_SELECTED[findHitId(h.path, h.line, h.start, h.end)]) return;
+      out.push({ uri: h.path, line: h.line - 1, character: h.start,
+        endLine: h.line - 1, endCharacter: h.end, newText: h.replacement });
+    });
+    return out;
+  }
+  function applyFindReplacement() {
+    if (!BRIDGE.ready() || FINDPROJ_APPLYING) return;
+    renderFind(FINDPROJ_CTX);
+    var edits = findSelectedEdits();
+    if (!edits.length) { toast('Select at least one match to replace'); return; }
+    var dirty = [];
+    edits.forEach(function (e) { if (bufferDirty(e.uri) && dirty.indexOf(e.uri) < 0) dirty.push(e.uri); });
+    if (dirty.length) { toast('Save changes in ' + dirty.join(', ') + ' before replacing'); return; }
+    FINDPROJ_APPLYING = true;
+    navRequest('applyWorkspaceEdits', { edits: edits }, function (m) {
+      FINDPROJ_APPLYING = false;
+      if (!m.ok) { toast('Replace failed: ' + (m.reason || 'unknown error')); return; }
+      var refreshed = 0;
+      (m.files || []).forEach(function (f) {
+        var buf = BUFFERS[f.path];
+        if (!buf) return;
+        buf.content = String(f.content || ''); buf.dirty = false; buf.mtime = f.mtime; refreshed++;
+        if (f.path === currentFile) { ta.value = buf.content; renderEditor(); updateCaret(); scheduleCheck(); }
+      });
+      renderTabs();
+      FINDPROJ_REPLACE = false;
+      FINDPROJ_SELECTED = Object.create(null);
+      FINDPROJ_HITS = [];
+      renderFind(FINDPROJ_CTX);
+      startFindProjectScan();
+      toast('Replaced ' + (Number(m.applied) || edits.length) + ' occurrence(s) in ' + refreshed + ' open file(s)');
+    });
+  }
+  var FINDPROJ_SKIP = { '.git': 1, '.hg': 1, 'node_modules': 1, 'dist': 1, 'build': 1, 'out': 1, 'target': 1, '__pycache__': 1, '.venv': 1, 'venv': 1, '.tmp': 1 };
+  var FINDPROJ_EXT = /\.(py|js|jsx|ts|tsx|go|java|kt|kts|c|cc|cpp|h|hpp|rs|rb|php|cs|md|txt|json|ya?ml|toml|sh|bat|ps1|html|css|ini|cfg|env|gitignore)$/i;
+  function findMatcher(ctx) {
+    var q = String(ctx.q || '');
+    if (!q) return null;
+    var flags = ctx.cs ? '' : 'i';
+    if (ctx.rx) {
+      try {
+        var re = new RegExp((ctx.word ? '\\b(?:' + q + ')\\b' : q), flags);
+        return function (line) { return re.test(line); };
+      } catch (e) { toast('Invalid search pattern: ' + String(e && e.message ? e.message : e)); return null; }
+    }
+    var needle = ctx.cs ? q : q.toLowerCase();
+    if (!ctx.word) return function (line) { return (ctx.cs ? line : line.toLowerCase()).indexOf(needle) >= 0; };
+    return function (line) {
+      var hay = ctx.cs ? line : line.toLowerCase(), from = 0, at;
+      while ((at = hay.indexOf(needle, from)) >= 0) {
+        var before = at > 0 ? hay.charAt(at - 1) : '', after = hay.charAt(at + needle.length);
+        if (!/[A-Za-z0-9_]/.test(before) && !/[A-Za-z0-9_]/.test(after)) return true;
+        from = at + 1;
+      }
+      return false;
+    };
+  }
+  function findMaskTest(mask, path) {
+    if (!mask) return true;
+    var parts = String(mask).split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!parts.length) return true;
+    return parts.some(function (part) {
+      var rx = '^' + part.replace(/[.+^$|()[\]\\{}]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$';
+      return new RegExp(rx, 'i').test(path);
+    });
+  }
+  function queueFind(q, cs, rx, word, mask) {
     clearTimeout(findTimer);
-    findTimer = setTimeout(function () { renderFind(q, cs); }, 120);
+    FINDPROJ_CTX = { q: q, cs: !!cs, rx: !!rx, word: !!word, mask: mask || '' };
+    savePrefs({ findProjectOpts: { cs: !!cs, rx: !!rx, word: !!word, mask: mask || '' } });
+    findTimer = setTimeout(function () { renderFind(FINDPROJ_CTX); startFindProjectScan(); }, 120);
   }
   function wireFind() {
     var inp = $('findIn'); if (!inp) return;
-    inp.addEventListener('input', function () { queueFind(inp.value, $('findCS') && $('findCS').checked); });
-    inp.addEventListener('keydown', function (e) { if (e.key === 'Escape') { inp.value = ''; clearTimeout(findTimer); renderFind('', false); } });
-    var cs = $('findCS'); if (cs) cs.addEventListener('change', function () { queueFind(inp.value, cs.checked); });
+    var savedOpts = PREFS.findProjectOpts || {};
+    var cs = $('findCS'), rx = $('findRegex'), word = $('findWord'), mask = $('findMask');
+    if (cs) cs.checked = !!savedOpts.cs;
+    if (rx) rx.checked = !!savedOpts.rx;
+    if (word) word.checked = !!savedOpts.word;
+    if (mask) mask.value = savedOpts.mask || '';
+    var read = function () {
+      queueFind(inp.value, cs && cs.checked, rx && rx.checked, word && word.checked, mask && mask.value);
+    };
+    inp.addEventListener('input', read);
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Escape') { inp.value = ''; clearTimeout(findTimer); FINDPROJ_HITS = []; FINDPROJ_REPLACE = false; FINDPROJ_SELECTED = Object.create(null); FINDPROJ_CTX = { q: '', cs: false, rx: false, word: false, mask: '' }; var pv = $('findPreview'); if (pv) pv.textContent = 'Preview Replace'; renderFind(FINDPROJ_CTX); } });
+    ['findCS', 'findRegex', 'findWord'].forEach(function (id) { var el = $(id); if (el) el.addEventListener('change', read); });
+    if (mask) mask.addEventListener('input', read);
+    var rep = $('findRep'), preview = $('findPreview');
+    if (rep) rep.addEventListener('input', function () { FINDPROJ_REP = rep.value; if (FINDPROJ_REPLACE) renderFind(FINDPROJ_CTX); });
+    if (preview) preview.addEventListener('click', function () {
+      FINDPROJ_REPLACE = !FINDPROJ_REPLACE;
+      FINDPROJ_SELECTED = Object.create(null);
+      preview.textContent = FINDPROJ_REPLACE ? 'Close Preview' : 'Preview Replace';
+      renderFind(FINDPROJ_CTX);
+    });
   }
-  function openFindInFiles() {
+  function findProjReq(kind, path) {
+    var id = ++FINDPROJ_SEQ;
+    FINDPROJ_PENDING[id] = { kind: kind, path: path, token: FINDPROJ_SCAN ? FINDPROJ_SCAN.token : 0 };
+    return id;
+  }
+  function startFindProjectScan() {
+    if (!BRIDGE.ready() || !String(FINDPROJ_CTX.q || '').trim() || !findMatcher(FINDPROJ_CTX)) return;
+    FINDPROJ_SCAN = { token: ++FINDPROJ_SEQ, dirs: [], files: [], seenDir: {}, seenFile: {}, dirsVisited: 0, filesVisited: 0, scanned: 0 };
+    FINDPROJ_HITS = [];
+    BRIDGE.send({ kind: 'fsList', path: '', reqId: findProjReq('list', '') });
+  }
+  function findProjNext() {
+    if (!FINDPROJ_SCAN) return;
+    if (FINDPROJ_SCAN.files.length) {
+      var p = FINDPROJ_SCAN.files.shift();
+      BRIDGE.send({ kind: 'fsRead', path: p, reqId: findProjReq('read', p) });
+      return;
+    }
+    if (FINDPROJ_SCAN.dirs.length) {
+      var d = FINDPROJ_SCAN.dirs.shift();
+      BRIDGE.send({ kind: 'fsList', path: d, reqId: findProjReq('list', d) });
+      return;
+    }
+    FINDPROJ_SCAN = null;
+    renderFind(FINDPROJ_CTX);
+  }
+  function onFindProjectListing(reqId, m) {
+    var pending = FINDPROJ_PENDING[reqId];
+    delete FINDPROJ_PENDING[reqId];
+    if (!pending || !FINDPROJ_SCAN || pending.token !== FINDPROJ_SCAN.token) return;
+    (m.entries || []).forEach(function (e) {
+      if (!e || !e.path) return;
+      if (e.kind === 'dir') {
+        var base = e.path.split('/').pop();
+        if (FINDPROJ_SKIP[base] || FINDPROJ_SCAN.seenDir[e.path]) return;
+        if (++FINDPROJ_SCAN.dirsVisited > 120) return;
+        FINDPROJ_SCAN.seenDir[e.path] = true;
+        FINDPROJ_SCAN.dirs.push(e.path);
+      } else if (!BUFFERS[e.path] && !FINDPROJ_SCAN.seenFile[e.path] && FINDPROJ_EXT.test(e.path) &&
+                 findMaskTest(FINDPROJ_CTX.mask, e.path) && FINDPROJ_SCAN.files.length < 80) {
+        FINDPROJ_SCAN.seenFile[e.path] = true;
+        FINDPROJ_SCAN.files.push(e.path);
+      }
+    });
+    findProjNext();
+  }
+  function onFindProjectFile(reqId, f) {
+    var pending = FINDPROJ_PENDING[reqId];
+    delete FINDPROJ_PENDING[reqId];
+    if (!pending || !FINDPROJ_SCAN || pending.token !== FINDPROJ_SCAN.token) return;
+    var match = findMatcher(FINDPROJ_CTX);
+    var text = f && !f.truncated ? String(f.content || '') : '';
+    FINDPROJ_SCAN.scanned += text.length;
+    if (match && text.length <= FIND_SCAN_LIMIT && FINDPROJ_SCAN.scanned <= FIND_SCAN_LIMIT) {
+      var lines = text.replace(/\r\n?/g, '\n').split('\n');
+      for (var i = 0; i < lines.length && FINDPROJ_HITS.length < FIND_MAX_TOTAL; i++) {
+        if (match(lines[i])) FINDPROJ_HITS.push({ path: pending.path, line: i + 1, text: lines[i].slice(0, 200) });
+      }
+    }
+    findProjNext();
+  }
+  function openFindInFiles(replace) {
     if (activeBottom !== 'find') { activeBottom = 'find'; renderDock(); }
-    var inp = $('findIn'); if (inp) { inp.focus(); }
+    // Ctrl+Shift+R is a direct entry into the existing preview. It never
+    // bypasses the selected-edit batch path or its dirty-buffer guard.
+    if (replace) {
+      FINDPROJ_REPLACE = true;
+      FINDPROJ_SELECTED = Object.create(null);
+      var pv = $('findPreview'); if (pv) pv.textContent = 'Close Preview';
+      renderFind(FINDPROJ_CTX);
+    }
+    var inp = $('findIn'); if (inp) inp.focus();
   }
-  function renderFind(q, cs) {
+  function renderFind(ctx) {
     var out = $('findOut'); if (!out) return;
-    q = q || '';
-    if (!q.trim()) { out.innerHTML = '<div class="empty">Type to search open files.</div>'; return; }
-    var needle = cs ? q : q.toLowerCase();
-    var html = '';
-    var total = 0, scanned = 0, capped = false;
+    var q = String((ctx && ctx.q) || '');
+    if (!q.trim()) { out.innerHTML = '<div class="empty">Type to search the project.</div>'; return; }
+    var match = findMatcher(ctx);
+    if (!match) { out.innerHTML = '<div class="empty">Fix the search pattern and try again.</div>'; return; }
+    var html = '', total = 0, scanned = 0, capped = false;
+    var grouped = Object.create(null);
+    FINDPROJ_HITV = [];
+    function addHit(path, line, text) {
+      if (!FINDPROJ_REPLACE) {
+        var list = grouped[path] || (grouped[path] = []);
+        list.push({ line: line, text: text });
+        total++;
+        if (list.length >= FIND_MAX_PER_FILE || total >= FIND_MAX_TOTAL) capped = true;
+        return;
+      }
+      findHitSpans(ctx, text).forEach(function (span) {
+        var id = findHitId(path, line, span.start, span.end);
+        if (FINDPROJ_SELECTED[id] === undefined) FINDPROJ_SELECTED[id] = true;
+        var entry = { path: path, line: line, text: text, start: span.start, end: span.end,
+          replacement: span.replacement, id: id };
+        FINDPROJ_HITV.push(entry);
+        var list = grouped[path] || (grouped[path] = []);
+        list.push(entry);
+        total++;
+        if (list.length >= FIND_MAX_PER_FILE || total >= FIND_MAX_TOTAL) capped = true;
+      });
+    }
     var paths = Object.keys(BUFFERS);
     for (var pi = 0; pi < paths.length && total < FIND_MAX_TOTAL && scanned < FIND_SCAN_LIMIT; pi++) {
       var path = paths[pi], content = BUFFERS[path].content || '';
-      var hits = [], start = 0, lineNo = 1;
+      var start = 0, lineNo = 1;
       while (start <= content.length && total < FIND_MAX_TOTAL && scanned < FIND_SCAN_LIMIT) {
         var end = content.indexOf('\n', start); if (end < 0) end = content.length;
         var ln = content.slice(start, end);
         scanned += ln.length + 1;
-        if ((cs ? ln : ln.toLowerCase()).indexOf(needle) >= 0) {
-          hits.push({ line: lineNo, text: ln }); total++;
-          if (hits.length >= FIND_MAX_PER_FILE || total >= FIND_MAX_TOTAL) { capped = true; break; }
-        }
+        if (match(ln)) addHit(path, lineNo, ln);
         if (end === content.length) break;
         start = end + 1; lineNo++;
       }
-      if (hits.length) {
-        html += '<div class="fgroup" data-path="' + esc(path) + '"><div class="fhead">' + esc(path) + ' <span class="dim">(' + hits.length + ')</span></div>';
-        hits.forEach(function (h) {
-          html += '<div class="fhit" data-path="' + esc(path) + '" data-line="' + h.line + '">' +
-            '<span class="fl">Ln ' + h.line + '</span>' + esc(h.text.slice(0, 200)) + '</div>';
-        });
-        html += '</div>';
-      }
     }
+    FINDPROJ_HITS.slice(0, FIND_MAX_TOTAL).forEach(function (h) { addHit(h.path, h.line, h.text); });
     if (total >= FIND_MAX_TOTAL || scanned >= FIND_SCAN_LIMIT) capped = true;
+    Object.keys(grouped).sort().forEach(function (p) {
+      var hits = grouped[p];
+      html += '<div class="fgroup" data-path="' + esc(p) + '"><div class="fhead">' + esc(p) + ' <span class="dim">(' + hits.length + ')</span></div>';
+      hits.forEach(function (h) {
+        html += '<div class="fhit" data-path="' + esc(p) + '" data-line="' + h.line + '">' +
+          (FINDPROJ_REPLACE ? '<input type="checkbox" class="frepl-pick" data-id="' + esc(h.id) + '"' + (FINDPROJ_SELECTED[h.id] ? ' checked' : '') + ' />' : '') +
+          '<span class="fl">Ln ' + h.line + '</span>' + esc(h.text.slice(0, 200)) +
+          (FINDPROJ_REPLACE ? '<span class="dim">→ ' + esc(h.replacement) + '</span>' : '') + '</div>';
+      });
+      html += '</div>';
+    });
     if (capped) html += '<div class="empty">Search limited to ' + FIND_MAX_PER_FILE + ' matches per file, ' + FIND_MAX_TOTAL + ' total / ' + Math.round(FIND_SCAN_LIMIT / 1048576) + ' Mi characters for responsiveness.</div>';
-    out.innerHTML = total ? html : '<div class="empty">' + (capped ? 'Search scan limit reached.' : 'No matches in open files.') + '</div>';
+    if (FINDPROJ_SCAN && !capped) html += '<div class="empty">Scanning project files…</div>';
+    var bar = FINDPROJ_REPLACE
+      ? '<div class="find-repl-bar"><span>' + findSelectedEdits().length + ' selected</span>' +
+        '<button class="tbtn" id="findReplCancel">Cancel</button>' +
+        '<button class="tbtn primary" id="findReplApply">Replace Selected</button></div>'
+      : '';
+    out.innerHTML = total || FINDPROJ_REPLACE ? bar + html : '<div class="empty">' + (FINDPROJ_SCAN ? 'Scanning project files…' : 'No matches found.') + '</div>';
+    out.querySelectorAll('.frepl-pick').forEach(function (el) {
+      el.addEventListener('change', function () {
+        FINDPROJ_SELECTED[el.getAttribute('data-id')] = el.checked;
+        var count = out.querySelector('.find-repl-bar span');
+        if (count) count.textContent = findSelectedEdits().length + ' selected';
+      });
+    });
+    var cancel = $('findReplCancel');
+    if (cancel) cancel.addEventListener('click', function () {
+      FINDPROJ_REPLACE = false; FINDPROJ_SELECTED = Object.create(null); renderFind(ctx);
+    });
+    var apply = $('findReplApply');
+    if (apply) apply.addEventListener('click', applyFindReplacement);
     out.querySelectorAll('.fhit').forEach(function (el) {
       el.addEventListener('dblclick', function () { gotoLineInFile(el.getAttribute('data-path'), +el.getAttribute('data-line')); });
     });
   }
   function gotoLineInFile(path, line) {
-    if (!BUFFERS[path]) { openFile(path); }
-    else showBuffer(path);
-    var target = path, n = line;
-    setTimeout(function () {
-      var lines = ta.value.split('\n');
-      var pos = 0; for (var i = 0; i < n - 1 && i < lines.length; i++) pos += lines[i].length + 1;
-      ta.focus(); ta.setSelectionRange(pos, pos); updateCaret();
-    }, 0);
+    // Find hits are one-based; the editor API is zero-based.
+    var line0 = Math.max(0, Number(line) - 1 || 0);
+    if (!BUFFERS[path]) openFile(path, line0);
+    else { showBuffer(path); gotoLine(line0, 0); }
   }
   function pane(id, inner) {
     return '<div class="dock-pane' + (activeBottom === id ? ' active' : '') + '" data-pane="' + id + '">' + inner + '</div>';
@@ -208,6 +448,9 @@
       '<div class="pkgs-install">' +
       '<input id="pkgName" placeholder="Package name" spellcheck="false" autocapitalize="off" autocomplete="off" />' +
       '<button class="tbtn primary" data-pkg="install" id="pkgGo">Install</button>' +
+      // A local checkout is not a name: "pip install -e ./pkg" resolves the
+      // project's own source, which is how anyone develops two packages together.
+      '<button class="tbtn" data-pkg="local" id="pkgLocal">From Path…</button>' +
       '<button class="tbtn" data-pkg="cancel" id="pkgStop">Stop</button>' +
       '</div>' +
       '<div class="pkgs-note" id="pkgNote"></div>' +
@@ -235,14 +478,45 @@
     requestDeps();
   }
 
+  function startInstall(payload) {
+    PKG.out = '';
+    PKG.busy = true;
+    renderPkg();
+    BRIDGE.send(payload);
+  }
+
   function installPkg() {
     var inp = $('pkgName'); if (!inp) return;
     var name = (inp.value || '').trim();
     if (!name || PKG.busy) { inp.focus(); return; }
-    PKG.out = '';
-    PKG.busy = true;
-    renderPkg();
-    BRIDGE.send({ kind: 'dependencyInstall', language: currentLang, package: name });
+    startInstall({ kind: 'dependencyInstall', language: currentLang, package: name });
+  }
+
+  /**
+   * Install something from disk.
+   *
+   * The kinds come from the report ("installLocal"), so a language that has no
+   * "local" block never shows this dialog's choices, and adding one is a manifest
+   * edit, not a UI edit.
+   */
+  function openLocalInstall() {
+    if (PKG.busy) { toast('An install is already running'); return; }
+    var kinds = (PKG.report && PKG.report.installLocal) || [];
+    if (!kinds.length) { toast('This language declares no local install'); return; }
+    showModal({
+      title: 'Install from path', icon: 'package',
+      message: 'Relative to the project root. The path is validated before anything runs.',
+      radios: kinds.map(function (k, i) { return { name: 'kind', value: k.kind, label: k.label || k.kind, def: i === 0 }; }),
+      fields: [{ name: 'path', label: 'Path', value: '', placeholder: './packages/my-lib' }],
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Install', primary: true, onClick: function (v) {
+          var p = String(v.path || '').trim();
+          if (!p) { toast('Enter a path'); return; }
+          startInstall({ kind: 'dependencyInstall', language: currentLang, installKind: v.kind, path: p });
+        } }
+      ]
+    });
   }
 
   function renderPkg() {
@@ -250,6 +524,7 @@
     out.textContent = PKG.out || 'Installer output appears here.';
     out.scrollTop = out.scrollHeight;
     var go = $('pkgGo'); if (go) go.disabled = PKG.busy;
+    var local = $('pkgLocal'); if (local) local.disabled = PKG.busy;
     var stop = $('pkgStop'); if (stop) stop.disabled = !PKG.busy;
     var list = $('pkgList'), note = $('pkgNote'), file = $('pkgFile');
     if (!list) return;
@@ -299,6 +574,7 @@
         if (act === 'refresh') requestDeps();
         else if (act === 'cancel') BRIDGE.send({ kind: 'dependencyCancel' });
         else if (act === 'install') installPkg();
+        else if (act === 'local') openLocalInstall();
       });
     });
     var inp = $('pkgName');
@@ -698,6 +974,163 @@
     }).join('') || '<div class="empty">No log records at this level.</div>';
   }
 
+  // ---------- tests (bottom dock, Alt+5) ----------
+  // A test run is one ordinary engine session in mode "test", mirrored here as
+  // a tree. Cases arrive while the runner is still going (testCase frames), so
+  // a slow suite fills in instead of showing nothing until the end. Failures
+  // are also merged into the Problems list, which is why they do not go through
+  // setDiags: that setter owns the squiggles for the *editor* document, and a
+  // test case has no source range of its own.
+  var TESTS = { running: false, requestId: 0, meta: null, cases: {}, order: [], summary: '', out: '', done: false };
+  var TEST_FAILS = [];
+  var TEST_CASE_CAP = 800, TEST_OUT_CAP = 200 * 1024;
+
+  function testsPaneHtml() {
+    return '<div class="tests-bar">' +
+      '<button class="tbtn" id="testRunAll">Run all</button>' +
+      '<button class="tbtn" id="testStop" disabled>Stop</button>' +
+      '<input id="testFilter" placeholder="Test filter (name or -run regex)" spellcheck="false" autocapitalize="off" autocomplete="off" />' +
+      '<span id="testSummary" class="dim"></span>' +
+      '</div>' +
+      '<div id="testTree" class="test-tree"><div class="empty">Run the tests to see results.</div></div>' +
+      '<div id="testOut" class="test-out"></div>';
+  }
+  function wireTests() {
+    var run = $('testRunAll');
+    if (run) run.addEventListener('click', function () { if (!TESTS.running) testStartRun(''); });
+    var stop = $('testStop');
+    if (stop) stop.addEventListener('click', function () { if (TESTS.running) BRIDGE.send({ kind: 'testCancel' }); });
+    var f = $('testFilter');
+    if (f) f.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !TESTS.running) testStartRun(f.value); });
+  }
+  function testStartRun(expr) {
+    TESTS.running = true; TESTS.requestId++; TESTS.cases = {}; TESTS.order = [];
+    TESTS.summary = 'Running…'; TESTS.out = ''; TESTS.done = false;
+    TEST_FAILS = [];
+    renderTests();
+    renderProblems(TEST_FAILS.concat(DIAGS));
+    BRIDGE.send({
+      kind: 'testRun', language: (typeof currentLang === 'string' ? currentLang : ''),
+      code: ta.value, requestId: TESTS.requestId, filter: expr || ''
+    });
+  }
+  /** Re-run one case: the selector is an anchored regex, as "go test -run" wants. */
+  function testRerun(name) {
+    // Lodash's escapeRegExp pattern, reordered so it contains no dollar-brace
+    // pair: the assembler treats those as seed tokens and refuses to ship a
+    // fragment that still holds one.
+    var esc2 = name.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    var f = $('testFilter'); if (f) f.value = '^' + esc2 + '$';
+    if (!TESTS.running) testStartRun('^' + esc2 + '$');
+  }
+  function renderTests() {
+    var sum = $('testSummary');
+    if (sum) sum.textContent = TESTS.summary || '';
+    var stop = $('testStop'); if (stop) stop.disabled = !TESTS.running;
+    var run = $('testRunAll'); if (run) run.disabled = TESTS.running;
+    var out = $('testOut');
+    if (out) { out.textContent = TESTS.out; out.scrollTop = out.scrollHeight; }
+    var tree = $('testTree');
+    if (!tree) return;
+    if (!TESTS.order.length) {
+      tree.innerHTML = '<div class="empty">' + (TESTS.running ? 'Waiting for the first case…' : 'Run the tests to see results.') + '</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < TESTS.order.length; i++) {
+      var c = TESTS.cases[TESTS.order[i]];
+      if (!c) continue;
+      var depth = Math.min(6, c.name.split('/').length - 1);
+      var glyph = c.status === 'pass' ? '\u2713' : c.status === 'fail' ? '\u2715' : c.status === 'skip' ? '\u2013' : '\u2022';
+      html += '<div class="test-row st-' + c.status + '" data-test="' + esc(c.name) + '" title="Click to re-run this case">' +
+        '<span class="tg" style="padding-left:' + (depth * 14) + 'px">' + glyph + '</span>' +
+        '<span class="tn">' + esc(c.name) + '</span>' +
+        (c.ms == null ? '' : '<span class="tm">' + Math.round(c.ms) + ' ms</span>') +
+        '</div>';
+      if (c.message) {
+        var first = String(c.message).split('\n')[0];
+        html += '<div class="test-msg" data-test="' + esc(c.name) + '">' + esc(first.slice(0, 240)) + '</div>';
+      }
+    }
+    tree.innerHTML = html;
+    Array.prototype.forEach.call(tree.querySelectorAll('.test-row'), function (row) {
+      row.addEventListener('click', function () { testRerun(row.getAttribute('data-test')); });
+    });
+    Array.prototype.forEach.call(tree.querySelectorAll('.test-msg'), function (row) {
+      row.addEventListener('click', function () {
+        var c = TESTS.cases[row.getAttribute('data-test')];
+        if (c && c.line) gotoLine(Math.max(0, c.line - 1), 0);
+      });
+    });
+  }
+  function recomputeTestFails() {
+    TEST_FAILS = [];
+    for (var i = 0; i < TESTS.order.length; i++) {
+      var c = TESTS.cases[TESTS.order[i]];
+      if (!c || c.status !== 'fail') continue;
+      var first = c.message ? String(c.message).split('\n')[0] : '';
+      TEST_FAILS.push({
+        severity: 1,
+        line: Math.max(0, (c.line || 1) - 1),
+        character: 0,
+        endLine: Math.max(0, (c.line || 1) - 1),
+        endCharacter: 0,
+        message: 'Test failed: ' + c.name + (first ? ' \u2014 ' + first.slice(0, 200) : '')
+      });
+    }
+    renderProblems(TEST_FAILS.concat(DIAGS));
+  }
+  /** One entry point for testStart/testOut/testCase/testResult/testCancelled. */
+  function testOnFrame(m) {
+    if (m.requestId !== TESTS.requestId) return; // stale run
+    if (m.kind === 'testStart') {
+      TESTS.running = true; TESTS.meta = m; renderTests(); return;
+    }
+    if (m.kind === 'testOut') {
+      if (TESTS.out.length < TEST_OUT_CAP) {
+        TESTS.out += String(m.text || '');
+        if (TESTS.out.length > TEST_OUT_CAP) TESTS.out = TESTS.out.slice(0, TEST_OUT_CAP) + '\n[output capture limit reached]\n';
+        var o = $('testOut');
+        if (o) { o.textContent = TESTS.out; o.scrollTop = o.scrollHeight; }
+      }
+      return;
+    }
+    if (m.kind === 'testCase') {
+      if (!m.name || m.status === 'output') return;
+      if (TESTS.order.indexOf(m.name) < 0) {
+        if (TESTS.order.length >= TEST_CASE_CAP) return;
+        TESTS.order.push(m.name);
+      }
+      var c = TESTS.cases[m.name] || { name: m.name, status: 'run' };
+      c.status = m.status;
+      if (m.ms != null) c.ms = m.ms;
+      if (m.file) c.file = m.file;
+      if (m.line != null) c.line = m.line;
+      if (m.message) c.message = c.message ? (c.message + '\n' + m.message) : m.message;
+      TESTS.cases[m.name] = c;
+      TESTS.summary = 'Running… ' + TESTS.order.length + ' case' + (TESTS.order.length === 1 ? '' : 's');
+      renderTests();
+      recomputeTestFails();
+      return;
+    }
+    if (m.kind === 'testResult') {
+      TESTS.running = false; TESTS.done = true;
+      var parts = [m.passed + ' passed'];
+      if (m.failed) parts.push(m.failed + ' failed');
+      if (m.skipped) parts.push(m.skipped + ' skipped');
+      TESTS.summary = (m.cancelled ? 'Stopped' : m.ok ? 'OK' : 'FAILED') + ' \u00b7 ' + parts.join(', ') + ' \u00b7 ' + Math.round(m.ms || 0) + ' ms';
+      if (m.error) TESTS.out += (TESTS.out ? '\n' : '') + m.error + '\n';
+      renderTests();
+      recomputeTestFails();
+      return;
+    }
+    if (m.kind === 'testCancelled') {
+      if (!m.ok) { toast(m.error || 'Nothing to stop'); return; }
+      TESTS.running = false;
+      renderTests();
+    }
+  }
+
   // ---------- problems (LSP diagnostics) ----------
   // problems is the list the panel renders; DIAGS is the same list kept so
   // the editor can paint marks from it. One setter drives both, so the squiggles
@@ -740,7 +1173,7 @@
   }
   function setDiags(items) {
     DIAGS = items || [];
-    renderProblems(DIAGS);
+    renderProblems(TEST_FAILS.concat(DIAGS));
     paintDiagMarks();
     // The textarea fallback paints its tint from the gutter, so it needs a
     // re-render; CodeMirror already carries its marks from paintDiagMarks.
@@ -761,7 +1194,7 @@
       }
     }
   }
-  function clearDiags() { DIAGS = []; renderProblems([]); paintDiagMarks(); renderEditor(); }
+  function clearDiags() { DIAGS = []; renderProblems(TEST_FAILS.concat(DIAGS)); paintDiagMarks(); renderEditor(); }
   function renderProblems(items) {
     problems = items || [];
     var out = $('probOut');
@@ -784,17 +1217,24 @@
   }
   /** Put the caret on a diagnostic's position and bring it into view. */
   function gotoLine(line0, ch) {
+    var wanted = Number(line0) || 0;
+    var lines = ta.value.split(NLc);
+    var line = Math.max(0, Math.min(Math.max(0, lines.length - 1), wanted));
+    var col = Math.max(0, Number(ch) || 0);
+    var lastCol = lines[line] ? lines[line].length : 0;
+    col = Math.min(col, lastCol);
+    if (line !== wanted) setStatusHint('Line ' + (line + 1) + ' is the last line');
     if (CMEDITOR) {
       var cm = CMEDITOR.cm;
-      cm.setCursor({ line: line0, ch: ch || 0 });
-      cm.scrollIntoView({ line: line0, ch: ch || 0 }, 80);
+      cm.setCursor({ line: line, ch: col });
+      cm.scrollIntoView({ line: line, ch: col }, 80);
       cm.focus();
       return;
     }
-    var lines = ta.value.split(NLc), idx = 0;
-    for (var i = 0; i < line0 && i < lines.length; i++) idx += lines[i].length + 1;
-    ta.selectionStart = ta.selectionEnd = idx + (ch || 0);
-    ta.scrollTop = Math.max(0, (line0 - 4) * 20);
+    var idx = 0;
+    for (var i = 0; i < line && i < lines.length; i++) idx += lines[i].length + 1;
+    ta.selectionStart = ta.selectionEnd = idx + col;
+    ta.scrollTop = Math.max(0, (line - 4) * 20);
     syncScroll();
     updateCaret();
     ta.focus();

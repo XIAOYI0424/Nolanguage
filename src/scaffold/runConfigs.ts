@@ -9,21 +9,60 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+export type RunConfigMode = 'run' | 'test' | 'project';
+
 export interface RunConfig {
   id: string;
   name: string;
   language: string;
+  /** How to run: the plugin's default, its test mode, or its project mode. */
+  mode?: RunConfigMode;
   /** Program arguments, as typed: `--port 8080 --verbose`. */
   args: string;
   /** Working directory; empty means the plugin's own. */
   cwd?: string;
   /** Environment lines, `KEY=VALUE` per line. */
   env?: string;
+  /**
+   * Classpath for a project-mode run (Java: `out;D:\libs\*`), as typed.
+   * Passed to `{classpath}` in the manifest's project step.
+   */
+  classpath?: string;
+  /** Entry class for a project-mode run, passed to `{mainClass}`. */
+  mainClass?: string;
 }
 
+const RUN_CONFIG_MODES = new Set<RunConfigMode>(['run', 'test', 'project']);
 const MAX_NAME = 80;
 const MAX_ARGS = 2000;
 const MAX_ENV = 4000;
+const MAX_CLASSPATH = 4000;
+const MAX_MAIN_CLASS = 200;
+
+/**
+ * A classpath is a path list, not shell text. It is substituted *inside* the
+ * manifest's quoted argv slot, so a quote would break out of that slot, and
+ * braces would be expanded by a second substitution pass in older engines.
+ * Separators and wildcards are fine; shell metacharacters are not.
+ */
+export function classpathProblem(value: string): string | undefined {
+  const v = String(value ?? '').trim();
+  if (!v) return 'classpath is required in project mode';
+  if (v.length > MAX_CLASSPATH) return `classpath is too long (${MAX_CLASSPATH} max)`;
+  if (/["'`{}\r\n\u0000-\u001f]/.test(v)) return 'classpath contains a forbidden character';
+  return undefined;
+}
+
+/** A dotted class name, the shape every JVM entry point has. */
+export function mainClassProblem(value: string): string | undefined {
+  const v = String(value ?? '').trim();
+  if (!v) return 'main class is required in project mode';
+  if (v.length > MAX_MAIN_CLASS) return `main class is too long (${MAX_MAIN_CLASS} max)`;
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(v)) {
+    return 'main class must be a dotted Java identifier';
+  }
+  return undefined;
+}
 
 /**
  * Split an argument string the way a shell would, for quotes only.
@@ -109,10 +148,25 @@ export class RunConfigStore {
     const args = String(input.args ?? '').slice(0, MAX_ARGS);
     const env = String(input.env ?? '').slice(0, MAX_ENV);
     const cwd = String(input.cwd ?? '').trim().slice(0, 400);
+    const mode = input.mode && RUN_CONFIG_MODES.has(input.mode) ? input.mode : 'run';
+    const classpath = String(input.classpath ?? '').trim().slice(0, MAX_CLASSPATH);
+    const mainClass = String(input.mainClass ?? '').trim().slice(0, MAX_MAIN_CLASS);
+    if (mode === 'project') {
+      const cpProblem = classpathProblem(classpath);
+      if (cpProblem) throw new RunConfigError(cpProblem, 'classpath');
+      const mainProblem = mainClassProblem(mainClass);
+      if (mainProblem) throw new RunConfigError(mainProblem, 'mainClass');
+    }
 
     const items = this.list();
     const id = input.id && input.id.trim() ? input.id.trim() : `rc-${Date.now().toString(36)}`;
-    const next: RunConfig = { id, name, language, args, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) };
+    const next: RunConfig = {
+      id, name, language, args, mode,
+      ...(cwd ? { cwd } : {}),
+      ...(env ? { env } : {}),
+      ...(classpath ? { classpath } : {}),
+      ...(mainClass ? { mainClass } : {}),
+    };
     const at = items.findIndex((c) => c.id === id);
     if (at >= 0) items[at] = next;
     else items.push(next);

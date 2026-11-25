@@ -4,10 +4,18 @@ name: CI
 # runs on windows-latest. Python is preinstalled on that image; Go is added
 # explicitly so the packaged-exe smoke test exercises it.
 #
-# Two jobs, deliberately: the fast gate answers "is the logic still correct?"
-# in ~2 minutes, the integration job answers "does the system still work?" in
-# ~10. A single job that only runs the expensive one gets skipped by habit; a
-# single job that only runs the cheap one never tests the artifact.
+# Four jobs, split by what they depend on rather than by importance:
+#
+#   pure        no server, no spawn, no toolchain      (~2 min, the inner loop)
+#   ui          mounts the page in jsdom + boots one server for the budgets
+#   toolchains  one matrix leg per language that needs an interpreter
+#   integration everything that needs the packaged exe, and the full sweep
+#
+# The reason for the split is latency, not tidiness: the UI suites and a language
+# suite used to wait behind a 10-minute exe build, so their failures arrived long
+# after the pure gate went green and developers had already moved on. Nothing here
+# is skipped in `integration` — `npm run verify` still runs the whole sweep, and a
+# suite that passes alone but fails inside the sweep is a real regression.
 #
 # Every step is an npm script, never an inline command line. That is not tidiness:
 # it is what makes "CI would pass" checkable from a developer's machine, because
@@ -64,14 +72,81 @@ jobs:
       - name: Check the workflow
         run: npm run verify:ci
 
-  # Gate 4-7 — everything that boots a server, spawns a toolchain, mounts a DOM
+  # Gate 4-5 — the browser shell and the budgets. Needs no toolchain and no exe, so
+  # it can run beside the pure gate instead of behind the packaged build. The DOM
+  # suite is where a fragment that references an unknown seed, or a dialog whose
+  # handler throws, actually fails.
+  ui:
+    name: UI shell + performance budgets
+    runs-on: windows-latest
+    timeout-minutes: 20
+    needs: pure
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Includes `verify:client` (fragment text safety) first, so a backtick in a
+      # fragment is reported with file:line rather than as "the page did not mount".
+      - name: Verify the PyCharm shell
+        run: npm run verify:ui
+
+      - name: Verify the Dev Panel DOM
+        run: npm run verify:ui-dom
+
+      # Weight, cold-start latency, and the "no network at boot" contract — all
+      # three are ratchets with the measured value printed, so a regression names
+      # the number it crossed.
+      - name: Verify performance budgets
+        run: npm run verify:perf
+
+  # Gate 6 — one leg per language whose suite needs a real interpreter. A matrix
+  # rather than one job so a Go-only failure does not read as "the build is broken",
+  # and so adding a language costs one line instead of one more job.
+  toolchains:
+    name: Toolchain · ${{ matrix.lang }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    needs: pure
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [go, javascript, markdown]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: actions/setup-go@v5
+        if: matrix.lang == 'go'
+        with:
+          go-version: 'stable'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Each suite SKIPs (rather than fails) the parts whose toolchain is absent, so
+      # a bare runner still exercises the degradation path.
+      - name: Verify ${{ matrix.lang }}
+        run: npm run verify:${{ matrix.lang }}
+
+  # Gate 7-9 — everything that boots a server, spawns a toolchain, mounts a DOM
   # or runs the packaged binary. Depends on `pure` so a logic failure stops the
   # expensive work before it starts.
   integration:
     name: Integration + packaged exe
     runs-on: windows-latest
     timeout-minutes: 45
-    needs: pure
+    needs: [pure, ui, toolchains]
     steps:
       - uses: actions/checkout@v4
 

@@ -115,6 +115,43 @@
     return parts[parts.length - 1] + ':' + ((line || 0) + 1);
   }
 
+  // LSP SymbolKind values, in spec order. The engine already maps these to
+  // strings on the wire, but accepting both keeps a hand-built test frame and
+  // future server adapters from turning a method into "symbol #6".
+  var NAV_SYMBOL_KINDS = [
+    'file', 'module', 'namespace', 'package', 'class', 'method', 'property',
+    'field', 'constructor', 'enum', 'interface', 'function', 'variable',
+    'constant', 'string', 'number', 'boolean', 'array', 'object', 'key', 'null',
+    'enum-member', 'struct', 'event', 'operator', 'type-parameter'
+  ];
+
+  /** One wire symbol → the flat shape both symbol UIs render. */
+  function navNormalSymbol(s) {
+    s = s || {};
+    var kind = typeof s.kind === 'number' ? NAV_SYMBOL_KINDS[s.kind - 1] : s.kind;
+    return {
+      name: String(s.name || 'symbol'),
+      kind: String(kind || 'symbol'),
+      uri: String(s.uri || ''),
+      line: Math.max(0, Number(s.line) || 0),
+      character: Math.max(0, Number(s.character) || 0),
+      containerName: s.containerName ? String(s.containerName) : '',
+      local: !!s.local
+    };
+  }
+
+  /** Current-file symbols first, then by path and line: stable across servers. */
+  function navSymbolSort(list) {
+    return list.slice().sort(function (a, b) {
+      var ap = navEditPath(a), bp = navEditPath(b);
+      var ac = !ap || navSameFile(currentFile, ap) ? 0 : 1;
+      var bc = !bp || navSameFile(currentFile, bp) ? 0 : 1;
+      if (ac !== bc) return ac - bc;
+      if (ap !== bp) return String(ap).localeCompare(String(bp));
+      return (Number(a.line) || 0) - (Number(b.line) || 0);
+    });
+  }
+
   /** True when the uri names the buffer already open (absolute vs relative). */
   function navSameFile(current, path) {
     if (!current || !path) return true;
@@ -201,27 +238,15 @@
     });
   }
 
-  /**
-   * Apply same-file edits bottom-up so earlier offsets stay valid.
-   *
-   * Only the current buffer is editable here: an edit for another file would
-   * need that file loaded and saved, and silently doing half a rename is worse
-   * than refusing.
-   */
-  function navApplyEdits(edits) {
-    // Only edits for the buffer on screen may be applied here. A WorkspaceEdit
-    // can carry edits for other files (pyright's rename does exactly that), and
-    // applying those offsets to the current buffer would rewrite unrelated text
-    // at the same line numbers - silent corruption, not a visible failure.
-    var current = String(currentFile || '');
-    var mine = [];
-    var elsewhere = 0;
-    (edits || []).forEach(function (e) {
-      var path = String(e.uri || '').replace(/^file:\/\/\//, '').replace(/^file:\/\//, '');
-      if (navSameFile(current, path)) mine.push(e);
-      else elsewhere++;
-    });
-    if (!mine.length) return { applied: 0, elsewhere: elsewhere };
+  function navEditPath(e) {
+    var path = String((e && e.uri) || '').replace(/^file:\/\/\//, '').replace(/^file:\/\//, '');
+    try { path = decodeURIComponent(path); } catch (err) { /* keep the raw form */ }
+    return path.replace(/\\/g, '/').replace(/^\/([A-Za-z]:)/, '$1');
+  }
+
+  /** Apply same-file edits bottom-up so earlier offsets stay valid. */
+  function navApplyLocalEdits(mine) {
+    if (!mine.length) return 0;
     var lines = ta.value.split(NLc);
     function offset(line, character) {
       var idx = 0;
@@ -239,7 +264,58 @@
     renderEditor();
     updateCaret();
     scheduleCheck();
-    return { applied: spans.length, elsewhere: elsewhere };
+    return spans.length;
+  }
+
+  /**
+   * Apply an LSP WorkspaceEdit.
+   *
+   * Same-file edits stay in the buffer and are saved by the user as before.
+   * Edits for other files go to the engine, which preflights every target and
+   * writes them all or none. A cross-file request is refused while any target
+   * buffer is dirty: the server edits the file on disk, and applying offsets
+   * computed from in-memory text to a different disk version would corrupt it.
+   */
+  function navApplyEdits(edits, done) {
+    var all = edits || [];
+    var current = String(currentFile || '');
+    var mine = [], paths = [];
+    all.forEach(function (e) {
+      var path = navEditPath(e);
+      if (navSameFile(current, path)) mine.push(e);
+      if (paths.indexOf(path) === -1) paths.push(path);
+    });
+    if (!all.length) { done({ applied: 0, elsewhere: 0 }); return; }
+
+    var onlyHere = paths.every(function (p) { return navSameFile(current, p); });
+    if (onlyHere) { done({ applied: navApplyLocalEdits(mine), elsewhere: 0 }); return; }
+
+    var dirty = [];
+    paths.forEach(function (p) {
+      if (bufferDirty(p)) dirty.push(p);
+    });
+    if (dirty.length) {
+      done({ applied: 0, elsewhere: all.length - mine.length,
+        error: 'Save changes in ' + dirty.join(', ') + ' before a cross-file rename.' });
+      return;
+    }
+
+    navRequest('applyWorkspaceEdits', { edits: all }, function (m) {
+      if (!m.ok) { done({ applied: 0, elsewhere: all.length, error: m.reason || 'The edits were not applied.' }); return; }
+      var refreshed = [];
+      (m.files || []).forEach(function (f) {
+        var buf = BUFFERS[f.path];
+        if (!buf) return; // a file we never opened: the engine already wrote it
+        buf.content = String(f.content || '');
+        buf.dirty = false;
+        buf.mtime = f.mtime;
+        refreshed.push(f.path);
+        if (f.path === currentFile) { ta.value = buf.content; renderEditor(); updateCaret(); scheduleCheck(); }
+      });
+      renderTabs();
+      setStatusHint('Updated ' + refreshed.length + ' file(s)');
+      done({ applied: Number(m.applied) || all.length, elsewhere: all.length - mine.length, remote: true });
+    });
   }
 
   function navRename() {
@@ -255,17 +331,13 @@
         navRequest('renameSymbol', {
           language: currentLang, code: ta.value, line: at.line, character: at.character, newName: name,
         }, function (m) {
-          var r = navApplyEdits(m.edits || []);
-          if (!r.applied) {
-            navError(r.elsewhere
-              ? 'This symbol lives in another file - open it and rename there.'
-              : 'Nothing to rename here.');
-            return;
-          }
-          if (r.elsewhere) {
-            navError('Renamed here, but ' + r.elsewhere + ' edit(s) in other files were not applied. '
-              + 'Rename again with those files open, or the project will be inconsistent.');
-          }
+          navApplyEdits(m.edits || [], function (r) {
+            if (r.error) { navError(r.error); return; }
+            if (!r.applied) { navError('Nothing to rename here.'); return; }
+            if (!r.remote && r.elsewhere) {
+              navError('Renamed here, but ' + r.elsewhere + ' edit(s) in other files were not applied.');
+            }
+          });
         });
       },
     });
@@ -284,9 +356,11 @@
           label: a.title,
           detail: a.kind || '',
           onPick: function () {
-            if (!a.edits || !a.edits.length) { navError('That action has no local edit.'); return; }
-            var r = navApplyEdits(a.edits);
-            if (!r.applied && r.elsewhere) navError('That fix only touches other files.');
+            if (!a.edits || !a.edits.length) { navError('That action has no edit.'); return; }
+            navApplyEdits(a.edits, function (r) {
+              if (r.error) navError(r.error);
+              else if (!r.applied) navError('That edit could not be applied.');
+            });
           },
         };
       }));

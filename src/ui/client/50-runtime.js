@@ -16,8 +16,12 @@
     }
     checkSizeNotice = false;
     BRIDGE.send({ kind: 'check', code: ta.value, language: lg });
+    // The Structure pane is a projection of the same semantic index. Refreshing
+    // it here means a file switch or an edit updates the outline too, not just
+    // the diagnostics. requestStructureSymbols debounces and no-ops otherwise.
+    requestStructureSymbols();
   }
-  function scheduleCheck() { clearTimeout(diagTimer); diagTimer = setTimeout(requestCheck, 300); scheduleFolds(); }
+  function scheduleCheck() { clearTimeout(diagTimer); diagTimer = setTimeout(requestCheck, 300); scheduleFolds(); scheduleInlayHints(); }
 
   // ---------- folding ranges ----------
   // Debounced harder than diagnostics: a stale fold arrow for half a second costs
@@ -39,6 +43,64 @@
     // one; requestId is the only thing separating them.
     if (Number(m.requestId || 0) !== foldReqId) return;
     setFoldRanges(m.ranges || null);
+  }
+
+  // ---------- inlay hints ----------
+  // Slower than folding (400ms) because the answer is per-line decoration that
+  // must not race the caret while typing. Small buffers ask once for the whole
+  // file; a huge one asks only for the viewport, because an inlayHint reply grows
+  // with the range it covers.
+  var inlayTimer = 0;
+  var inlayReqId = 0;
+  var INLAY_MAX_CHARS = 256 * 1024;
+  var INLAY_WINDOW = 200;
+  function bufferLineCount() {
+    if (CMEDITOR && CMEDITOR.cm) return CMEDITOR.cm.lineCount();
+    var n = 1;
+    for (var i = 0; i < ta.value.length; i++) if (ta.value.charCodeAt(i) === 10) n++;
+    return n;
+  }
+  function requestInlayHints() {
+    var lg = lspLang();
+    if (!lg) { setInlayHints(null); return; }
+    var from = 0;
+    var to = bufferLineCount() - 1;
+    if (ta.value.length > INLAY_MAX_CHARS) {
+      if (!CMEDITOR || !CMEDITOR.cm || typeof CMEDITOR.cm.getViewport !== 'function') { setInlayHints(null); return; }
+      var vp = CMEDITOR.cm.getViewport();
+      from = Math.max(0, vp.from - INLAY_WINDOW);
+      to = vp.to + INLAY_WINDOW;
+    }
+    inlayReqId++;
+    BRIDGE.send({ kind: 'inlayHints', code: ta.value, language: lg, fromLine: from, toLine: to, requestId: inlayReqId });
+  }
+  function scheduleInlayHints() { clearTimeout(inlayTimer); inlayTimer = setTimeout(requestInlayHints, 400); }
+  function onInlayHints(m) {
+    if (Number(m.requestId || 0) !== inlayReqId) return;
+    setInlayHints(m.unsupported ? null : (m.hints || null));
+  }
+
+  // ---------- AI assistant ----------
+  // The frame shapes are the contract in docs/ai-panel-protocol.md: config is a
+  // projection (no key), answers stream as text, and every stream ends once.
+  function aiOnFrame(m) {
+    if (m.kind === 'aiConfig') {
+      AI.configured = !!m.baseUrl;
+      var state = m.baseUrl ? (m.model || 'model not set') + (m.hasKey ? ' · key saved' : ' · no key') : 'Not configured — press Configure';
+      aiSetState(state);
+      var base = $('aiBase'), model = $('aiModel');
+      if (base && m.baseUrl) base.value = m.baseUrl;
+      if (model && m.model) model.value = m.model;
+      if (m.error) toast(String(m.error));
+      return;
+    }
+    if (m.kind === 'aiCancelled') {
+      if (AI.running) aiFinish(false, 'cancelled');
+      return;
+    }
+    if (Number(m.requestId || 0) !== AI.reqId) return;
+    if (m.kind === 'aiOut') aiAppend(String(m.text || ''));
+    else if (m.kind === 'aiDone') aiFinish(!!m.ok, m.error ? String(m.error) : undefined);
   }
 
   // ---------- run ----------
@@ -501,8 +563,12 @@
     var eol = text.indexOf('\r\n') >= 0 ? '\r\n' : '\n';
     var lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
     var out = [], blank = 0;
+    var unit = editorIndentUnit();
+    var tab = String.fromCharCode(9);
     lines.forEach(function (line) {
-      var s = line.replace(/[ \t]+$/, '').replace(/^\t+/, function (m) { return '    '.repeat(m.length); });
+      var s = line.replace(/[ \t]+$/, '');
+      if (unit === tab) s = s.replace(/^(?: {4})+/g, function (m) { return tab.repeat(m.length / 4); });
+      else s = s.replace(/^\t+/g, function (m) { return unit.repeat(m.length); });
       if (s.trim() === '') {
         blank++;
         if (blank > 2) return;
@@ -549,6 +615,9 @@
   // Set while a save waits for the formatter's edits: onFormatResult applies
   // them first, then writes the formatted buffer instead of only redrawing.
   var FMT_SAVE_PENDING = false;
+  // True while the formatter is delaying Ctrl+S: after the edits land, save
+  // every dirty tab instead of only the active one.
+  var FMT_SAVE_ALL = false;
   function reformatLocally(reason) {
     var before = ta.value, after = basicFormat(before);
     if (after === before) { toast('Reformatted · nothing to change'); return; }
@@ -580,6 +649,11 @@
   }
   /** Write the buffer after a format-on-save round-trip. */
   function finishSaveAfterFormat() {
+    if (FMT_SAVE_ALL) {
+      FMT_SAVE_ALL = false;
+      saveAllFiles({ check: true });
+      return;
+    }
     if (!currentFile) return;
     saveBuffer(currentFile);
     setStatusHint('Saved ' + currentFile);
@@ -656,7 +730,7 @@
     o.scrollTop = o.scrollHeight;
   }
   function termBuiltins(cmd) {
-    var parts = cmd.split(/s+/), head = parts[0], rest = cmd.slice(head.length).trim();
+    var parts = cmd.trim().split(/\s+/), head = parts[0] || '', rest = parts.slice(1).join(' ');
     switch (head) {
       case 'clear': TERM_LINES = []; renderTermOut(); return true;
       case 'help':
@@ -678,7 +752,7 @@
     }
   }
   function termSubmit(raw) {
-    var cmd = raw.replace(/s+$/, '');
+    var cmd = raw.replace(/\s+$/, '');
     termWrite(TERM_PROMPT + ' ' + cmd + '\n');
     var trimmed = cmd.trim();
     if (trimmed) {
@@ -737,6 +811,12 @@
         PLUGINS = m;
         paintPluginDialog();
         break;
+      case 'catalog':
+        // What one plugin index answered. Kept separately from PLUGINS so a
+        // search result survives an enable/disable repaint of the same dialog.
+        CATALOG = m;
+        paintCatalogDialog();
+        break;
       case 'profileResult':
         // Stash it so a freshly opened /profile page can render immediately
         // without the engine relaying state.
@@ -760,7 +840,13 @@
         if (activeLeft === 'mcp') renderPanel();
         break;
       case 'interpreters':
-        showInterpreters(m);
+        // The server echoes the auto flag with the reply. A requestId fallback
+        // keeps older engine builds working, but a stale root is ignored inside
+        // onAutoInterpreters instead of opening the picker by accident.
+        if (m.auto || (AUTO_INTERP_REQ && m.requestId === AUTO_INTERP_REQ)) {
+          if (AUTO_INTERP_REQ && m.requestId === AUTO_INTERP_REQ) AUTO_INTERP_REQ = 0;
+          onAutoInterpreters(m);
+        } else showInterpreters(m);
         break;
       case 'interpreterSet':
         if (m.ok) {
@@ -786,8 +872,15 @@
           termWrite('[environment ready: ' + String(m.dir || '') + ']\n', 'dim');
           toast(m.executable ? 'Environment created and selected' : 'Environment created');
           // Switching is the point of creating one; leaving the project pinned to
-          // the old interpreter would make the new venv look empty.
-          if (m.executable) BRIDGE.send({ kind: 'setInterpreter', language: m.language, path: m.executable });
+          // the old interpreter would make the new venv look empty. Remember it
+          // per folder too, and cancel any discovery already in flight so an old
+          // answer cannot undo the environment that was just created.
+          if (m.executable) {
+            if (PROJECT_LAST_ROOT) rememberProjectInterpreter(PROJECT_LAST_ROOT, m.executable);
+            AUTO_MATCH_ROOT = PROJECT_LAST_ROOT;
+            AUTO_INTERP_REQ = 0;
+            BRIDGE.send({ kind: 'setInterpreter', language: m.language, path: m.executable });
+          }
         } else {
           termWrite('[environment failed: ' + String(m.error || 'unknown') + ']\n', 'err');
           toast('Environment creation failed: ' + String(m.error || 'unknown'));
@@ -838,10 +931,19 @@
       // The five navigation results all land in one handler: it owns the
       // requestId table, so the switch only has to forward.
       case 'definitionResult':
+        onQuickDefinition(m);
+        // fall through: the same reply can satisfy a definition request from
+        // the navigation layer, Find Action, or a normal Go to Definition.
       case 'referencesResult':
       case 'renameResult':
       case 'codeActionResult':
       case 'workspaceSymbolResult':
+        onSymbolDialogResult(m);
+        onStructureSymbolResult(m);
+        onSearchSymbolResult(m);
+        navOnFrame(m);
+        break;
+      case 'workspaceEditsApplied':
         navOnFrame(m);
         break;
       case 'templates':
@@ -889,6 +991,14 @@
       case 'dependencyCancelled':
         // One entry point for the Packages pane: read, install, stream, cancel.
         pkgOnFrame(m);
+        break;
+      case 'testStart':
+      case 'testOut':
+      case 'testCase':
+      case 'testResult':
+      case 'testCancelled':
+        // The Tests window owns its own request table; the switch only forwards.
+        testOnFrame(m);
         break;
       case 'runResult':
         if (m.cancelled) {
@@ -992,27 +1102,28 @@
         toast(m.ok ? ('result: ' + JSON.stringify(m.result)) : ('error: ' + m.error));
         break;
       case 'fsListing': onFsListing(m); break;
-      case 'fsFile': onFsFile(m.file); break;
+      case 'fsFile': onFsFile(m.file, m.reqId); break;
       case 'fsSaved': onFsSaved(m); break;
       case 'fsChanged': onFsChanged(m); break;
       case 'fsRoot':
-        ROOT_NAME = m.name;
-        { var pv = document.querySelector('#projWidget .val'); if (pv) pv.textContent = m.name; }
-        // The tree is cached by path relative to the root, so every entry is now
-        // about a different directory. Without this the folder changes and the
-        // contents do not.
-        resetTree();
+        onFsRoot(m);
         break;
       case 'fsError': onFsError(m); break;
       // Crash recovery. The drafts frame is the one that asks a question; the
       // other two are acknowledgements and stay silent unless something failed.
       case 'folding': onFolding(m); break;
+      case 'inlayHints': onInlayHints(m); break;
+      case 'aiConfig': case 'aiOut': case 'aiDone': case 'aiCancelled': aiOnFrame(m); break;
       case 'drafts': onDrafts(m); break;
       case 'draftSaved': paintDraftState(); break;
       case 'draftDropped': paintDraftState(); break;
       case 'draftError':
         if (m.path) toast('Draft not kept for ' + m.path + ': ' + String(m.message || 'unknown'));
         break;
+      // Local revision history: list, compare, revert.
+      case 'historyEntries': showHistoryEntries(m); break;
+      case 'historyFile': onHistoryFile(m); break;
+      case 'historyReverted': onHistoryReverted(m); break;
       case 'completion': onCompletion(m); break;
       case 'hover': onHover(m); break;
       case 'scriptOut':

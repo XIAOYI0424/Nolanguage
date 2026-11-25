@@ -48,7 +48,12 @@ export const targets: Target[] = [
     // the bundled stub says "builtin" — both are specific, so both are accepted.
     complete: { file: 'main.py', line: 0, character: 3, expect: ['print'] },
     hover: { file: 'main.py', line: 0, character: 2, expect: ['builtin', '(function) def print'] },
-    broken: { file: 'main.py', text: 'def broken(:\n    pass\n', expect: ['SyntaxError', 'Expected parameter name'] },
+    // A Chinese-locale pyright reports the same fact without the English word
+    // "SyntaxError". A specific localised wording is still a valid baseline.
+    broken: {
+      file: 'main.py', text: 'def broken(:\n    pass\n',
+      expect: ['SyntaxError', 'Expected parameter name', '应为参数名称'],
+    },
   },
   {
     id: 'go',

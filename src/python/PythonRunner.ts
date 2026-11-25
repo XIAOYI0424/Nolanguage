@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { ulid } from '../util/ulid.js';
+import { OutputDecoder } from '../util/encoding.js';
 import type { Kernel } from '../kernel/Kernel.js';
 import type { Logger } from '../log/Logger.js';
 
@@ -190,12 +191,13 @@ export class PythonRunner {
 
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
+    const decoders = { stdout: new OutputDecoder(), stderr: new OutputDecoder() };
     let logLines = 0;
     const capture = opts.captureOutput !== false;
     const userLog = this.kernel.logger.forUserCode('python', session.id);
 
     const onLine = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
-      const text = chunk.toString('utf8');
+      const text = decoders[stream].push(chunk);
       (stream === 'stdout' ? stdoutChunks : stderrChunks).push(text);
       opts.onData?.(stream, text);
       if (!capture) return;
@@ -249,8 +251,8 @@ export class PythonRunner {
     m.record(`execution.run.python`, durationMs);
     m.record('execution.lines', logLines);
 
-    const stdout = stdoutChunks.join('');
-    const stderr = stderrChunks.join('');
+    const stdout = stdoutChunks.join('') + decoders.stdout.flush();
+    const stderr = stderrChunks.join('') + decoders.stderr.flush();
     const ok = exit.code === 0 && !timedOut;
     if (ok) {
       runLog.info('Python finished', { durationMs: Math.round(durationMs), lines: logLines, exitCode: exit.code });

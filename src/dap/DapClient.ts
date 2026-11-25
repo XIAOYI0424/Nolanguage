@@ -20,6 +20,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { JsonRpcConnection } from '../lsp/jsonrpc.js';
+import { decodeOutput } from '../util/encoding.js';
 import type { Kernel } from '../kernel/Kernel.js';
 
 export interface DapCapabilities {
@@ -150,7 +151,7 @@ export class DapClient {
     this.proc = child;
     child.stderr?.on('data', (c: Buffer) => {
       // Adapters log to stderr; forward it as debug output rather than swallowing.
-      this.handlers.onOutput?.(c.toString('utf8'), 'stderr');
+      this.handlers.onOutput?.(decodeOutput(c), 'stderr');
     });
     child.on('error', (err) => {
       log.error('DAP adapter failed to start', { adapter: this.opts.adapterId }, err);

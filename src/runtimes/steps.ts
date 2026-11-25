@@ -46,6 +46,11 @@ export interface StepRunInput {
    * build step that precedes it (`go build` with `-v` is not what the user typed).
    */
   args?: string[];
+  /** Test selector substituted into `{filter}`, already validated by the host. */
+  filter?: string;
+  /** Project-mode values substituted into `{classpath}` / `{mainClass}`. */
+  classpath?: string;
+  mainClass?: string;
 }
 
 /**
@@ -97,7 +102,13 @@ export async function runSteps(input: StepRunInput): Promise<RunOutcome> {
   const programStep = runnable[runnable.length - 1];
   for (const step of plan.steps) {
     if (!isRunnableStep(step)) continue;
-    const line = substitute(step.cmd, { ...vars, toolchain: input.ctx.toolchain });
+    const line = substitute(step.cmd, {
+      ...vars,
+      toolchain: input.ctx.toolchain,
+      filter: input.filter ?? '',
+      classpath: input.classpath ?? '',
+      mainClass: input.mainClass ?? '',
+    });
     const argv = splitCommand(line);
     const command = argv.shift() ?? '';
     // Arguments go on the program, never on a build step.

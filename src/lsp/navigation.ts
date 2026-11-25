@@ -78,7 +78,8 @@ export type NavFeature =
   | 'workspaceSymbol'
   | 'signatureHelp'
   | 'format'
-  | 'foldingRange';
+  | 'foldingRange'
+  | 'inlayHint';
 
 /**
  * Either a value, or a reason there is none.
@@ -335,5 +336,64 @@ export function normalizeFoldingRanges(raw: unknown): FoldingRange[] {
   // Outer spans first, then by line: the editor's gutter and the "fold all" order
   // both read better when a class folds before the method inside it.
   out.sort((a, b) => (a.startLine === b.startLine ? b.endLine - a.endLine : a.startLine - b.startLine));
+  return out;
+}
+
+/**
+ * One inlay hint, already flattened to what the editor draws.
+ *
+ * `label` is text only: LSP allows an array of `{ value, location }` parts, and a
+ * hint that carries a jump target cannot be a plain inline label (clicking it
+ * would fight the cursor), so the parts are joined and the location dropped.
+ * `kind` narrows to the two decorative families the panel styles differently;
+ * a server-specific or future kind keeps the hint and loses only the style.
+ */
+export interface InlayHint {
+  line: number;
+  character: number;
+  label: string;
+  kind?: 'type' | 'parameter';
+  paddingLeft?: boolean;
+  paddingRight?: boolean;
+}
+
+/** LSP `InlayHintKind`: 1 = type, 2 = parameter. */
+const INLAY_KINDS: Record<number, 'type' | 'parameter'> = { 1: 'type', 2: 'parameter' };
+
+/**
+ * `textDocument/inlayHint` → hints the editor can mark directly.
+ *
+ * Everything here is defensive: a hint without a usable position is dropped (it
+ * would pin to line 0), an empty label is dropped (an invisible mark), and the
+ * result is sorted so a repaint never reorders siblings.
+ */
+export function normalizeInlayHints(raw: unknown): InlayHint[] {
+  if (!Array.isArray(raw)) return [];
+  const out: InlayHint[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const pos = o.position as Record<string, unknown> | undefined;
+    const line = Number(pos?.line);
+    const character = Number(pos?.character);
+    if (!Number.isFinite(line) || !Number.isFinite(character) || line < 0 || character < 0) continue;
+    const rawLabel = o.label;
+    const label = Array.isArray(rawLabel)
+      ? rawLabel.map((p) => (p && typeof p === 'object' ? String((p as Record<string, unknown>).value ?? '') : String(p ?? ''))).join('')
+      : typeof rawLabel === 'string'
+        ? rawLabel
+        : '';
+    if (!label) continue;
+    const kind = INLAY_KINDS[Number(o.kind)];
+    out.push({
+      line,
+      character,
+      label,
+      ...(kind ? { kind } : {}),
+      ...(o.paddingLeft === true ? { paddingLeft: true } : {}),
+      ...(o.paddingRight === true ? { paddingRight: true } : {}),
+    });
+  }
+  out.sort((a, b) => (a.line === b.line ? a.character - b.character : a.line - b.line));
   return out;
 }

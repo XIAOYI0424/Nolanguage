@@ -15,7 +15,8 @@
  * *content*; a language with no sample still works.
  */
 export type LanguageId = string;
-export type RunMode = 'run' | 'test';
+/** `project` runs a plugin-declared project step (classpath + entry class). */
+export type RunMode = 'run' | 'test' | 'project';
 
 export interface Sample {
   id: string;

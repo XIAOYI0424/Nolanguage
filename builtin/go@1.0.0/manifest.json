@@ -256,11 +256,12 @@
         "steps": [
           {
             "role": "test",
-            "cmd": "\"{toolchain}\" test -v -count=1 ."
+            "cmd": "\"{toolchain}\" test -v -count=1 {filter} ."
           }
         ]
       }
     },
+    "testFormat": "go",
     "versionArgs": [
       "version"
     ],

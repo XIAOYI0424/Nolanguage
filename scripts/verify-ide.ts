@@ -10,14 +10,16 @@
  * Run: node --experimental-transform-types --experimental-loader ./resolve-loader.mjs scripts/verify-ide.ts
  */
 import { spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { connect as netConnect } from 'node:net';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { RawWsClient } from './lib/RawWsClient.js';
-import { sampleById } from '../src/panel/samples.js';
+import { sampleById } from '../src/assets/samples.js';
 import { resolveGoBin, discoverGoServer } from '../src/go/discover.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -114,6 +116,24 @@ async function main(): Promise<void> {
 
     const hello = await client.waitFor('hello', 8000);
     check('hello frame received', !!hello, String(hello?.appVersion ?? ''));
+
+    // A peer that vanishes mid-handshake used to make the engine write a 101
+    // response to a closed socket and die with an uncaught EPIPE. The client is
+    // deliberately raw here: connect, send the upgrade, disconnect immediately.
+    await new Promise<void>((resolvePromise) => {
+      const peer = netConnect(PORT, '127.0.0.1', () => {
+        peer.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n' +
+          'Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
+          'Sec-WebSocket-Version: 13\r\nOrigin: http://127.0.0.1:' + PORT + '\r\n\r\n');
+        peer.destroy();
+      });
+      peer.on('close', () => resolvePromise());
+      peer.on('error', () => resolvePromise());
+      setTimeout(() => { peer.destroy(); resolvePromise(); }, 3000);
+    });
+    await delay(150);
+    const afterAbort = await fetch(`http://127.0.0.1:${PORT}/health`);
+    check('an abrupt handshake abort does not kill the engine', afterAbort.ok, `HTTP ${afterAbort.status}`);
 
     const wsMsg = await client.waitFor('workspace', 8000);
     const samples = (wsMsg?.samples ?? []) as Array<{ id: string; name: string; languageId: string; mode: string }>;
@@ -360,6 +380,52 @@ async function main(): Promise<void> {
     const cancelled = await client.waitFor('dependencyCancelled', 5000);
     check('cancelling an install that is not running is answered', cancelled?.ok === false);
 
+    // ---------- Java project mode: classpath + entry class ----------
+    // A multi-module project has no single source file to hand to the JDK's
+    // source-file mode. The project run config must reach the manifest's
+    // `modes.project` step as two argv fragments, not as shell text.
+    {
+      const javaLang = ((wsMsg?.status as { languages?: Array<{ id: string; available: boolean }> })
+        ?.languages ?? []).find((l) => l.id === 'java');
+      if (!javaLang?.available) {
+        skip('Java project run skipped (toolchain unavailable)', 'no javac/java on PATH');
+      } else {
+        const classes = mkdtempSync(join(tmpdir(), 'nl-java-project-'));
+        const source = join(classes, 'VerifyProject.java');
+        writeFileSync(source, 'public class VerifyProject { public static void main(String[] a) { System.out.println("project 42"); } }\n');
+        const compiled = await new Promise<boolean>((resolvePromise) => {
+          const javac = spawn('javac', ['-d', classes, source], { windowsHide: true });
+          javac.on('error', () => resolvePromise(false));
+          javac.on('close', (code) => resolvePromise(code === 0));
+        });
+        if (!compiled) {
+          skip('Java project run skipped (javac failed)', 'see temp directory for the source');
+        } else {
+          client.clearReceived();
+          client.send({
+            kind: 'run', language: 'java', sessionId: 'verify-java-project', mode: 'project',
+            code: 'class Ignore {}',
+            classpath: classes.replace(/\\/g, '/'),
+            mainClass: 'VerifyProject',
+          });
+          const jp = await client.waitFor('runResult', 60_000);
+          check('project mode runs the configured entry class', /project 42/.test(String(jp?.stdout ?? '')),
+            JSON.stringify(String(jp?.stdout ?? '').trim()));
+          check('project mode exits 0', Number(jp?.exitCode) === 0, `exit=${jp?.exitCode}`);
+          check('project result echoes the mode', jp?.mode === 'project', String(jp?.mode ?? ''));
+          client.clearReceived();
+          client.send({
+            kind: 'run', language: 'java', sessionId: 'verify-java-project', mode: 'project',
+            code: 'class Ignore {}', classpath: 'bad"class', mainClass: 'VerifyProject',
+          });
+          const badCp = await client.waitFor('error', 8000);
+          check('project mode rejects an injected classpath', /forbidden/.test(String(badCp?.message ?? '')),
+            String(badCp?.message ?? 'no error frame'));
+        }
+        rmSync(classes, { recursive: true, force: true });
+      }
+    }
+
     // ---------- Go over the same protocol ----------
     // `gopls` is optional: a machine can run Go without a language server, and
     // the platform is required to keep working in that state. Probe it here so
@@ -417,6 +483,78 @@ async function main(): Promise<void> {
       const g4 = await client.waitFor('runResult', 60_000);
       check('go test runs through the UI protocol', g4?.phase === 'test', `phase=${g4?.phase}`);
       check('go test reports the failing test', /--- FAIL/.test(String(g4?.stdout ?? '')), '');
+
+      // ---- Test Explorer: live per-case frames ----
+      client.clearReceived();
+      client.send({ kind: 'testRun', language: 'go', requestId: 7001, code: sampleById('go-test').code });
+      const tStart = await client.waitFor('testStart', 20_000);
+      check('testRun acknowledges with testStart', tStart?.requestId === 7001, `${String(tStart?.requestId)} ${String(tStart?.command ?? '')}`);
+      const tResult = await client.waitFor('testResult', 120_000);
+      check('testRun returns a result', !!tResult, tResult ? `exit=${tResult.exitCode}` : 'timeout');
+      const verdicts = client
+        .findAll('testCase')
+        .filter((c) => c.status === 'pass' || c.status === 'fail' || c.status === 'skip');
+      check(
+        'each test case is reported individually',
+        verdicts.length >= 3,
+        verdicts.map((c) => `${c.name}:${c.status}`).join(','),
+      );
+      check('a passing case is reported as pass', verdicts.some((c) => c.name === 'TestAdd' && c.status === 'pass'));
+      const failCase = verdicts.find((c) => c.status === 'fail');
+      check('the intentional failure is reported as fail', failCase?.name === 'TestIntentionalFailure', String(failCase?.name ?? ''));
+      check(
+        'a failure carries its source file and line',
+        typeof failCase?.file === 'string' && Number(failCase?.line) > 0,
+        `${String(failCase?.file ?? '')}:${String(failCase?.line ?? '')}`,
+      );
+      check(
+        'the failure message names the assertion',
+        /want 3/.test(String(failCase?.message ?? '')),
+        String(failCase?.message ?? '').slice(0, 60),
+      );
+      check(
+        'testResult counts the cases',
+        Number(tResult?.passed) >= 2 && Number(tResult?.failed) === 1 && tResult?.ok === false,
+        `passed=${String(tResult?.passed)} failed=${String(tResult?.failed)}`,
+      );
+      check('testOut carries the raw runner log', /=== RUN/.test(String(client.findAll('testOut')[0]?.text ?? '')), '');
+
+      // ---- Test Explorer: a single case can be re-run ----
+      client.clearReceived();
+      client.send({
+        kind: 'testRun',
+        language: 'go',
+        requestId: 7002,
+        filter: '^TestAdd$',
+        code: sampleById('go-test').code,
+      });
+      const oneStart = await client.waitFor('testStart', 20_000);
+      check('a filtered run echoes its selector', String(oneStart?.filter ?? '').includes('TestAdd'), String(oneStart?.filter ?? ''));
+      const oneResult = await client.waitFor('testResult', 120_000);
+      const oneNames = client
+        .findAll('testCase')
+        .filter((c) => c.status !== 'output')
+        .map((c) => String(c.name));
+      check(
+        'the filter runs exactly the selected case',
+        oneNames.some((n) => n === 'TestAdd') && !oneNames.some((n) => n === 'TestIntentionalFailure'),
+        oneNames.join(','),
+      );
+      check('the filtered run is reported as passing', oneResult?.ok === true && Number(oneResult?.failed) === 0, `failed=${String(oneResult?.failed)}`);
+
+      // ---- Test Explorer: Stop ends the run ----
+      client.clearReceived();
+      client.send({ kind: 'testRun', language: 'go', requestId: 7003, code: sampleById('go-test').code });
+      await client.waitFor('testStart', 20_000);
+      client.send({ kind: 'testCancel' });
+      const cancelAck = await client.waitFor('testCancelled', 15_000);
+      check('testCancel is acknowledged', cancelAck?.ok === true, String(cancelAck?.error ?? ''));
+      const cancelledResult = await client.waitFor('testResult', 60_000);
+      check(
+        'a cancelled run still reports a result',
+        !!cancelledResult,
+        cancelledResult ? `cancelled=${String(cancelledResult.cancelled)} exit=${String(cancelledResult.exitCode)}` : 'timeout',
+      );
 
       // ---- diagnostics ----
       // The Go *toolchain* can be present while `gopls` is not. Diagnostics and

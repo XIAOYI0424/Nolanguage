@@ -13,7 +13,7 @@
  *  - `createWebSocketServer({ port, host, onConnection })`.
  */
 import { createServer, type Server, type IncomingMessage } from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Duplex } from 'node:stream';
 import { EventEmitter } from 'node:events';
 
@@ -59,10 +59,103 @@ export interface WsServerOptions {
    * from the bound port. `['*']` disables the check entirely.
    */
   allowedOrigins?: string[];
+  /**
+   * When set, an upgrade must also present this token — query `?token=`, header
+   * `x-panel-token`, or the `nlpanel` cookie the HTTP layer sets after a
+   * successful `?token=` visit. Origin checking only says "this page came from
+   * the app"; on a non-loopback bind that is not enough, because "the app" and
+   * "anyone on the LAN" are then the same thing.
+   */
+  authToken?: string;
+}
+
+/** The cookie that carries the panel token to a WebSocket upgrade. */
+export const PANEL_TOKEN_COOKIE = 'nlpanel';
+
+/** One token comparison, length-safe and timing-safe. */
+function sameToken(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * Whether a request presents the right panel token.
+ *
+ * Shared by the WebSocket upgrade and the HTTP routes so the two cannot drift:
+ * a page that loads but whose socket is refused (or the reverse) is a confusing
+ * bug, and the comparison must be constant-time in both places.
+ */
+export function isAuthorizedRequest(req: IncomingMessage, token: string): boolean {
+  const presented = tokenFromRequest(req);
+  return presented !== undefined && sameToken(presented, token);
+}
+
+/**
+ * Read the panel token a request presents: header, query, or cookie.
+ *
+ * Three carriers, because there are three kinds of client: a browser page opened
+ * with `?token=…` (the HTTP layer then keeps it as a cookie for the upgrade), a
+ * native client that can set a header, and anything that can only build a URL.
+ */
+export function tokenFromRequest(req: IncomingMessage): string | undefined {
+  const header = req.headers['x-panel-token'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  const rawUrl = req.url ?? '/';
+  const at = rawUrl.indexOf('?');
+  if (at >= 0) {
+    for (const pair of rawUrl.slice(at + 1).split('&')) {
+      const eq = pair.indexOf('=');
+      if (eq <= 0 || pair.slice(0, eq) !== 'token') continue;
+      try {
+        const value = decodeURIComponent(pair.slice(eq + 1));
+        if (value) return value;
+      } catch {
+        /* malformed percent-encoding: treat as absent, not as a match */
+      }
+    }
+  }
+  const cookie = req.headers.cookie;
+  if (typeof cookie === 'string' && cookie) {
+    for (const part of cookie.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq <= 0 || part.slice(0, eq).trim() !== PANEL_TOKEN_COOKIE) continue;
+      const value = part.slice(eq + 1).trim();
+      if (value) return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Hostnames that mean "this machine", or `undefined` when the value is not a
+ * loopback bind. Exported so the panel can decide whether a token is mandatory.
+ */
+export function isLoopbackHost(host: string | undefined): boolean {
+  if (!host) return true;
+  const clean = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return LOOPBACK_HOSTS.has(clean) || clean === '::1';
 }
 
 export interface WsServerEvents {
   connection: (socket: WebSocketConnection, req: IncomingMessage) => void;
+}
+
+/**
+ * Handshake writes happen before a WebSocketConnection exists, so they have no
+ * socket error listener yet. A client that disconnects mid-upgrade makes
+ * `socket.write()` throw EPIPE synchronously (or emit it a tick later). Either
+ * must close only this socket, never reach process level as an uncaught error.
+ */
+export function writeHandshake(socket: Duplex, data: string): boolean {
+  try {
+    socket.write(data);
+    return !socket.destroyed;
+  } catch {
+    socket.destroy();
+    return false;
+  }
 }
 
 /**
@@ -358,27 +451,55 @@ export class WebSocketServer extends EventEmitter {
     return port === this.boundPort;
   }
 
+  /**
+   * The shared-secret half of the upgrade check.
+   *
+   * `authToken` is unset for a loopback bind (the default), where the origin
+   * check plus a loopback address is the whole threat model. Once the panel
+   * binds `0.0.0.0` / a LAN address, "no Origin" (a native client) is no longer
+   * evidence of anything, so every upgrade must also prove it knows the token.
+   */
+  private tokenAllowed(req: IncomingMessage): boolean {
+    const expected = this.opts.authToken;
+    if (!expected) return true;
+    return isAuthorizedRequest(req, expected);
+  }
+
   private handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    // Up to frame 1 the socket has no WebSocketConnection error listener. A
+    // peer that vanishes mid-handshake must not turn a write into an uncaught
+    // EPIPE that kills the whole engine. This listener is removed as soon as
+    // the connection takes ownership.
+    const swallow = (): void => { /* the peer left during the handshake */ };
+    socket.on('error', swallow);
     if (!this.originAllowed(req)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
-      socket.destroy();
+      if (writeHandshake(socket, 'HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')) socket.destroy();
+      socket.removeListener('error', swallow);
+      return;
+    }
+    if (!this.tokenAllowed(req)) {
+      if (writeHandshake(socket, 'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')) socket.destroy();
+      socket.removeListener('error', swallow);
       return;
     }
     const key = req.headers['sec-websocket-key'];
     if (typeof key !== 'string' || req.headers.upgrade?.toLowerCase() !== 'websocket') {
-      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-      socket.destroy();
+      if (writeHandshake(socket, 'HTTP/1.1 400 Bad Request\r\n\r\n')) socket.destroy();
+      socket.removeListener('error', swallow);
       return;
     }
     const accept = createHash('sha1').update(key + GUID).digest('base64');
-    socket.write(
+    if (!writeHandshake(socket,
       'HTTP/1.1 101 Switching Protocols\r\n' +
         'Upgrade: websocket\r\n' +
         'Connection: Upgrade\r\n' +
-        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-    );
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`)) {
+      socket.removeListener('error', swallow);
+      return;
+    }
     if (head.length) socket.unshift(head);
     const conn = new WebSocketConnection(socket, req);
+    socket.removeListener('error', swallow);
     this.connections.add(conn);
     conn.on('close', () => this.connections.delete(conn));
     this.emit('connection', conn, req);

@@ -10,11 +10,11 @@
  * It never starts, stops or modifies anything. `diagnose()` is pure so the
  * classification can be tested without a desktop session.
  */
-import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import { join } from 'node:path';
 import { appDataPath } from '../util/appData.js';
+import { sha256File } from '../util/hash.js';
 import { findWindowProcesses, findVisibleWindows, isAlive, readSession } from '../desktop/session.js';
 import { findEdgeBinary, webView2Version, webViewProfileDir } from '../desktop/WebViewHost.js';
 import { gitVersion, probeGit } from '../git/GitProbe.js';
@@ -84,11 +84,7 @@ function sizeOf(path: string): number {
 }
 
 function hashOf(path: string): string | undefined {
-  try {
-    return createHash('sha256').update(readFileSync(path)).digest('hex');
-  } catch {
-    return undefined;
-  }
+  return sha256File(path);
 }
 
 function readReceipt(): InstallReceipt | undefined {

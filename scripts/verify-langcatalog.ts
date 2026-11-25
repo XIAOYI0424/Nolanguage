@@ -15,6 +15,8 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { handleCatalogSearch, installPlugin } from '../src/panel/handlers/plugins.js';
+import type { WorkspaceService } from '../src/panel/WorkspaceService.js';
 import {
   CatalogError,
   compareVersions,
@@ -165,6 +167,64 @@ try {
     threwShape = err;
   }
   check('fetch: a document without a plugins array throws', threwShape instanceof CatalogError);
+
+  // ---- install by id: the refusals happen *before* a download ----
+  const panelHome = join(work, 'panel-home');
+  await mkdir(panelHome, { recursive: true });
+  const goodSha = 'b'.repeat(64);
+  await writeFile(
+    join(panelHome, 'index.json'),
+    JSON.stringify({
+      plugins: [
+        { id: 'signed', version: '1.0.0', downloadUrl: 'https://example.org/signed.zip', sha256: goodSha },
+        { id: 'unsigned', version: '1.0.0', downloadUrl: 'https://example.org/unsigned.zip' },
+      ],
+    }),
+  );
+  await writeFile(
+    join(panelHome, 'sources.json'),
+    JSON.stringify([{ id: 'local', url: join(panelHome, 'index.json') }]),
+  );
+  const fakeWorkspace = {
+    languages: {
+      home: panelHome,
+      isScanned: () => false,
+      installed: () => [],
+      install: async () => {
+        throw new Error('install must not be reached in these checks');
+      },
+    },
+  } as unknown as WorkspaceService;
+
+  let searched: Record<string, unknown> | undefined;
+  await handleCatalogSearch(fakeWorkspace, { query: 'unsig' }, (payload) => {
+    searched = payload as Record<string, unknown>;
+  });
+  const rows = (searched?.entries ?? []) as Array<{ id: string; sha256: boolean }>;
+  check('catalogSearch: the page gets rows from sources.json', rows.length === 1 && rows[0].id === 'unsigned');
+  check('catalogSearch: a row says whether it is hash-verified', rows[0]?.sha256 === false);
+  let all: Record<string, unknown> | undefined;
+  await handleCatalogSearch(fakeWorkspace, {}, (payload) => {
+    all = payload as Record<string, unknown>;
+  });
+  check('catalogSearch: an empty query lists every entry', ((all?.entries ?? []) as unknown[]).length === 2);
+
+  const refusal = async (name: string, msg: Record<string, unknown>, want: string): Promise<void> => {
+    let detail = '';
+    try {
+      await installPlugin(fakeWorkspace, msg);
+    } catch (err) {
+      detail = (err as Error).message;
+    }
+    check(name, detail.includes(want), detail || 'it did not throw');
+  };
+  await refusal('install(id): an unknown id is reported', { id: 'nope' }, 'not in any plugin index');
+  await refusal('install(id): an entry without sha256 is refused', { id: 'unsigned' }, 'no sha256 in the index');
+  await refusal(
+    'install(id): a version that the index no longer serves is refused',
+    { id: 'signed', version: '2.0.0' },
+    'search again',
+  );
 } finally {
   await rm(work, { recursive: true, force: true });
 }

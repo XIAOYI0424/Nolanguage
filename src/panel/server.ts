@@ -22,7 +22,6 @@
  *       PYTHON_BIN             interpreter to use
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { gzipSync } from 'node:zlib';
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -31,6 +30,7 @@ import { appDataPath } from '../util/appData.js';
 import { LogLevel, levelFromName } from '../log/LogLevel.js';
 import { bootLog } from '../util/bootLog.js';
 import { WebSocketServer, type WebSocketConnection } from '../net/websocket.js';
+import { createPanelPages, panelAuthToken } from '../net/panel-pages.js';
 import { PanelHub, type PanelFilter, type PanelSink } from './PanelHub.js';
 import { renderPanelHtml } from '../ui/ui.js';
 import { renderPerfHtml } from '../ui/perf-ui.js';
@@ -38,25 +38,26 @@ import { renderExtensionsHtml } from '../ui/extensions-ui.js';
 import { renderPluginsHtml } from '../ui/plugins-ui.js';
 import { renderPyCharmHtml } from './pycharm-ui.js';
 import { renderProfileHtml } from '../ui/profile-ui.js';
-import { SAMPLES } from './samples.js';
-import { startTraffic } from './traffic.js';
+import { SAMPLES } from '../assets/samples.js';
+import { startTraffic } from './demo-commands.js';
 import { WorkspaceService } from './WorkspaceService.js';
 import { detectProjects } from '../scaffold/detect.js';
 import { planAdd, planSync, runAdd } from '../scaffold/dependencies.js';
 import { ExecService } from '../exec/ExecService.js';
 import { ProfilerService } from '../profiler/ProfilerService.js';
 import { FsService, FsError } from './FsService.js';
+import { handleApplyWorkspaceEdits } from './handlers/fs.js';
 import { McpManager } from '../mcp/McpManager.js';
 import { APP_VERSION } from '../version.js';
 import { ExtensionManager } from '../extensions/ExtensionManager.js';
 import { materializeAssets } from '../assets/embeddedAssets.js';
-import { StdioTransport, WsTransport, parseFrame, type Transport } from './Transport.js';
-import { FlameSampler } from './flame.js';
-import { runPythonCoverage } from './coverage.js';
+import { StdioTransport, WsTransport, guardedReply, parseFrame, type Transport } from './Transport.js';
+import { FlameSampler } from '../perf/flame.js';
+import { runPythonCoverage } from '../runtimes/coverage.js';
 import { gitStatus, gitCommit } from './git.js';
 import { DapClient, type DapScope, type DapStackFrame, type DapVariable } from '../dap/DapClient.js';
 import { discoverBinary } from '../langs/discover.js';
-import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleCompletionResolve, handleDependencyCancel, handleDependencyInstall, handleDependencyReport, handleFolding, handleFormat, handleHover, handleMdRender, handleSignatureHelp } from './handlers/languages.js';
+import { asLanguage, asSandboxLanguage, handleCheck, handleComplete, handleCompletionResolve, handleDependencyCancel, handleDependencyInstall, handleDependencyReport, handleFolding, handleFormat, handleHover, handleInlayHints, handleMdRender, handleSignatureHelp } from './handlers/languages.js';
 import { envToolchains, handleImportIdea, handleInterpreters, handleSetInterpreter } from './handlers/migration.js';
 import {
   handleCodeAction,
@@ -66,12 +67,21 @@ import {
   handleWorkspaceSymbol,
 } from './handlers/navigation.js';
 import { handleAttribute } from './handlers/attribution.js';
-import { languageRoots, pluginPayload } from './handlers/plugins.js';
+import {
+  handleCatalogSearch,
+  handlePluginOp as handlePluginOperation,
+  languageRoots,
+  pluginPayload,
+} from './handlers/plugins.js';
 import { PerfHandlers } from './handlers/perf.js';
 import { pickPath } from '../util/nativePicker.js';
 import { handleDraft, handleFs } from './handlers/fs.js';
-import { handleDebug, handleDebugCmd, handleEnvCreate, handleRun, handleRunScript, handleTerm } from './handlers/run.js';
-import { stateFor, takeConnection } from './conn-state.js';
+import { handleAiAsk, handleAiCancel, handleAiConfig, handleAiSetConfig } from './handlers/ai.js';
+import { handleEnvCreate, handleRun, handleRunScript, handleStop } from './handlers/run.js';
+import { handleTerm } from './handlers/terminal.js';
+import { handleDebug, handleDebugCmd } from './handlers/debug.js';
+import { handleTestCancel, handleTestRun } from './handlers/tests.js';
+import { projectFsFor, stateFor, takeConnection } from './conn-state.js';
 
 /**
  * Directory of this source file. In a Single Executable Application build
@@ -128,6 +138,18 @@ export async function main(
 ): Promise<{ base: string; close: () => Promise<void>; clientCount: () => number }> {
   const port = Number(process.env.PANEL_PORT ?? 7310);
   const host = process.env.PANEL_HOST ?? '127.0.0.1';
+  /**
+   * The panel can read, write and delete files and execute commands, so the
+   * moment it is reachable from anywhere but this machine, "it is only the app"
+   * stops being true.
+   *
+   * A loopback bind keeps the origin check and needs no secret (the browser and
+   * the server share an origin). Anything else — `0.0.0.0` for a container, a LAN
+   * address for a remote-debug session — must present `PANEL_TOKEN`; we refuse to
+   * start without it rather than quietly exposing an unauthenticated shell. The
+   * length floor is there so a one-character token cannot be brute-forced.
+   */
+  const authToken = panelAuthToken(host);
   /** One build identity shared by `/health`, the install receipt and doctor. */
   const startedAt = new Date().toISOString();
   const exePath = process.execPath;
@@ -323,8 +345,10 @@ export async function main(
   // defaults to the process working directory. `PANEL_EXPLORER_ROOT` pins it
   // (tests use this); the UI can repoint it at runtime via `openFolder`.
   const explorerRoot = process.env.PANEL_EXPLORER_ROOT ?? process.cwd();
-  const fs = new FsService(explorerRoot);
-  kernel.logger.root().info('Project explorer ready', { root: fs.root });
+  // Per-window explorer: one window's Open Folder must not repoint another.
+  let currentProjectRoot = explorerRoot;
+  const fsFor = (conn: object): FsService => projectFsFor(conn, () => currentProjectRoot);
+  kernel.logger.root().info('Project explorer ready', { root: currentProjectRoot });
 
   // ---- MCP (Model Context Protocol) servers, for the sidebar tool window ----
   // Config lives in app state (`<appData>/mcp.json`); `NOLANGUAGE_MCP_CONFIG`
@@ -350,7 +374,7 @@ export async function main(
   // ---- kernel flame graph ----
   // One V8 CPU profiler for the whole process, shared by every IDE window that
   // opens the flame graph. Sampling starts on the first subscriber and stops
-  // when the last one leaves (see flame.ts).
+  // when the last one leaves (see perf/flame.ts).
   const flame = new FlameSampler({
     // Memory attribution next to the CPU samples. The kernel's own RSS/heap is
     // measurable in-process; a language server is a separate process, and its
@@ -414,72 +438,41 @@ export async function main(
   const projectRoot = join(__dirname, '..', '..');
 
   /**
-   * One plugin operation from the Plugins page. Every op answers on the
-   * requesting client with `pluginOp { ok }`, and a success re-broadcasts the
-   * whole list so a second tab (or the IDE) sees the change too.
-   *
-   * Failures are answers, not exceptions: a user who points the installer at a
-   * directory that is not a plugin must be told *why*, not dropped.
+   * One plugin operation from the Plugins page; the body lives in the handler so
+   * this file stays a router. See `PluginOpDeps` for the wiring contract.
    */
-  const handlePluginOp = async (
-    msg: Record<string, unknown>,
-    reply: (payload: unknown) => void,
-  ): Promise<void> => {
-    const op = String(msg.kind ?? '');
-    const id = String(msg.id ?? '');
-    const answer = (ok: boolean, extra: Record<string, unknown> = {}): void => {
-      reply({ kind: 'pluginOp', ok, op, id, ...extra });
-      if (ok) {
-        const payload = pluginPayload(workspace);
-        for (const c of wsClients) {
-          try {
-            c.send(payload);
-          } catch {
-            /* a closed client simply missed the update */
+  const handlePluginOp = (msg: Record<string, unknown>, reply: (payload: unknown) => void): Promise<void> =>
+    handlePluginOperation(
+      {
+        workspace,
+        reply,
+        broadcast: (): void => {
+          const payload = pluginPayload(workspace);
+          for (const c of wsClients) {
+            try {
+              c.send(payload);
+            } catch {
+              /* a closed client simply missed the update */
+            }
           }
-        }
-      }
-    };
-    try {
-      if (op === 'langInstall') {
-        const dir = String(msg.dir ?? '').trim();
-        if (!dir) throw new Error('dir is required');
-        const installed = await workspace.languages.install(resolve(dir));
-        await workspace.pluginsSynced();
-        kernel.logger.root().info('Plugin installed', { id: installed.id, version: installed.version });
-        answer(true, { installed });
-        return;
-      }
-      if (op === 'langEnable') {
-        await workspace.languages.enable(id);
-        await workspace.pluginsSynced();
-        answer(true);
-        return;
-      }
-      if (op === 'langDisable') {
-        await workspace.languages.disable(id);
-        await workspace.pluginsSynced();
-        answer(true);
-        return;
-      }
-      if (op === 'langUninstall') {
-        const keepData = msg.keepData !== false;
-        const gone = await workspace.languages.uninstall(id, { keepData });
-        await workspace.pluginsSynced();
-        if (!gone) throw new Error(`"${id}" is not installed`);
-        answer(true);
-        return;
-      }
-      answer(false, { error: `unknown plugin op: ${op}` });
-    } catch (err) {
-      kernel.logger.root().warn('Plugin operation failed', { op, id, error: (err as Error).message });
-      answer(false, { error: (err as Error).message });
-    }
-  };
+        },
+        log: (level, message, fields): void => kernel.logger.root()[level](message, fields),
+      },
+      msg,
+    );
 
   const attachClient = (transport: Transport, label: string, key: object): void => {
     const clientId = hub.allocateClientId();
-    const reply = (payload: unknown): void => transport.send(payload);
+    // A dead peer is routine: the reply guard latches closed on first failure.
+    const reply = guardedReply(transport);
+    // The AI handlers need exactly two things from the server: a way to answer
+    // and a way to write a content-free log line. Passing a closure keeps the
+    // prompt/key out of any interface that could log it by accident.
+    const aiDeps = (answer: (payload: unknown) => void) => ({
+      reply: answer,
+      log: (level: 'info' | 'warn', message: string, fields?: Record<string, unknown>): void =>
+        kernel.logger.root()[level](message, fields),
+    });
 
     hub.addClient({ id: clientId, send: reply } as PanelSink);
     wsClients.add(transport);
@@ -495,7 +488,7 @@ export async function main(
     });
     // …and where the project explorer is rooted, so the tree can paint a root
     // row immediately instead of waiting for the first `fsList` round-trip.
-    reply({ kind: 'fsRoot', reqId: 0, ...fs.describe() });
+    reply({ kind: 'fsRoot', reqId: 0, ...fsFor(key).describe() });
     // Plugins page bootstrap: installed set + budget + runtimes in one frame.
     reply(pluginPayload(workspace));
     // MCP sidebar bootstrap: the declared servers and their live state.
@@ -508,6 +501,9 @@ export async function main(
         reply({ kind: 'error', message: 'invalid JSON' });
         return;
       }
+      // Resolved once per frame: every project-relative handler on this
+      // connection now reads the same root the explorer shows.
+      const projectFs = fsFor(key);
       switch (msg.kind) {
         // Performance cases live in handlers/perf.ts: they own `lastProfile` and
         // fan out to other windows. Delegating here keeps the switch a routing
@@ -531,6 +527,12 @@ export async function main(
         case 'langUninstall':
         case 'langInstall':
           void handlePluginOp(msg, reply);
+          break;
+
+        case 'catalogSearch':
+          void handleCatalogSearch(workspace, msg, reply).catch((err: unknown) =>
+            reply({ kind: 'catalog', query: '', entries: [], unavailable: (err as Error).message }),
+          );
           break;
 
         // ---------- MCP (sidebar tool window) ----------
@@ -609,7 +611,7 @@ export async function main(
 
         // ---------- project wizard (templates) ----------
         case 'templatesList':
-          reply({ kind: 'templates', reqId: msg.reqId, root: workspace.projectRoot(), items: workspace.templates() });
+          reply({ kind: 'templates', reqId: msg.reqId, root: projectFs.root, items: workspace.templates() });
           break;
 
         case 'templatesGenerate': {
@@ -621,7 +623,7 @@ export async function main(
               String(msg.language ?? ''),
               String(msg.templateId ?? ''),
               params,
-              String(msg.dir ?? ''),
+              String(msg.dir ?? '') || projectFs.root,
               { allowNonEmpty: msg.allowNonEmpty === true },
             );
             reply({ kind: 'templateGenerated', reqId: msg.reqId, ok: true, dir: result.dir, files: result.files });
@@ -661,7 +663,7 @@ export async function main(
         case 'depsAdd':
         case 'depsSync': {
           const sync = msg.kind === 'depsSync';
-          const dir = String(msg.dir ?? '') || workspace.projectRoot();
+          const dir = String(msg.dir ?? '') || projectFs.root;
           const spec = String(msg.spec ?? '');
           const dryRun = !sync && msg.dryRun === true;
           void (async () => {
@@ -680,7 +682,7 @@ export async function main(
 
         // ---------- import an existing project ----------
         case 'projectsDetect': {
-          const dir = String(msg.dir ?? '') || workspace.projectRoot();
+          const dir = String(msg.dir ?? '') || projectFs.root;
           try {
             reply({ kind: 'projectCandidates', reqId: msg.reqId, dir, items: detectProjects(dir) });
           } catch (err) {
@@ -718,14 +720,26 @@ export async function main(
         case 'fsRename':
         case 'fsDelete':
         case 'openFolder':
-          void handleFs(fs, msg, reply);
+        // Local revisions: snapshots are taken by the write paths above.
+        case 'historyList':
+        case 'historyRead':
+        case 'historyRevert':
+          void handleFs(projectFs, msg, reply, (root) => {
+            currentProjectRoot = root;
+            return workspace.setProjectRoot(root);
+          });
+          break;
+
+        // Multi-file refactor edits: preflight every file, then write them all.
+        case 'applyWorkspaceEdits':
+          void handleApplyWorkspaceEdits(projectFs, msg, reply);
           break;
 
         // Crash recovery: buffers kept outside the workspace (handlers/fs.ts).
         case 'draftSave':
         case 'draftList':
         case 'draftDrop':
-          void handleDraft(fs, msg, reply);
+          void handleDraft(projectFs, msg, reply);
           break;
 
         // ---------- extensions (host process) ----------
@@ -754,7 +768,7 @@ export async function main(
 
         // ---------- terminal (PyCharm shell) ----------
         case 'termExec':
-          handleTerm(String(msg.cmd ?? ''), reply, key, fs.root);
+          handleTerm(String(msg.cmd ?? ''), reply, key, projectFs.root);
           break;
         case 'termInput': {
           const tc = stateFor(key).termChild;
@@ -772,24 +786,20 @@ export async function main(
           void handleRun(key, workspace, msg, reply);
           break;
 
-        // Stop button / Run → Stop: cancel the live run *and* a debug session.
-        case 'stop': {
-          const sessionId = String(msg.sessionId ?? 'ide');
-          const st = stateFor(key);
-          const debugStopped = !!st.dap;
-          if (st.dap) {
-            void st.dap.stop().catch(() => undefined);
-            st.dap = undefined;
-          }
-          const cancelled = workspace.cancel(sessionId);
-          reply({ kind: 'stopped', sessionId, cancelled, debugStopped });
+        // Test runner: its own session and abort controller, so Tests -> Stop
+        // cannot cancel a Run the user launched, nor the other way round.
+        case 'testRun': void handleTestRun(workspace, msg, reply, key); break;
+        case 'testCancel': handleTestCancel(key, reply); break;
+
+        // Stop button / Run -> Stop: cancel the live run *and* a debug session.
+        case 'stop':
+          handleStop(key, workspace, msg, reply);
           break;
-        }
 
         // Debug: the manifest's `debug` block names the adapter; a missing
         // adapter is reported as such instead of faking a session.
         case 'debug':
-          void handleDebug(key, workspace, kernel, msg, reply);
+          void handleDebug(key, workspace, kernel, msg, reply, projectFs.root);
           break;
 
         case 'debugCmd':
@@ -798,7 +808,7 @@ export async function main(
 
         // Run with coverage (Python stdlib tracer).
         case 'gitStatus':
-          void gitStatus(fs.root)
+          void gitStatus(projectFs.root)
             .then((s) => reply({ kind: 'gitStatus', ...s }))
             .catch((err: unknown) =>
               reply({ kind: 'gitStatus', ok: false, branch: '', changes: [], error: (err as Error).message }),
@@ -806,7 +816,7 @@ export async function main(
           break;
 
         case 'gitCommit':
-          void gitCommit(fs.root, String(msg.message ?? ''))
+          void gitCommit(projectFs.root, String(msg.message ?? ''))
             .then((r) => reply({ kind: 'gitCommitResult', ...r }))
             .catch((err: unknown) =>
               reply({ kind: 'gitCommitResult', ok: false, branch: '', committed: 0, output: '', error: (err as Error).message }),
@@ -864,6 +874,14 @@ export async function main(
         case 'format': void handleFormat(workspace, msg, reply); break;
 
         case 'folding': void handleFolding(workspace, msg, reply); break;
+        case 'inlayHints': void handleInlayHints(workspace, msg, reply); break;
+
+        // ---- AI Assistant: one streamed answer, cancellable ----
+        // The prompt is never logged; see handlers/ai.ts for why.
+        case 'aiConfig': handleAiConfig(aiDeps(reply)); break;
+        case 'aiSetConfig': handleAiSetConfig(aiDeps(reply), msg); break;
+        case 'aiAsk': void handleAiAsk(key, aiDeps(reply), msg); break;
+        case 'aiCancel': handleAiCancel(key, aiDeps(reply), msg); break;
         case 'hover':
           void handleHover(workspace, msg, reply);
           break;
@@ -877,10 +895,10 @@ export async function main(
         // buffers, so the root comes from the explorer — as a getter, because
         // `openFolder` can repoint it at runtime.
         case 'dependencyReport':
-          void handleDependencyReport(workspace, () => fs.root, msg, reply);
+          void handleDependencyReport(workspace, () => projectFs.root, msg, reply);
           break;
         case 'dependencyInstall':
-          void handleDependencyInstall(workspace, () => fs.root, msg, reply, key);
+          void handleDependencyInstall(workspace, () => projectFs.root, msg, reply, key);
           break;
         case 'dependencyCancel':
           handleDependencyCancel(key, reply);
@@ -888,16 +906,22 @@ export async function main(
 
         // ---------- P1 · migration thresholds ----------
         case 'interpreters':
-          void handleInterpreters(workspace, msg, reply);
+          void handleInterpreters(workspace, () => projectFs.root, msg, reply);
           break;
 
         case 'setInterpreter':
           void handleSetInterpreter(workspace, msg, reply);
           break;
-        case 'envCreate': void handleEnvCreate(workspace, msg, reply); break;
+        case 'envCreate': void handleEnvCreate(workspace, msg, reply, projectFs.root); break;
 
         case 'importIdea':
-          void handleImportIdea(workspace, msg, reply);
+          // A client may still name a root explicitly; otherwise use this
+          // connection's current project, not the workspace's scratch root.
+          void handleImportIdea(
+            workspace,
+            { ...msg, root: String(msg.root ?? '') || projectFs.root },
+            reply,
+          );
           break;
 
         // ---------- Stage 11 · attribution ----------
@@ -998,6 +1022,33 @@ export async function main(
     const extensionsHtml = renderExtensionsHtml(port);
     const pluginsHtml = renderPluginsHtml();
     const pycharmHtml = renderPyCharmHtml(port);
+    const handleRequest = createPanelPages({
+      authToken,
+      pages: {
+        '/': pycharmHtml,
+        '/index.html': pycharmHtml,
+        '/ide': pycharmHtml,
+        '/pycharm': pycharmHtml,
+        '/ide-pycharm': pycharmHtml,
+        '/monitor': monitorHtml,
+        '/panel': monitorHtml,
+        '/perf': perfHtml,
+        '/performance': perfHtml,
+        '/profile': profileHtml,
+        '/profiles': profileHtml,
+        '/extensions': extensionsHtml,
+        '/plugins': pluginsHtml,
+        '/languages': pluginsHtml,
+      },
+      health: () => ({
+        status: 'ok',
+        clients: hub.clientCount(),
+        appVersion: kernel.appVersion,
+        build: { appVersion: kernel.appVersion, pid: process.pid, exePath, exeSize, startedAt },
+        workspace: workspace.status(),
+        ...(workspaceFailure ? { degraded: { workspace: workspaceFailure } } : {}),
+      }),
+    });
     const gzipHtmlCache = new Map<string, Buffer>();
 
     ws = new WebSocketServer({
@@ -1007,58 +1058,8 @@ export async function main(
       // server refuses third-party origins itself. `PANEL_ALLOW_ANY_ORIGIN=1`
       // opens it back up for a proxy / remote-debug setup.
       allowedOrigins: process.env.PANEL_ALLOW_ANY_ORIGIN === '1' ? ['*'] : [],
-      onRequest: (req, res) => {
-        const url = (req.url ?? '/').split('?')[0];
-        const html = (body: string): void => {
-          const accepted = String(req.headers['accept-encoding'] ?? '');
-          // Parse Accept-Encoding: match "gzip" and check its q-value is not 0.
-          const gzipMatch = /(?:^|,\s*)gzip(?:;\s*q=([0-9.]+))?/i.exec(accepted);
-          const gzipQ = gzipMatch ? (gzipMatch[1] !== undefined ? parseFloat(gzipMatch[1]) : 1) : 0;
-          const wantsGzip = gzipQ > 0;
-          const headers: Record<string, string | number> = {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'no-store',
-            vary: 'Accept-Encoding',
-          };
-          if (wantsGzip && Buffer.byteLength(body) >= 16 * 1024) {
-            let compressed = gzipHtmlCache.get(body);
-            if (!compressed) {
-              compressed = gzipSync(Buffer.from(body), { level: 6 });
-              gzipHtmlCache.set(body, compressed);
-            }
-            headers['content-encoding'] = 'gzip';
-            headers['content-length'] = compressed.length;
-            res.writeHead(200, headers);
-            res.end(compressed);
-            return;
-          }
-          res.writeHead(200, headers);
-          res.end(body);
-        };
-        // The PyCharm-style shell is the workspace; the old Vue IDE page is gone.
-        if (url === '/' || url === '/index.html' || url === '/ide') return html(pycharmHtml), true;
-        if (url === '/monitor' || url === '/panel') return html(monitorHtml), true;
-        if (url === '/perf' || url === '/performance') return html(perfHtml), true;
-        if (url === '/profile' || url === '/profiles') return html(profileHtml), true;
-        if (url === '/extensions') return html(extensionsHtml), true;
-        if (url === '/plugins' || url === '/languages') return html(pluginsHtml), true;
-        if (url === '/pycharm' || url === '/ide-pycharm') return html(pycharmHtml), true;
-        if (url === '/health') {
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              status: 'ok',
-              clients: hub.clientCount(),
-              appVersion: kernel.appVersion,
-              build: { appVersion: kernel.appVersion, pid: process.pid, exePath, exeSize, startedAt },
-              workspace: workspace.status(),
-              ...(workspaceFailure ? { degraded: { workspace: workspaceFailure } } : {}),
-            }),
-          );
-          return true;
-        }
-        return false;
-      },
+      authToken,
+      onRequest: handleRequest,
     });
 
     ws.on('connection', (conn: WebSocketConnection) => {

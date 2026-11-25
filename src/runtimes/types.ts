@@ -184,6 +184,13 @@ export interface RunConfig {
   steps?: RunStep[];
   /** Per-mode overrides — `run` / `test` / anything the plugin names. */
   modes?: Record<string, { steps?: RunStep[]; timeoutMs?: number; command?: string[] }>;
+  /**
+   * Test-output format id (e.g. the framework family whose output the test mode
+   * prints). The engine maps it to a parser; an unknown or absent id means the
+   * test mode still runs, but its output streams as plain text instead of a
+   * per-case tree.
+   */
+  testFormat?: string;
   /** Extra environment for the child process. */
   env?: Record<string, string>;
   /** `inline-vm`: wall-clock limit for one evaluation. */
@@ -223,6 +230,19 @@ export interface RunRequest {
   onStdinReady?: (sink: (data: string) => void) => void;
   /** Host cancellation (the IDE's Stop button). Runtimes race it against the child. */
   signal?: AbortSignal;
+  /**
+   * Test selector substituted into `{filter}` (e.g. `-run ^TestFoo$`).
+   *
+   * Test execution reuses the normal pipeline; only the argv fragment differs,
+   * and it comes from the client, so `handlers/test.ts` validates it first.
+   */
+  filter?: string;
+  /**
+   * Project-mode path list and entry symbol, for `{classpath}` / `{mainClass}`
+   * in a plugin's `modes.project` step. Validated by the panel before dispatch.
+   */
+  classpath?: string;
+  mainClass?: string;
 }
 
 /**

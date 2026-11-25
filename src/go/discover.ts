@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { commandExists, type LspLaunchSpec } from '../lsp/LspClient.js';
+import { decodeOutput } from '../util/encoding.js';
 
 export interface GoBinResolution {
   /** Absolute path (or bare name when found on PATH) of the go executable. */
@@ -230,7 +231,7 @@ export function goVersion(goBin: string): Promise<string | null> {
     };
     try {
       const child = spawn(goBin, ['version'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-      child.stdout.on('data', (c: Buffer) => (out += c.toString('utf8')));
+      child.stdout.on('data', (c: Buffer) => (out += decodeOutput(c)));
       child.on('error', () => done(null));
       child.on('close', (code) => done(code === 0 ? out.trim() || null : null));
       setTimeout(() => {

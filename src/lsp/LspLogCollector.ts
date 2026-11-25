@@ -14,6 +14,7 @@
  * the same ring buffer + panel as kernel logs.
  */
 import { LogLevel, levelFromName } from '../log/LogLevel.js';
+import { decodeOutput } from '../util/encoding.js';
 import type { Logger } from '../log/Logger.js';
 
 export interface LspLogCollectorOptions {
@@ -91,7 +92,7 @@ export class LspLogCollector {
 
   /** Feed a raw chunk from the language server's stream. */
   write(chunk: string | Buffer): void {
-    this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    this.buffer += typeof chunk === 'string' ? chunk : decodeOutput(chunk);
     let nl: number;
     while ((nl = this.buffer.indexOf('\n')) >= 0) {
       const line = this.buffer.slice(0, nl).replace(/\r$/, '');

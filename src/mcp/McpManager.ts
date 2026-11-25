@@ -48,6 +48,7 @@ import { dirname } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { appDataPath } from '../util/appData.js';
 import { planSpawn } from '../util/spawnPlan.js';
+import { OutputDecoder } from '../util/encoding.js';
 
 /** One declared server. Everything but `command` is optional. */
 export interface McpServerConfig {
@@ -286,8 +287,9 @@ export class McpManager {
     };
     this.live.set(id, live);
 
+    const stderrDecoder = new OutputDecoder();
     child.stderr.on('data', (chunk: Buffer) => {
-      live.stderr = (live.stderr + chunk.toString('utf8')).slice(-STDERR_TAIL);
+      live.stderr = (live.stderr + stderrDecoder.push(chunk)).slice(-STDERR_TAIL);
     });
     live.reader.on('line', (line) => this.onLine(live, line));
     child.on('error', (err) => {

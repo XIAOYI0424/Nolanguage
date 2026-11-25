@@ -23,6 +23,42 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Remove a temp directory that a just-killed child may still hold open.
+ *
+ * On Windows the compiled sample lives inside `dir`, so the kernel keeps a lock on
+ * the directory until the terminated process is fully reaped. A single `rmSync`
+ * therefore throws `EPERM` — and because it threw from a `finally`, it replaced a
+ * green suite with a `0/0 checks` red one (the crash happened before the summary
+ * line). Waiting for the exit and retrying is the fix; leaking a temp directory is
+ * an acceptable last resort, failing the suite is not.
+ */
+async function removeTempDir(dir: string, child: { once: (event: 'exit', cb: () => void) => void; exitCode: number | null } | null): Promise<void> {
+  if (child && child.exitCode === null) {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 40 });
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'ENOTEMPTY') {
+        console.log(`  note: could not remove ${dir} (${code ?? 'unknown'})`);
+        return;
+      }
+      await sleep(150);
+    }
+  }
+  console.log(`  note: left ${dir} behind (still locked by a terminated process)`);
+}
+
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
@@ -238,7 +274,7 @@ check('dump: the duration is not part of the state', g24?.wait === 'chan receive
       } catch {
         /* already gone */
       }
-      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 60 });
+      await removeTempDir(dir, child ?? null);
     }
   }
 }

@@ -237,7 +237,19 @@
       "-m",
       "pip",
       "install"
-    ]
+    ],
+    "local": {
+      "editable": {
+        "args": [
+          "-e"
+        ],
+        "label": "Editable (pip install -e: source edits take effect at once)"
+      },
+      "file": {
+        "args": [],
+        "label": "Local wheel / sdist file"
+      }
+    }
   },
   "scaffold": {
     "templates": [

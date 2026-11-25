@@ -34,9 +34,22 @@ import {
 import { materializeAssets } from '../src/assets/embeddedAssets';
 import { environmentExecutable, planEnvironment } from '../src/langs/interpreters';
 import { validateManifest } from '../src/langs/manifest';
-import { normalizeFoldingRanges } from '../src/lsp/navigation';
+import { normalizeFoldingRanges, normalizeInlayHints } from '../src/lsp/navigation';
+import { applyTextEdits, editPath } from '../src/lsp/workspaceEdits';
+import { createGoTestParser, parseGoTest } from '../src/langs/testParser';
+import {
+  boundedRunTimeout,
+  RUN_TIMEOUT_MAX_MS,
+  RUN_TIMEOUT_MIN_MS,
+} from '../src/panel/handlers/run';
+import { sanitizeTestFilter } from '../src/panel/handlers/tests';
+import { HistoryStore } from '../src/util/history';
+import { planPreLaunch, resolveLaunchProgram } from '../src/panel/handlers/debug';
+import { buildLanguagePlugin, RUN_MODES } from '../src/langs/scaffoldPlugin';
+import { parseSha256 } from '../src/util/hash';
+import { SseDecoder, buildChatRequest, normalizeBaseUrl, normalizeModel } from '../src/net/ai';
 import { FsService } from '../src/panel/FsService';
-import { handleDraft } from '../src/panel/handlers/fs';
+import { handleApplyWorkspaceEdits, handleDraft } from '../src/panel/handlers/fs';
 import { describeFailure } from '../src/desktop/fatalDialog';
 import {
   declaresFeature,
@@ -48,11 +61,13 @@ import {
 import { decodeEntities, findAll, options, parseXml } from '../src/util/xml';
 import { decideLaunch, launchUrl, sameBuild } from '../src/desktop/handshake';
 import { expandMacros, importIdeaProject } from '../src/langs/ideaImport';
-import { boundedRunTimeout, RUN_TIMEOUT_MAX_MS, RUN_TIMEOUT_MIN_MS } from '../src/panel/run-timeout';
+
 import { isCmdScript, planSpawn, quoteCmdArg } from '../src/util/spawnPlan';
 import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../src/mcp/McpManager';
 import { FileTransport } from '../src/log/transports/FileTransport';
 import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
+import { decodeOutput, OutputDecoder } from '../src/util/encoding';
+import { writeHandshake } from '../src/net/websocket';
 import { resolveBundledFallback } from '../src/lsp/bundledFallback';
 import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/serverInstall';
 import { buildManagerPlugin } from '../src/langs/managerPlugins';
@@ -61,7 +76,13 @@ import { cachedVersion, toolchainSignature, versionCachePath } from '../src/lang
 import { windowUsable } from '../src/desktop/handshake';
 import { detectProjects } from '../src/scaffold/detect';
 import { applyAdd, planAdd, planSync } from '../src/scaffold/dependencies';
-import { parseEnv, RunConfigStore, splitArgs } from '../src/scaffold/runConfigs';
+import {
+  classpathProblem,
+  mainClassProblem,
+  parseEnv,
+  RunConfigStore,
+  splitArgs,
+} from '../src/scaffold/runConfigs';
 import { runtimeSupportsArgs } from '../src/runtimes/index';
 import { TemplateRegistry } from '../src/scaffold/registry';
 import { safeRelativePath } from '../src/scaffold/types';
@@ -280,7 +301,9 @@ describe('interpreters', () => {
       mkdirSync(join(dir, '.venv', 'Scripts'), { recursive: true });
       writeFileSync(join(dir, '.venv', 'pyvenv.cfg'), 'home = C:/Python313\n');
       writeFileSync(join(dir, '.venv', 'Scripts', 'python.exe'), 'MZ');
-      const found = await discoverInterpreters(dir, 'python', { pathEnv: '', probe: null, home: dir });
+      const found = await discoverInterpreters(dir, 'python', {
+        pathEnv: '', probe: null, home: dir, envSearchUp: 0, envSearchDown: 0,
+      });
       expect(found.length).toBe(1);
       expect(found[0].kind).toBe('venv');
       expect(found[0].source).toBe('.venv');
@@ -291,6 +314,74 @@ describe('interpreters', () => {
 
   it('returns nothing for a language it has no spec for', async () => {
     expect(await discoverInterpreters('.', 'cobol')).toEqual([]);
+  });
+
+  it('finds a virtual environment inside a subfolder project', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nlg-vitest-child-'));
+    try {
+      const env = join(dir, 'services', 'api', '.venv');
+      mkdirSync(join(env, 'Scripts'), { recursive: true });
+      writeFileSync(join(env, 'pyvenv.cfg'), 'home = C:/Python313\n');
+      writeFileSync(join(env, 'Scripts', 'python.exe'), 'MZ');
+      const found = await discoverInterpreters(dir, 'python', {
+        pathEnv: '', probe: null, home: dir, envSearchUp: 0, envSearchDown: 3,
+      });
+      expect(found.map((f) => f.source)).toEqual(['services/api/.venv']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds the workspace environment from an opened subfolder', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nlg-vitest-parent-'));
+    try {
+      const env = join(dir, '.venv');
+      mkdirSync(join(env, 'Scripts'), { recursive: true });
+      writeFileSync(join(env, 'pyvenv.cfg'), 'home = C:/Python313\n');
+      writeFileSync(join(env, 'Scripts', 'python.exe'), 'MZ');
+      const sub = join(dir, 'services', 'api');
+      mkdirSync(sub, { recursive: true });
+      const found = await discoverInterpreters(sub, 'python', {
+        pathEnv: '', probe: null, home: dir, envSearchUp: 2, envSearchDown: 0,
+      });
+      expect(found.map((f) => f.source)).toEqual(['../../.venv']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ranks local, parent and child environments in that order', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nlg-vitest-rank-'));
+    try {
+      for (const rel of ['.venv', 'services/api/.venv', 'services/api/tools/.venv']) {
+        const env = join(dir, rel);
+        mkdirSync(join(env, 'Scripts'), { recursive: true });
+        writeFileSync(join(env, 'pyvenv.cfg'), 'home = C:/Python313\n');
+        writeFileSync(join(env, 'Scripts', 'python.exe'), 'MZ');
+      }
+      const found = await discoverInterpreters(join(dir, 'services', 'api'), 'python', {
+        pathEnv: '', probe: null, home: dir, envSearchUp: 2, envSearchDown: 2,
+      });
+      expect(found.map((f) => f.source)).toEqual(['.venv', '../../.venv', 'tools/.venv']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not crawl dependency directories looking for environments', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nlg-vitest-skip-'));
+    try {
+      const env = join(dir, 'node_modules', 'pkg', '.venv');
+      mkdirSync(join(env, 'Scripts'), { recursive: true });
+      writeFileSync(join(env, 'pyvenv.cfg'), 'home = C:/Python313\n');
+      writeFileSync(join(env, 'Scripts', 'python.exe'), 'MZ');
+      const found = await discoverInterpreters(dir, 'python', {
+        pathEnv: '', probe: null, home: dir, envSearchUp: 0, envSearchDown: 4,
+      });
+      expect(found).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1041,6 +1132,56 @@ describe('scaffold · run configurations', () => {
     expect(env).toEqual({ A: '1', B: 'two words' });
   });
 
+  it('saves a project-mode configuration with a classpath and entry class', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-rc-project-'));
+    const store = new RunConfigStore(home);
+    const saved = store.save({
+      name: 'NeroSama app', language: 'java', mode: 'project', args: '',
+      classpath: 'D:\\repo\\app\\build\\classes;D:\\repo\\lib\\*',
+      mainClass: 'com.nero.vtuber.app.Application',
+    });
+    expect(saved.mode).toBe('project');
+    expect(saved.classpath).toContain('lib\\*');
+    expect(store.list()[0].mainClass).toBe('com.nero.vtuber.app.Application');
+    expect(() => store.save({ ...saved, mode: 'project', classpath: 'a"b' })).toThrow(/forbidden/);
+    expect(() => store.save({ ...saved, mode: 'project', mainClass: 'x; calc.exe' })).toThrow(/dotted/);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('validates classpath and main class as data, not shell text', () => {
+    expect(classpathProblem('C:\\repo\\classes;C:\\repo\\lib\\*')).toBeUndefined();
+    expect(classpathProblem('a"b')).toMatch(/forbidden/);
+    expect(classpathProblem('a{b}')).toMatch(/forbidden/);
+    expect(classpathProblem('')).toMatch(/required/);
+    expect(mainClassProblem('com.nero.vtuber.app.Application')).toBeUndefined();
+    expect(mainClassProblem('x; calc.exe')).toMatch(/dotted/);
+  });
+
+  it('decodes GBK child output, UTF-8, and a split multi-byte character', () => {
+    const gbk = Buffer.from([0xb4, 0xed, 0xce, 0xf3, 0x3a]); // 错误:
+    expect(decodeOutput(gbk)).toBe('错误:');
+    expect(decodeOutput(Buffer.from('你好', 'utf8'))).toBe('你好');
+
+    const utf8 = Buffer.from('你', 'utf8');
+    const decoder = new OutputDecoder();
+    expect(decoder.push(utf8.subarray(0, 2))).toBe('');
+    expect(decoder.push(utf8.subarray(2))).toBe('你');
+    expect(decoder.flush()).toBe('');
+  });
+
+  it('does not let a failed handshake write escape to process level', () => {
+    const writes: string[] = [];
+    let destroyed = false;
+    const socket = {
+      destroyed: false,
+      write(data: string) { writes.push(data); throw new Error('EPIPE: broken pipe, write'); },
+      destroy() { destroyed = true; },
+    } as unknown as import('node:stream').Duplex;
+    expect(writeHandshake(socket, 'HTTP/1.1 101\r\n\r\n')).toBe(false);
+    expect(writes).toHaveLength(1);
+    expect(destroyed).toBe(true);
+  });
+
   it('treats a corrupt file as empty instead of failing to start', () => {
     const home = mkdtempSync(join(tmpdir(), 'nl-rc3-'));
     writeFileSync(join(home, 'run-configs.json'), '{not json');
@@ -1680,6 +1821,8 @@ describe('interpreters · declared by the plugin, table only as fallback', () =>
       pathEnv: '',
       probe: null,
       home: dir,
+      envSearchUp: 0,
+      envSearchDown: 0,
       spec: { envDirs: ['.kvenv'], marker: 'kvenv.cfg', envBins: ['bin/kotlinc'] },
     });
     expect(found.map((f) => f.source)).toEqual(['.kvenv']);
@@ -1696,6 +1839,8 @@ describe('interpreters · declared by the plugin, table only as fallback', () =>
       pathEnv: '',
       probe: null,
       home: dir,
+      envSearchUp: 0,
+      envSearchDown: 0,
       spec: { envDirs: [], exeNames: [] },
     });
     expect(found).toEqual([]);
@@ -1707,6 +1852,8 @@ describe('interpreters · declared by the plugin, table only as fallback', () =>
       home: dir,
       probe: async () => '1.9.0',
       sdkName: 'Kotlin 1.9.0',
+      envSearchUp: 0,
+      envSearchDown: 0,
       spec: {
         envDirs: ['.kvenv'],
         marker: 'kvenv.cfg',
@@ -1727,6 +1874,8 @@ describe('interpreters · declared by the plugin, table only as fallback', () =>
       pathEnv: '',
       probe: null,
       home: dir,
+      envSearchUp: 0,
+      envSearchDown: 0,
       spec: { envDirs: ['.kvenv'], envBins: ['bin/kotlinc'] },
     });
     expect(found).toEqual([]);
@@ -1736,7 +1885,9 @@ describe('interpreters · declared by the plugin, table only as fallback', () =>
     mkdirSync(join(dir, '.venv', 'Scripts'), { recursive: true });
     writeFileSync(join(dir, '.venv', 'pyvenv.cfg'), 'x\n');
     writeFileSync(join(dir, '.venv', 'Scripts', 'python.exe'), 'MZ');
-    const found = await discoverInterpreters(dir, 'python', { pathEnv: '', probe: null, home: dir });
+    const found = await discoverInterpreters(dir, 'python', {
+      pathEnv: '', probe: null, home: dir, envSearchUp: 0, envSearchDown: 0,
+    });
     expect(found.map((f) => f.source)).toEqual(['.venv']);
   });
 });
@@ -2242,6 +2393,80 @@ describe('package install', () => {
     expect(r.truncated).toBe(false);
   });
 
+  it('inserts a declared local kind before an in-project path and passes the absolute path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nl-local-'));
+    const pkg = join(root, 'pkg');
+    mkdirSync(pkg);
+    // A script file, not `node -e`: the declared `editable` flag is itself `-e`,
+    // and reusing it as node's own flag would mangle the fake installer's argv.
+    const echo = join(root, 'echo.cjs');
+    writeFileSync(echo, 'process.stdout.write(process.argv.slice(2).join(" "))');
+    const spec = {
+      format: 'requirements' as const,
+      files: ['requirements.txt'],
+      install: [process.execPath, echo],
+      local: { editable: { args: ['-e'], label: 'Editable' } },
+    };
+    const r = await installPackage(spec, { kind: 'editable', value: 'pkg' }, undefined, root, {
+      onData: () => undefined,
+    });
+    expect(r.ok).toBe(true);
+    // The flag lands before the path, and the path is resolved to an absolute
+    // one — pip -e needs a real checkout, not a string it might interpret.
+    expect(r.output.replace(/\\/g, '/')).toBe(`-e ${pkg.replace(/\\/g, '/')}`);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('refuses a local kind the manifest never declared, without spawning', async () => {
+    let spawned = false;
+    const r = await installPackage(echoSpec, { kind: 'editable', value: 'pkg' }, undefined, tmpdir(), {
+      onData: () => undefined,
+      onSpawn: () => { spawned = true; },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('does not declare');
+    expect(spawned).toBe(false);
+  });
+
+  it('refuses a local path outside the project or that does not exist', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nl-local-bounds-'));
+    const spec = {
+      format: 'requirements' as const,
+      files: ['requirements.txt'],
+      install: [process.execPath, '-e', 'process.stdout.write(process.argv.slice(1).join(" "))'],
+      local: { file: { args: [] } },
+    };
+    let spawned = false;
+    const outside = await installPackage(spec, { kind: 'file', value: '../elsewhere' }, undefined, root, {
+      onData: () => undefined,
+      onSpawn: () => { spawned = true; },
+    });
+    expect(outside.ok).toBe(false);
+    expect(outside.error).toContain('inside the project');
+    const missing = await installPackage(spec, { kind: 'file', value: 'nope' }, undefined, root, {
+      onData: () => undefined,
+      onSpawn: () => { spawned = true; },
+    });
+    expect(missing.ok).toBe(false);
+    expect(missing.error).toContain('no such path');
+    expect(spawned).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reports the declared local kinds in the dependency report', async () => {
+    const spec = {
+      format: 'requirements' as const,
+      files: ['requirements.txt'],
+      install: [process.execPath],
+      local: { editable: { label: 'Editable' }, file: {} },
+    };
+    const report = await readDependencies('python', spec, tmpdir(), '');
+    expect(report.installLocal).toEqual([
+      { kind: 'editable', label: 'Editable' },
+      { kind: 'file', label: 'file' },
+    ]);
+  });
+
   it('expands {toolchain} in the command and the arguments', async () => {
     const spec = {
       format: 'requirements' as const,
@@ -2333,6 +2558,91 @@ describe('folding ranges · textDocument/foldingRange', () => {
   });
 });
 
+describe('inlay hints · textDocument/inlayHint', () => {
+  /**
+   * Hints are painted as zero-width widgets, so a hint without a position pins to
+   * line 0 and an empty label is an invisible mark — both must be dropped before
+   * the editor sees them. The wire format also lets a server send `label` as parts
+   * that carry a jump target; a plain inline label joins the text and drops it.
+   */
+  it('joins label parts, drops the location, and keeps kind and padding', () => {
+    const out = normalizeInlayHints([
+      {
+        position: { line: 4, character: 12 },
+        label: [{ value: 'count: ' }, { value: 'int', location: { uri: 'file:///x' } }],
+        kind: 2,
+        paddingLeft: true,
+      },
+      { position: { line: 2, character: 0 }, label: 'str', kind: 1, paddingRight: false },
+    ]);
+    expect(out).toEqual([
+      { line: 2, character: 0, label: 'str', kind: 'type' },
+      { line: 4, character: 12, label: 'count: int', kind: 'parameter', paddingLeft: true },
+    ]);
+  });
+
+  it('drops hints it cannot draw and sorts the rest by position', () => {
+    const out = normalizeInlayHints([
+      { position: { line: 9, character: 3 }, label: 'late' },
+      { label: 'no position' },
+      { position: { line: -1, character: 0 }, label: 'negative' },
+      { position: { line: 5, character: 0 }, label: '' },
+      { position: { line: 5, character: 8 }, label: 'early' },
+      'nope',
+      null,
+    ]);
+    expect(out).toEqual([
+      { line: 5, character: 8, label: 'early' },
+      { line: 9, character: 3, label: 'late' },
+    ]);
+  });
+
+  it('keeps an unknown kind as a hint without a style', () => {
+    const out = normalizeInlayHints([{ position: { line: 1, character: 1 }, label: 'x', kind: 99 }]);
+    expect(out).toEqual([{ line: 1, character: 1, label: 'x' }]);
+  });
+
+  it('returns nothing for a reply that is not a list', () => {
+    expect(normalizeInlayHints(null)).toEqual([]);
+    expect(normalizeInlayHints({ position: { line: 0, character: 0 }, label: 'x' })).toEqual([]);
+  });
+});
+
+describe('workspace edits · multi-file rename', () => {
+  it('applies several edits bottom-up in one file', () => {
+    const out = applyTextEdits('alpha beta alpha', [
+      { line: 0, character: 0, endLine: 0, endCharacter: 5, newText: 'gamma' },
+      { line: 0, character: 11, endLine: 0, endCharacter: 16, newText: 'gamma' },
+    ]);
+    expect(out).toEqual({ ok: true, text: 'gamma beta gamma', applied: 2 });
+  });
+
+  it('rejects an out-of-range edit without touching the text', () => {
+    const out = applyTextEdits('one\ntwo', [
+      { line: 9, character: 0, endLine: 9, endCharacter: 1, newText: 'x' },
+    ]);
+    expect(out.ok).toBe(false);
+  });
+
+  it('rejects overlapping edits and reversed ranges', () => {
+    const overlap = applyTextEdits('abcdef', [
+      { line: 0, character: 0, endLine: 0, endCharacter: 4, newText: 'x' },
+      { line: 0, character: 2, endLine: 0, endCharacter: 6, newText: 'y' },
+    ]);
+    const reversed = applyTextEdits('abc', [
+      { line: 0, character: 2, endLine: 0, endCharacter: 1, newText: '' },
+    ]);
+    expect(overlap.ok).toBe(false);
+    expect(reversed.ok).toBe(false);
+  });
+
+  it('turns pyright URIs into usable paths', () => {
+    expect(editPath('file:///c%3A/tmp/pkg/a.py')).toBe('c:/tmp/pkg/a.py');
+    expect(editPath('file:///C:/work/b.py')).toBe('C:/work/b.py');
+    expect(editPath('src/main.py')).toBe('src/main.py');
+  });
+});
+
 describe('environment creation · run.interpreters.create', () => {
   const create = {
     venv: { command: ['{toolchain}', '-m', 'venv', '{path}'], defaultPath: '.venv' },
@@ -2419,6 +2729,142 @@ describe('environment creation · run.interpreters.create', () => {
     expect(bad.ok).toBe(false);
     expect(JSON.stringify(bad.issues)).toContain('escape');
   });
+
+  it('accepts a declared local install alongside an install command', () => {
+    const ok = validateManifest({
+      id: 'x',
+      displayName: 'X',
+      version: '1.0.0',
+      apiVersion: '^1.0.0',
+      file: { extensions: ['x'] },
+      dependencies: {
+        format: 'requirements', files: ['requirements.txt'], install: ['pip', 'install'],
+        local: { editable: { args: ['-e'], label: 'Editable' }, file: {} },
+      },
+    });
+    expect(ok.ok).toBe(true);
+  });
+
+  it('rejects a local install block without an install command', () => {
+    const bad = validateManifest({
+      id: 'x', displayName: 'X', version: '1.0.0', apiVersion: '^1.0.0',
+      file: { extensions: ['x'] },
+      dependencies: { format: 'requirements', files: ['requirements.txt'], local: { editable: {} } },
+    });
+    expect(bad.ok).toBe(false);
+    expect(JSON.stringify(bad.issues)).toContain('dependencies.local');
+  });
+
+  it('rejects malformed local specs (array args, empty label)', () => {
+    const bad = validateManifest({
+      id: 'x', displayName: 'X', version: '1.0.0', apiVersion: '^1.0.0',
+      file: { extensions: ['x'] },
+      dependencies: {
+        format: 'requirements', files: ['requirements.txt'], install: ['pip'],
+        local: { editable: { args: ['-e', 3] }, file: { label: '' } },
+      },
+    });
+    expect(bad.ok).toBe(false);
+    const issues = JSON.stringify(bad.issues);
+    expect(issues).toContain('dependencies.local.editable.args');
+    expect(issues).toContain('dependencies.local.file.label');
+  });
+});
+
+describe('workspace edits · server handler', () => {
+  const makeWorkspace = () => {
+    const home = mkdtempSync(join(tmpdir(), 'nl-edits-'));
+    const ws = join(home, 'ws');
+    mkdirSync(join(ws, 'pkg'), { recursive: true });
+    writeFileSync(join(ws, 'main.py'), 'def old_name():\n    return 1\n');
+    writeFileSync(join(ws, 'pkg', 'util.py'), 'def old_name():\n    return 2\n');
+    return { home, ws };
+  };
+
+  const renameTo = (uri: string) => ({
+    uri, line: 0, character: 4, endLine: 0, endCharacter: 12, newText: 'new_name',
+  });
+
+  it('writes every target file and preserves line endings', async () => {
+    const { home, ws } = makeWorkspace();
+    writeFileSync(join(ws, 'pkg', 'util.py'), 'def old_name():\r\n    return 2\r\n');
+    try {
+      let out: any;
+      await handleApplyWorkspaceEdits(new FsService(ws), {
+        requestId: 1,
+        edits: [renameTo('main.py'), renameTo('file:///pkg/util.py')],
+      }, (p) => { out = p; });
+      expect(out).toMatchObject({ kind: 'workspaceEditsApplied', ok: true, applied: 2 });
+      expect(String(out.reason ?? '')).toBe('');
+      expect(readFileSync(join(ws, 'main.py'), 'utf8')).toBe('def new_name():\n    return 1\n');
+      expect(readFileSync(join(ws, 'pkg', 'util.py'), 'utf8')).toBe('def new_name():\r\n    return 2\r\n');
+      expect(out.files.every((f: any) => typeof f.content === 'string')).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('writes nothing when one target has an invalid range', async () => {
+    const { home, ws } = makeWorkspace();
+    try {
+      let out: any;
+      await handleApplyWorkspaceEdits(new FsService(ws), {
+        requestId: 2,
+        edits: [renameTo('main.py'), { ...renameTo('pkg/util.py'), endCharacter: 999 }],
+      }, (p) => { out = p; });
+      expect(out.ok).toBe(false);
+      expect(readFileSync(join(ws, 'main.py'), 'utf8')).toContain('old_name');
+      expect(readFileSync(join(ws, 'pkg', 'util.py'), 'utf8')).toContain('old_name');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('rolls back every file, including the one that failed mid-write', async () => {
+    const { home, ws } = makeWorkspace();
+    let failNext = true;
+    class FaultInjectingFs extends FsService {
+      override async commitAtomic(rel: string, content: string) {
+        if (rel === 'pkg/util.py' && failNext) {
+          failNext = false;
+          // Simulate a crash after the temp file was written but before the
+          // handler was told: the rollback must still restore this file.
+          await super.commitAtomic(rel, 'PARTIAL WRITE\n');
+          throw new Error('injected write failure');
+        }
+        return super.commitAtomic(rel, content);
+      }
+    }
+    try {
+      let out: any;
+      await handleApplyWorkspaceEdits(new FaultInjectingFs(ws), {
+        requestId: 4,
+        edits: [renameTo('main.py'), renameTo('pkg/util.py')],
+      }, (p) => { out = p; });
+      expect(out.ok).toBe(false);
+      expect(String(out.reason)).toContain('injected write failure');
+      expect(String(out.reason)).not.toContain('rollback failed');
+      expect(readFileSync(join(ws, 'main.py'), 'utf8')).toContain('old_name');
+      expect(readFileSync(join(ws, 'pkg', 'util.py'), 'utf8')).toContain('old_name');
+      expect(readdirSync(join(ws, 'pkg')).some((n) => n.endsWith('.tmp'))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a path outside the workspace', async () => {
+    const { home, ws } = makeWorkspace();
+    try {
+      let out: any;
+      await handleApplyWorkspaceEdits(new FsService(ws), {
+        requestId: 3, edits: [renameTo('file:///c%3A/Windows/System32/hosts')],
+      }, (p) => { out = p; });
+      expect(out.ok).toBe(false);
+      expect(String(out.reason)).toContain('outside');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('crash recovery · draft copies', () => {
@@ -2498,6 +2944,345 @@ describe('crash recovery · draft copies', () => {
       if (prev === undefined) delete process.env.NOLANGUAGE_DATA;
       else process.env.NOLANGUAGE_DATA = prev;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('go test output parser', () => {
+  it('turns a passing suite into per-case events with timings', () => {
+    const events = parseGoTest([
+      '=== RUN   TestAdd',
+      '--- PASS: TestAdd (0.00s)',
+      '=== RUN   TestSub',
+      '--- PASS: TestSub (0.12s)',
+      'PASS',
+      'ok  \tnolanguage/session\t0.145s',
+    ]);
+    const cases = events.filter((e) => e.status !== 'output' && e.status !== 'run');
+    expect(cases.map((c) => [c.name, c.status])).toEqual([
+      ['TestAdd', 'pass'],
+      ['TestSub', 'pass'],
+    ]);
+    expect(events.filter((e) => e.status === 'run').map((e) => e.name)).toEqual(['TestAdd', 'TestSub']);
+    expect(cases[1].ms).toBe(120);
+  });
+
+  it('attributes a file:line message to the case that was running', () => {
+    const events = parseGoTest([
+      '=== RUN   TestBad',
+      '    main_test.go:14: got 3, want 4',
+      '--- FAIL: TestBad (0.00s)',
+      'FAIL',
+      'FAIL\tnolanguage/session\t0.02s',
+    ]);
+    const failed = events.find((e) => e.name === 'TestBad' && e.status === 'fail')!;
+    expect(failed.file).toBe('main_test.go');
+    expect(failed.line).toBe(14);
+    expect(failed.message).toContain('got 3, want 4');
+  });
+
+  it('emits output lines while a case runs instead of dropping them', () => {
+    const p = createGoTestParser();
+    const first = p.push('=== RUN   TestLog');
+    const second = p.push('log line from the test');
+    // push() reuses an internal buffer, so a returned event list must not be
+    // mutated by the next line: a caller that stores the first result (the test
+    // tree does) would otherwise see the last line's event instead.
+    expect(first).toEqual([{ name: 'TestLog', status: 'run' }]);
+    expect(second).toEqual([{ name: 'TestLog', status: 'output', message: 'log line from the test' }]);
+    expect(p.running).toEqual(['TestLog']);
+  });
+
+  it('reads subtests as their own cases and keeps the parent separate', () => {
+    const events = parseGoTest([
+      '=== RUN   TestGroup',
+      '=== RUN   TestGroup/a',
+      '--- PASS: TestGroup/a (0.00s)',
+      '--- PASS: TestGroup (0.01s)',
+    ]);
+    const names = events.filter((e) => e.status !== 'output').map((e) => e.name + ':' + e.status);
+    expect(names).toEqual(['TestGroup:run', 'TestGroup/a:run', 'TestGroup/a:pass', 'TestGroup:pass']);
+  });
+});
+
+describe('test selector validation', () => {
+  it('accepts a bare name and an explicit -run fragment, adding the flag once', () => {
+    expect(sanitizeTestFilter('TestFoo')).toBe('-run TestFoo');
+    expect(sanitizeTestFilter('-run ^TestFoo$')).toBe('-run ^TestFoo$');
+    expect(sanitizeTestFilter('')).toBe('');
+  });
+
+  it('rejects anything that could become a second command', () => {
+    expect(sanitizeTestFilter('TestFoo; rm -rf /')).toBeUndefined();
+    expect(sanitizeTestFilter('TestFoo && calc')).toBeUndefined();
+    expect(sanitizeTestFilter('"quoted"')).toBeUndefined();
+    expect(sanitizeTestFilter(42)).toBeUndefined();
+    expect(sanitizeTestFilter('a'.repeat(200))).toBeUndefined();
+  });
+});
+
+describe('launch program containment', () => {
+  // The debug handler flushes the open buffer to this path before launching, so a
+  // `program` that escapes the root is a write primitive, not just a wrong path.
+  const root = process.platform === 'win32' ? 'C:\\work\\proj' : '/work/proj';
+
+  it('accepts a relative path inside the root, existing or not', async () => {
+    expect(await resolveLaunchProgram(root, 'main.py')).toBe(join(root, 'main.py'));
+    expect(await resolveLaunchProgram(root, 'src/app.py')).toBe(join(root, 'src', 'app.py'));
+  });
+
+  it('rejects anything that resolves outside the root', async () => {
+    expect(await resolveLaunchProgram(root, '../evil.py')).toBeUndefined();
+    expect(await resolveLaunchProgram(root, '../../../../etc/passwd')).toBeUndefined();
+    expect(await resolveLaunchProgram(root, '.')).toBeUndefined();
+  });
+
+  it('rejects absolute paths, which never belong to the workspace', async () => {
+    const outside = process.platform === 'win32' ? 'C:\\Windows\\x.py' : '/etc/passwd';
+    expect(await resolveLaunchProgram(root, outside)).toBeUndefined();
+  });
+});
+
+describe('debug preLaunch planning', () => {
+  const vars = {
+    '{toolchain}': 'C:\\Program Files\\Compiler\\bin\\cc.exe',
+    '{file}': 'D:\\work\\my project\\main.cpp',
+    '{workdir}': 'D:\\work\\my project',
+    '{exe}': '.exe',
+  };
+
+  it('keeps argv elements intact, including paths with spaces', () => {
+    const plan = planPreLaunch(
+      { argv: ['{toolchain}', '-g', '{file}', '-o', '{workdir}/nl_dbg{exe}'] },
+      vars,
+    );
+    expect(plan?.legacy).toBe(false);
+    expect(plan?.argv).toEqual([
+      'C:\\Program Files\\Compiler\\bin\\cc.exe',
+      '-g',
+      'D:\\work\\my project\\main.cpp',
+      '-o',
+      'D:\\work\\my project/nl_dbg.exe',
+    ]);
+  });
+
+  it('tokenises a legacy cmd locally and never hands it to a shell', () => {
+    const plan = planPreLaunch(
+      { cmd: '"{toolchain}" -std=c++17 "{file}" && echo pwned' },
+      vars,
+    );
+    expect(plan?.legacy).toBe(true);
+    expect(plan?.argv).toEqual([
+      'C:\\Program Files\\Compiler\\bin\\cc.exe',
+      '-std=c++17',
+      'D:\\work\\my project\\main.cpp',
+      '&&',
+      'echo',
+      'pwned',
+    ]);
+  });
+});
+
+describe('expected sha256 parsing', () => {
+  const hex = 'deadbeef'.repeat(8);
+
+  it('accepts the bare hex form and the sha256: prefix, normalised to lowercase', () => {
+    expect(parseSha256(hex)).toBe(hex);
+    expect(parseSha256(`sha256:${hex}`)).toBe(hex);
+    expect(parseSha256(hex.toUpperCase())).toBe(hex);
+    expect(parseSha256(`  sha256:${hex}  `)).toBe(hex);
+  });
+
+  it('rejects anything that could never match, so the caller refuses instead of comparing', () => {
+    expect(parseSha256(undefined)).toBeUndefined();
+    expect(parseSha256(42)).toBeUndefined();
+    expect(parseSha256('')).toBeUndefined();
+    expect(parseSha256('not-a-hash')).toBeUndefined();
+    expect(parseSha256(hex.slice(0, 63))).toBeUndefined();
+    expect(parseSha256(`${hex}0`)).toBeUndefined();
+  });
+});
+
+describe('AI provider settings', () => {
+  it('accepts http(s) base URLs and strips the trailing slash', () => {
+    expect(normalizeBaseUrl('https://api.example.com/v1')).toBe('https://api.example.com/v1');
+    expect(normalizeBaseUrl('http://127.0.0.1:8080/v1/')).toBe('http://127.0.0.1:8080/v1');
+    expect(normalizeBaseUrl('  https://api.example.com  ')).toBe('https://api.example.com');
+  });
+
+  it('refuses schemes and URLs that would smuggle the key somewhere else', () => {
+    expect(normalizeBaseUrl('file:///etc/passwd')).toBeUndefined();
+    expect(normalizeBaseUrl('ftp://example.com')).toBeUndefined();
+    expect(normalizeBaseUrl('https://user:secret@example.com/v1')).toBeUndefined();
+    expect(normalizeBaseUrl('javascript:alert(1)')).toBeUndefined();
+    expect(normalizeBaseUrl('')).toBeUndefined();
+    expect(normalizeBaseUrl(7)).toBeUndefined();
+  });
+
+  it('accepts ordinary model ids and rejects whitespace or control characters', () => {
+    expect(normalizeModel('gpt-4o-mini')).toBe('gpt-4o-mini');
+    expect(normalizeModel('qwen2.5:7b')).toBe('qwen2.5:7b');
+    expect(normalizeModel('meta/llama-3@fp16')).toBe('meta/llama-3@fp16');
+    expect(normalizeModel('two words')).toBeUndefined();
+    expect(normalizeModel('bad\nmodel')).toBeUndefined();
+    expect(normalizeModel(undefined)).toBeUndefined();
+  });
+
+  it('builds an OpenAI-compatible streaming request and only sends the key as a header', () => {
+    const req = buildChatRequest(
+      { baseUrl: 'https://api.example.com/v1/', model: 'gpt-4o-mini', key: 'sk-test-123' },
+      'why?',
+      { language: 'go' },
+    );
+    expect(req.url).toBe('https://api.example.com/v1/chat/completions');
+    expect(req.headers.authorization).toBe('Bearer sk-test-123');
+    expect(req.headers.accept).toBe('text/event-stream');
+    expect(req.body).not.toContain('sk-test-123');
+    const body = JSON.parse(req.body) as { model: string; stream: boolean; max_tokens: number; messages: Array<{ role: string; content: string }> };
+    expect(body.model).toBe('gpt-4o-mini');
+    expect(body.stream).toBe(true);
+    expect(body.max_tokens).toBe(2048);
+    expect(body.messages).toEqual([{ role: 'user', content: 'The user is editing a go file.\n\nwhy?' }]);
+  });
+
+  it('omits the authorization header when no key is configured and clamps max_tokens', () => {
+    const req = buildChatRequest({ baseUrl: 'http://127.0.0.1:1', model: 'm' }, 'hi', { maxTokens: 99999 });
+    expect(req.headers.authorization).toBeUndefined();
+    expect((JSON.parse(req.body) as { max_tokens: number }).max_tokens).toBe(4096);
+  });
+});
+
+describe('AI SSE decoding', () => {
+  const frame = (text: string): string => `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+
+  it('handles a chunk boundary in the middle of a line', () => {
+    const d = new SseDecoder();
+    expect(d.push('data: {"choices":[{"delta":{"content":"Hel')).toEqual([]);
+    expect(d.push('lo"}}]}\n\n')).toEqual(['Hello']);
+    expect(d.done).toBe(false);
+  });
+
+  it('reads several frames from one chunk and stops at [DONE]', () => {
+    const d = new SseDecoder();
+    expect(d.push(frame('a') + frame('b') + 'data: [DONE]\n\n' + frame('ignored'))).toEqual(['a', 'b']);
+    expect(d.done).toBe(true);
+  });
+
+  it('falls back to message.content for providers that answer in one piece', () => {
+    const d = new SseDecoder();
+    expect(d.push(`data: ${JSON.stringify({ choices: [{ message: { content: 'whole' } }] })}\n\n`)).toEqual(['whole']);
+  });
+
+  it('reports an error frame instead of throwing', () => {
+    const d = new SseDecoder();
+    expect(d.push(`data: ${JSON.stringify({ error: { message: 'bad key' } })}\n\n`)).toEqual([]);
+    expect(d.done).toBe(true);
+    expect(d.error).toBe('bad key');
+  });
+
+  it('reports malformed JSON as an error and ignores commentary lines', () => {
+    const d = new SseDecoder();
+    expect(d.push(': keep-alive\ndata: {not json}\n\n')).toEqual([]);
+    expect(d.done).toBe(true);
+    expect(d.error).toBe('the provider sent a line that is not JSON');
+  });
+});
+
+describe('scaffolded language plugin', () => {
+  it('emits a manifest every runtime mode can load', () => {
+    for (const run of RUN_MODES) {
+      const built = buildLanguagePlugin({ id: 'demo', extensions: ['dm'], run, lspCommand: 'demo-lsp' });
+      const verdict = validateManifest(built.manifest);
+      expect({ run, ok: verdict.ok, issues: verdict.issues }).toEqual({ run, ok: true, issues: [] });
+      expect(built.files.some((f) => f.path === 'manifest.json')).toBe(true);
+    }
+  });
+
+  it('ships the companion file each run mode needs, and no run block for none', () => {
+    const scriptHost = buildLanguagePlugin({ id: 'demo', extensions: ['dm'], run: 'script-host' });
+    expect(scriptHost.files.map((f) => f.path)).toEqual(['manifest.json', 'runtime.js']);
+    const repl = buildLanguagePlugin({ id: 'demo', extensions: ['dm'], run: 'repl-session' });
+    expect(repl.files.map((f) => f.path)).toEqual(['manifest.json', 'bootstrap.py']);
+    const none = buildLanguagePlugin({ id: 'demo', extensions: ['dm'] });
+    expect(none.manifest.run).toBeUndefined();
+    expect(none.todos.join(' ')).toMatch(/Run is disabled/);
+  });
+
+  it('escapes grammar input so keywords and comment prefixes stay literal', () => {
+    const built = buildLanguagePlugin({
+      id: 'demo',
+      extensions: ['dm'],
+      commentPrefix: '--',
+      keywords: ['a.b', 'if'],
+    });
+    const rules = built.manifest.grammar?.rules ?? [];
+    // Comments first: a keyword inside a comment must not win.
+    expect(rules[0].cls).toBe('c');
+    expect(rules[0].re.startsWith('--')).toBe(true);
+    const keyword = rules.find((r) => r.cls === 'k');
+    expect(keyword?.re).toContain('a\\.b');
+    for (const rule of rules) expect(() => new RegExp(rule.re, 'y')).not.toThrow();
+  });
+
+  it('refuses input the registry would reject anyway', () => {
+    expect(() => buildLanguagePlugin({ id: 'Bad Id', extensions: ['dm'] })).toThrow(/invalid language id/);
+    expect(() => buildLanguagePlugin({ id: 'demo', extensions: [] })).toThrow(/extension is required/);
+    expect(() => buildLanguagePlugin({ id: 'demo', extensions: ['a b'] })).toThrow(/invalid file extension/);
+  });
+
+  it('normalises extensions with a leading dot and splits a comma list', () => {
+    const built = buildLanguagePlugin({ id: 'demo', extensions: ['.dm,.dmo'] });
+    expect(built.manifest.file.extensions).toEqual(['dm', 'dmo']);
+    expect(built.manifest.file.defaultExt).toBe('dm');
+  });
+});
+
+describe('local revision history', () => {
+  it('snapshots before a write and restores exactly that content', async () => {
+    const previous = process.env.NOLANGUAGE_DATA;
+    const dir = mkdtempSync(join(tmpdir(), 'nlg-history-'));
+    try {
+      process.env.NOLANGUAGE_DATA = dir;
+      const store = new HistoryStore();
+      expect(await store.list('/work/proj', 'main.py')).toEqual([]);
+
+      const first = await store.snapshot('/work/proj', 'main.py', 'original\n', 'save');
+      const second = await store.snapshot('/work/proj', 'main.py', 'edited\n', 'save');
+      expect(first?.path).toBe('main.py');
+      expect(second?.reason).toBe('save');
+
+      const entries = await store.list('/work/proj', 'main.py');
+      expect(entries.length).toBe(2);
+      expect(entries[0].id).toBe(second?.id);
+      expect(entries.every((e) => e.root === '/work/proj')).toBe(true);
+      const recent = await store.list('/work/proj');
+      expect(recent.length).toBe(2);
+
+      const restored = await store.read('/work/proj', String(first?.id));
+      expect(restored?.content).toBe('original\n');
+      expect(await store.read('/other/proj', String(first?.id))).toBeUndefined();
+      expect(await store.read('/work/proj', '../escape')).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.NOLANGUAGE_DATA;
+      else process.env.NOLANGUAGE_DATA = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses traversal paths and oversized snapshots', async () => {
+    const previous = process.env.NOLANGUAGE_DATA;
+    const dir = mkdtempSync(join(tmpdir(), 'nlg-history-bad-'));
+    try {
+      process.env.NOLANGUAGE_DATA = dir;
+      const store = new HistoryStore();
+      expect(await store.snapshot('/work', '../outside.py', 'x')).toBeUndefined();
+      expect(await store.snapshot('/work', 'C:/outside.py', 'x')).toBeUndefined();
+      expect(await store.snapshot('/work', 'big.py', 'x'.repeat(600 * 1024))).toBeUndefined();
+      expect(existsSync(join(dir, 'history'))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.NOLANGUAGE_DATA;
+      else process.env.NOLANGUAGE_DATA = previous;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

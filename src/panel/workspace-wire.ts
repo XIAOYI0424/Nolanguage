@@ -25,7 +25,7 @@ import type { CompletionItem } from '../lsp/LspClient.js';
 import type { LspLike } from '../lsp/lspLike.js';
 import type { LspUpgrade } from '../langs/lspLaunch.js';
 import type { Runner } from '../runtimes/types.js';
-import type { LanguageId } from './samples.js';
+import type { LanguageId } from '../assets/samples.js';
 
 /**
  * Completion items, plus why there are none when the server could not answer.

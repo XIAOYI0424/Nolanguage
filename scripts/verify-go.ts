@@ -16,7 +16,7 @@ import { LogLevel } from '../src/log/LogLevel.js';
 import { GoRunner } from '../src/go/GoRunner.js';
 import { resolveGoBin, discoverGoServer, goVersion } from '../src/go/discover.js';
 import { WorkspaceService } from '../src/panel/WorkspaceService.js';
-import { defaultSample, sampleById } from '../src/panel/samples.js';
+import { defaultSample, sampleById } from '../src/assets/samples.js';
 
 const results: { name: string; ok: boolean; detail: string; skipped?: boolean }[] = [];
 function check(name: string, ok: boolean, detail = ''): void {

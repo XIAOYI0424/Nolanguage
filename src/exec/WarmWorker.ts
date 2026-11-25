@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { Kernel } from '../kernel/Kernel.js';
 import type { SandboxLanguage } from './types.js';
 import { PYTHON_WORKER_SRC, NODE_WORKER_SRC } from './workerSource.js';
+import { decodeOutput } from '../util/encoding.js';
 
 export interface WorkerResult {
   id: string;
@@ -131,7 +132,7 @@ export class WarmWorker {
     });
     // Worker diagnostics (broken bootstrap etc.) go to the execution log.
     this.child.stderr?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8').trim();
+      const text = decodeOutput(chunk).trim();
       if (text) this.kernel.logger.forExecution('sandbox.worker', this.languageId).warn('worker stderr', { text });
     });
     this.child.on('error', (err) => {

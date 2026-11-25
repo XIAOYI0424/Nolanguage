@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { ulid } from '../util/ulid.js';
 import { resolveGoBin } from './discover.js';
+import { OutputDecoder } from '../util/encoding.js';
 import type { Kernel } from '../kernel/Kernel.js';
 
 export type GoMode = 'run' | 'test';
@@ -208,16 +209,17 @@ export class GoRunner {
 
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
+    const decoders = { stdout: new OutputDecoder(), stderr: new OutputDecoder() };
     const OUTPUT_LIMIT = 4 * 1024 * 1024;
     const LOG_LINE_LIMIT = 10_000;
     let stdoutBytes = 0, stderrBytes = 0;
     let stdoutTruncated = false, stderrTruncated = false, logLinesTruncated = false;
     let logLines = 0;
-    const stdoutResult = () => stdoutChunks.join('') + (stdoutTruncated ? `\n[stdout truncated at ${OUTPUT_LIMIT} bytes]\n` : '');
-    const stderrResult = () => stderrChunks.join('') + (stderrTruncated ? `\n[stderr truncated at ${OUTPUT_LIMIT} bytes]\n` : '');
+    const stdoutResult = () => stdoutChunks.join('') + decoders.stdout.flush() + (stdoutTruncated ? `\n[stdout truncated at ${OUTPUT_LIMIT} bytes]\n` : '');
+    const stderrResult = () => stderrChunks.join('') + decoders.stderr.flush() + (stderrTruncated ? `\n[stderr truncated at ${OUTPUT_LIMIT} bytes]\n` : '');
 
     const onLine = (stream: 'stdout' | 'stderr') => (chunk: Buffer): void => {
-      const text = chunk.toString('utf8');
+      const text = decoders[stream].push(chunk);
       const list = stream === 'stdout' ? stdoutChunks : stderrChunks;
       const used = stream === 'stdout' ? stdoutBytes : stderrBytes;
       const remaining = Math.max(0, OUTPUT_LIMIT - used);

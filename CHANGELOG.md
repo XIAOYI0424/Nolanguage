@@ -1,6 +1,426 @@
 # Changelog
 
+## 0.7.24 — 2026-11-22（未发布）
+
+### 审核整改：项目根、执行边界与插件来源（2026-11-24）
+
+本轮不新增 IDE 小功能，按项目审核结论先修四类会让人"信错结果"的问题。
+
+**终端分词**：本地内建原来用 `/s+/` 匹配空白，实际只匹配字母 `s`：`ls` 被截成 `l`，
+`git status` 变成 `git statu`，`theme dark` 也拆不开。现在统一 `trim().split(/\s+/)`；
+已附着的终端输入只去掉首尾空白，保留内部空格。UI 套件的终端断言补齐这些分支。
+
+**项目根上下文**：`FsService.root` 与 `WorkspaceService.projectRoot()` 原来各记一份，且
+`openFolder` 只更新前者；环境创建仍用临时 buffer 目录，模板与依赖从启动目录 guess。现在每个
+连接拥有自己的 `FsService`，File > Open Folder 只换本窗口的树；新窗口继承最近一次打开的目录。
+`openFolder` 同时调用 `WorkspaceService.setProjectRoot()`，串行更新 project 插件层、工具链发现
+和默认项目根；解释器、依赖、模板生成、`.idea` 导入和调试路径都读当前连接的项目根。刻意保留
+Run 的会话目录语义：代码片段的 `go test` 必须在自己的模块目录里跑，不能被项目根悄悄改掉。
+`verify:workspace-env` 新增双窗口测试，证明两个根目录互不串台。
+
+**调试与跨文件写入**：`debug.preLaunch` 增加 `argv` 数组形态，并以 `execFile` 无 shell 执行；
+旧 `cmd` 仍可加载，但只在本机分词后作为 argv 运行，`&&`、`;`、`&` 不再是命令分隔符。
+`applyWorkspaceEdits` 改为同目录临时文件 + 原子 rename，并把当前正在写的文件也放进回滚清单，
+按逆序恢复所有目标。故障注入单测写入半截内容后强制失败，验证最终仍回到原文且不留 `.tmp`。
+
+**插件来源边界**：zip/tar 解压增加条目数、单条目未压缩字节、总展开字节三重上限，gzip/deflate
+在解压时就受 `maxOutputLength` 约束，防止小压缩包展开成巨大的插件树。http(s) 远程安装默认要求
+SHA-256：CLI 提供 `--sha256`，无 hash 时只有显式 `--allow-unverified` 才放行；面板插件页同样
+只在显式 `allowUnverified` 下安装无 hash 条目。git 与本地目录不是下载物，维持原行为。
+`scripts/verify-langsource.ts` 新增上限与显式放行断言。
+
+### 重构：移除占位，接通跨文件编辑
+
+对照 PyCharm / IDEA 的评估指出一个信任问题：Refactor 菜单里的 Extract Method /
+Extract Variable / Extract Constant / Move / Change Signature 只会弹"未实现"，而一个会承诺
+又不兑现的菜单项比没有更糟。这些菜单项和 F6 / Ctrl+F6 绑定已移除；保留的 Rename 和
+Quick Fix 都有真实实现。
+
+跨文件重命名此前只应用当前缓冲区的编辑，其它文件的编辑会报告"未应用"。现在 LSP 返回的
+WorkspaceEdit 走新增的 `applyWorkspaceEdits` 消息：服务端把 URI 归一到工作区内路径，
+先读取并校验**所有**目标文件和范围，然后才写入全部文件；写入中途失败会尽量回滚并明确
+报告回滚结果。每个文件保留自己的 BOM 与 CRLF/LF。任一目标缓冲区有未保存改动时，客户端
+拒绝跨文件重命名，避免把基于内存文本算出的行号应用到磁盘版本。
+
+新增纯函数 `applyTextEdits`（越界/逆序/重叠编辑整份拒绝，自底向上应用）和对应单测；
+`verify-ui-dom` 增加跨文件请求、引擎拒绝和成功刷新的端到端断言。`STATUS.md` 同步更新，
+终端改称"命令面板"，不再暗示它是 PTY。
+
+### 基础体验：上次项目、编译器位置与本地环境
+
+打开文件夹后，只有引擎回执里的 `fsRoot.root` 才会被记住；下次连接时客户端先重开该项目，
+在拿到确认前不加载默认目录的文件树，也不对被替代的根目录做解释器发现。若保存的路径已被
+移动或删除，偏好会被清理并回退到引擎默认根目录，不会反复重试同一个失败路径。
+Preferences > Behavior 增加"Reopen the last project folder"开关。
+
+解释器选择器现在显示每个候选的版本、来源与类型（venv / conda / PATH / SDK），并提供自由输入
+的编译器路径和系统文件选择按钮。路径由引擎校验，选项按项目根路径保存在浏览器偏好里；
+显式选择和"自动/不固定"都优先于自动发现。Preferences > Project Interpreter 增加
+"Match a local virtual environment automatically"开关：打开项目时按现有一致规则发现父目录、
+子目录和 conda 环境，优先采用最近的本地虚拟环境，创建成功后也会立即记住新环境并替换掉
+仍在飞行的发现请求。引擎回执回显 `requestId` 与 `auto`，避免后台自动匹配误打开选择器，
+也避免旧根目录的回答覆盖新项目。`verify:pycharm` 增加恢复、失效回退、自动匹配、版本显示、
+自定义路径和文件选择等断言。
+
+### 编辑器小功能：动作、书签、MRU 与 TODO
+
+对照 PyCharm 的小功能差距，补齐四个高频动作，并且都从真实数据出发，不另建一份会漂移的
+影子列表。Find Action（`Ctrl+Shift+A`）把 `MENUS` 树里的真实命令铺进 Search Everywhere 的
+Actions 视图；行书签用 `F11` / `Ctrl+F11` / `Shift+F11` 做匿名、助记和列表跳转，按工作区相对
+路径写进偏好，重开后仍在；`Ctrl+Tab` / `Ctrl+Shift+Tab` 按 MRU 而非标签栏顺序循环，选中项
+在弹层里高亮。Full Screen 改到 `Ctrl+Shift+F11`，避免和书签抢 `F11`。
+
+TODO 工具窗复用 `fsList` / `fsRead`，用独立 reqId 把扫描回答和项目树、编辑器回答分开，限制
+目录与文件数量；点击结果会打开对应文件并跳到那一行。为此补了两个真实修复：扫描不再重复
+列举项目根导致面板卡在 "scanning"；跳到尚未打开文件的行时，会等 `fsRead` 回来再切标签和移动
+光标，不会在旧缓冲区里移动。`Ctrl+Alt+T` Surround With 和 `Alt+Backquote` Show History 原来只弹
+"未实现"，现在按键直接解绑。`verify:pycharm` 增加上述行为的断言，UI 套件从 483 项增至 507 项。
+
+### 程序员高频功能：项目搜索、本地历史、剪贴板比较与草稿
+
+Find in Files 从"只搜已打开缓冲区"变成项目级搜索：复用 `fsList` / `fsRead` 做有界递归扫描，
+用独立 reqId 把扫描回答与项目树、编辑器、TODO 的回答分开；已打开缓冲区的结果立即显示，
+磁盘扫描结果随后并入。大小写敏感、正则与逗号分隔文件掩码都在工具栏上，保存文件、切换根目录
+和收到 `fsChanged` 时会重新扫描当前查询，避免把刚改过的文件当成旧结果。
+
+新增 `src/util/history.ts`：写入、重命名、删除和跨文件 WorkspaceEdit 之前，先把原文快照保存到
+应用数据目录而不是工作区内，每个文件最多保留 40 个修订。Recent Changes（`Ctrl+Shift+E`）列出
+快照，可打开历史版本、与当前文件比较并回退；回退走普通 `fsWrite`，因此回退本身也有快照，
+不会成为不可逆操作。快照写入失败不会阻断用户原本的编辑。
+
+Code 菜单新增 Compare with Clipboard，用轻量逐行差异比较当前文件与系统剪贴板，复用本地历史
+的差异查看器；两侧最多各 600 行，避免一次粘贴把页面拖死。Scratch files / scratch buffers 只
+存在于 IDE 偏好，保存时不发送 `fsWrite`，不会污染项目目录；草稿列表可打开、切换和清空，
+重启后恢复内容与当前草稿标签。
+
+`verify:pycharm` 覆盖项目搜索命中未打开文件和掩码过滤、历史请求与回退、剪贴板差异行、草稿
+写入偏好且重启恢复；`npm test` 增加 `HistoryStore` 的快照/读取与越界防护单测。
+
+四个产物（`dist/Nolanguage.exe`、`dist/NDebug.exe`、安装器和 Tauri sidecar）都已按本次源码重建；
+完整 `verify`、`verify:smoke`、`verify:sidecar` 和 `ci:install-smoke` 本机通过。
+`verify:release` 仍按预期拒绝：工作树未提交、HEAD 无 tag；产物陈旧问题已消除。
+
+### 编辑器高频小功能 P0：查找开关、恢复标签、磁盘比较、LSP 帮助与括号跳转
+
+Find 栏不再靠"查询里有没有大写字母"隐式判断大小写，而是提供显式的 Match case / Whole word /
+Regex 三个开关，查找与替换共用同一套匹配逻辑，选择写进 IDE 偏好。正则非法时显示原因而不是
+静默返回空结果，替换支持捕获组；一次真实回归暴露了 `replaceAll` 消费命中数组而非区间数组、
+导致整段缓冲区被替换的问题，已修正并加断言。
+
+误关标签现在可恢复：`Ctrl+Shift+T` 与标签右键菜单、File 菜单的 Reopen Closed Tab 共用一条
+有界关闭栈，按最后关闭先恢复的顺序重开，并还原关闭时的光标与滚动位置；"不保存"关闭仍然
+丢弃内容，不会借恢复把已放弃的修改带回来。
+
+Compare with Saved Version 用独立的 `fsRead` 请求读取磁盘副本，与当前缓冲区做逐行差异，
+复用已有的差异查看器；读盘只用于比较，不会替换内存里尚未保存的内容，文件不存在或读失败时
+明确提示。
+
+Quick Documentation（`Ctrl+Q`）从只读补全缓存或就近声明的本地兜底，升级为先立刻显示本地答案、
+同时发真实 LSP hover；服务器返回后在同一个对话框里替换为语义文档，不支持 hover 的服务器
+仍保留原来的兜底路径。`Ctrl+Shift+M` 新增跳转到匹配括号：用括号栈扫描并跳过字符串与注释，
+从左括号或右括号上都能跳，找不到匹配时如实提示。
+
+`verify:pycharm` 覆盖三开关与正则替换、关闭栈顺序与光标还原、磁盘比较不覆盖缓冲区、
+hover 原地升级以及括号跳转的字符串/未匹配分支。
+
+### 程序员日常小功能：快捷键可信度、工作区导航、编辑状态与批量替换
+
+按 PyCharm 差距评估继续补齐十项日常能力。先修快捷键信任问题：`Ctrl+Alt+O` 只保留
+Optimize Imports，Open Project 改为 `Ctrl+Alt+Shift+O`；`Ctrl+K` 明确只打开 Search Everywhere，
+移除 Commit 工具窗错误的键位提示；编辑器右键 Redo 改标 `Ctrl+Shift+Z`；补上菜单和工具窗承诺的
+`Alt+6` / `Alt+F12`。Find Action 现在逐项读取真实菜单动作，因此键位提示与实际处理器不会各写一份。
+
+Search Everywhere / Go to File 不再搜索四个打包示例文件：`fsList` 有界遍历真实工作区，按文件名
+模糊匹配；Symbols 先给出当前文件的本地声明兜底，再发 `workspaceSymbol`，回答到达后替换同一份
+结果列表。项目树节点可聚焦，F2 直接调用既有的就地重命名；File 菜单新增 Save All，只写有改动的
+真实文件，草稿仍写偏好。
+
+自查时发现"Go to Symbol / Structure 使用语言服务"只完成了一半：Search Everywhere 已接
+`workspaceSymbol`，但独立对话框和 Structure 窗口仍是本地正则。现在两处都发真实的
+`workspaceSymbol`：Go to Symbol 边输入边查询，命中行可跳到其它文件；Structure 把结果按当前
+文件过滤，用 LSP 的符号名、种类和行号替换语法大纲，并在服务不支持时明确保留本地兜底。
+两边都会拒绝过期 requestId 的回答。
+
+标签切换、Ctrl+Tab 和 Alt+Left/Right 现在按路径保存并恢复光标、选区和滚动位置；显式打开的文件
+即使不在当前缓冲区，也会在 `fsRead` 回来后成为活动标签。Find in Files 增加 Whole word 并持久化
+选项；Replace in Files 增加替换输入、逐命中预览和勾选，生成精确 span 后交给既有
+`applyWorkspaceEdits`：有未保存缓冲时拒绝整批，服务端预校验全部目标、写前做本地历史快照，
+失败回滚。单次正则 Replace 也改为与 Replace All 一致的捕获组展开语义。
+
+`verify:pycharm` 覆盖以上十项，包括快捷键动作一致性、工作区文件与符号来源、视图状态恢复、
+F2、Save All、全词搜索、替换预览/取消勾选/脏缓冲拒绝以及捕获组替换。
+
+### 编辑器外壳：保存全部、项目树、菜单可发现性与标签操作
+
+对照 PyCharm 的下一轮小功能差距，补齐七项每天都会碰到的操作。
+
+`Ctrl+S` 不再只保存当前标签，而是保存当前窗口所有 dirty 的真实文件；File 菜单把这条命令标为
+Save All，同时保留只保存当前文件的入口。打开 format on save 时先对全部目标完成格式化，再统一保存，
+避免出现"只格式化了活动文件"的半截状态。没有改动时不写盘；写失败的文件仍是 dirty，不会被误标为已保存。
+
+项目树行现在能用上下键移动、左右键折叠/展开目录、Enter 打开文件，F2 就地重命名仍然有效。
+F5 和右键 Refresh 会清掉缓存目录并重新列举根目录以及当前展开的目录，因此外部工具创建的文件可见，
+同时保留原来的展开状态。捕获阶段仍拦下 F5 的页面重载，但不再吞掉事件，应用级刷新处理器能收到它。
+右键新增 Copy Absolute Path，基于已确认的项目根路径规范化输出完整路径；原来的 Copy Path 仍复制相对路径。
+
+Navigate 菜单补上 Find in Files、Go to Definition、Find Usages，Find Action 因此能直接找到这些真实动作，
+提示的快捷键与处理器保持一致。标签栏的"显示隐藏标签"按钮不再是空壳：点击弹出全部打开标签，选中后激活并滚动到可见位置。
+标签中键点击走既有的关闭流程，dirty 标签仍进入未保存确认，不会因为换一种关闭方式就丢内容。
+
+`verify:pycharm` 从 604 项增至 627 项，覆盖两种 Ctrl+S 路径、失败写盘、树键盘操作、F5 外部文件刷新、
+复制绝对路径、菜单可发现性、隐藏标签选择器和中键关闭。完整 `verify` 同步增至 2847 项。
+
+### 高频键盘闭环：诊断、查找、替换、定位与编辑位置
+
+再按 PyCharm 的程序员日常操作补齐七项快捷键。编辑器焦点下 `F2` / `Shift+F2` 在当前文件的
+诊断间前后跳转，按文档顺序循环；项目树行的 `F2` 仍然就地重命名，弹窗和输入框不会被编辑器
+快捷键抢走。`F3` / `Shift+F3` 复用上次查找栏查询，关闭查找栏后仍能继续前后匹配；没有查询时
+明确提示先按 Ctrl+F。查找栏按钮同时标出 Enter 与 F3 两种等价操作。
+
+`Ctrl+Shift+R` 直接打开已有的 Replace in Files 预览，不改替换路径：仍由预览生成精确 span，
+由用户勾选，再走整批校验、脏缓冲拒绝、历史快照和回滚。捕获阶段只吞掉普通 Ctrl+R / Ctrl+P，
+Ctrl+Shift+R 会传给应用处理器。`Ctrl+Shift+U` 接入 Code 菜单已有的 Toggle Case；顺手修了
+逐字母大小写反转被两次替换互相抵消、结果仍是大写的问题，现在字符按单次映射真实反转。
+
+`Alt+F1` 在项目树中定位并选中当前文件，需要时展开祖先目录并等待异步目录列表；它不重新
+打开文件，也不会覆盖未保存缓冲区。`Ctrl+Alt+Shift+C` 复制当前文件相对路径与 1 起始行号，
+不移动光标。`Ctrl+Shift+Backspace` 回到上次编辑位置：位置只在编辑器真实 input 时记录，
+普通标签切换和程序化刷新不会抢占这个标记；跳转后标记被消费，不会在两个位置之间来回弹。
+
+`verify:pycharm` 从 627 项增至 649 项，覆盖诊断前后跳转与树 F2 不冲突、F3 无查询与关闭后复用、
+替换预览入口、大小写真实反转、项目树定位不重开文件、复制代码引用和回到上次编辑位置。
+完整 `verify` 同步增至 2869 项。
+
+### 程序员效率操作：方法导航、选择扩展、面包屑与文件比较
+
+再补八项每天都会用到的小操作。`Alt+Down` / `Alt+Up` 在当前声明之间前后跳转：有新鲜的
+Structure 符号时复用语言服务结果，否则退回当前文件的局部声明扫描。`Ctrl+Shift+I` 打开
+Quick Definition，先用本地声明给出即时答案，再用真实 LSP `definition` 原地升级；它只用
+独立 requestId 消费回答，不注册普通导航等待，因此预览过程中光标不会跳走。
+
+`Ctrl+Shift+F7` 在当前文件里高亮同一个符号，CodeMirror 标记与行号槽同时提示；掩码先抹掉
+字符串和注释，Python 等以 `#` 注释的语言也不再误报。`Ctrl+Backspace` / `Ctrl+Delete`
+按词边界删除并吃掉相邻空白；`Ctrl+Shift+V` 从会话内剪贴板历史选择文本重新插入；
+`Ctrl+W` / `Ctrl+Shift+W` 沿词 → 行 → 段落 → 全文分级扩展和收缩，重复按键可原路退回。
+
+原先只是装饰的面包屑和缩略图现在可操作：目录段在项目树中定位，文件段打开真实工作区文件，
+符号段跳到当前声明；缩略图显示跟随滚动的视口框，点击任意高度滚动到对应位置。项目树新增
+Compare with File，用两个独立 reqId 读取两个工作区文件，再复用现有差异查看器；读取不会
+替换任何打开的缓冲区，失败也会明确提示。
+
+`verify:pycharm` 从 649 项增至 690 项，覆盖八项功能的键位、菜单可见性和真实交互；
+完整 `verify` 同步增至 2910 项，58 个套件。
+
+### 细节打磨：快捷键隔离、缩进偏好与编辑位置
+
+这一批不动功能版图，只修日常用起来"差一点"的地方。弹窗和输入控件现在优先拥有自己的按键：
+在对话框输入框里按 Ctrl+D / Ctrl+G 不再触发后台编辑器命令，Escape 和 Search Everywhere 结果列表的
+上下键仍按原路径处理。顺带修了一个真实的快捷键冲突：编辑器焦点下 Ctrl+Shift+Backspace 原先被
+按词删除分支提前截住，Last Edit Location 只有在事件落在 document 上才生效。
+
+缩进设置不再只影响 CodeMirror 显示。Tab 插入、回车自动缩进、Indent Selection 和 Reformat 现在
+共用同一个 `editorIndentUnit()`，Preferences 里的 Use tabs / Tab size 改完立即在全路径生效；
+冒号结尾只增长一行，不会像括号那样凭空造出一行空行和缩进。
+
+Last Edit Location 现在接收所有真实的程序化编辑：`insertText`、`replaceRange` 和复制行、删除行、
+注释、移动行、缩进等操作都会记录位置，普通缓冲区切换与刷新仍不会抢占标记。剪贴板历史也补齐了
+常规 Copy/Paste：编辑器复制、`copyText()` 复制路径与引用、以及带 `text/plain` 的系统粘贴都会进入
+会话内历史，Ctrl+Shift+V 可以选择并重新插入。
+
+Go to Line 打开时预填当前光标行；输入越界行号会夹取到真实末行并给出状态提示，而不是把光标放到
+不存在的行。行注释前缀表扩展到 TypeScript、C#、PHP、Ruby、Shell、YAML、SQL、Lua 等常见语言，
+块注释表同步补齐这些语言与 CSS；不支持的语言仍会明确提示，不会静默插入错误的注释符。
+
+`verify:pycharm` 从 690 项增至 703 项；完整 `verify` 同步增至 2923 项。
+
 ## 0.7.24 — 2026-11-15
+
+### 验证脚本：清理失败不能吞掉一次绿色
+
+`scripts/verify-ndebug-go.ts` 在 `finally` 里 `rmSync` 编译产物所在的临时目录。Windows 上被杀掉的
+子进程还没被完全回收时，内核仍持有那个目录的锁，`rmSync` 抛 `EPERM`——而它抛在 `finally` 里，
+于是整个 44 项全过的套件变成 `0/0 checks` 的红色失败，崩溃发生在打印汇总行之前。
+
+现在先等子进程 `exit`（最多 3 秒），再对 `EPERM`/`EBUSY`/`ENOTEMPTY` 重试十二次；仍然锁着就
+打印一行 `note: left … behind` 并放弃——临时目录留在 `%TEMP%` 是可接受的，让套件变成假红不是。
+顺带修了汇总行的一处谎报：SKIP 行把原因写在括号里时，报告说"no reason given"。
+
+### 文档：现状只有一份，评估只做归档
+
+`docs/` 里躺着十一份按日期命名的评估。它们描述的是"当时的样子"，却一直被当成"现在的样子"读：
+每过一版就再写一份，再被误读一次。现在规则是单向的——`docs/STATUS.md` 是唯一的现状文档
+（能做什么、缺什么、明确的非目标，每条能力对应哪条门禁），十一份评估移入 `docs/archive/`，
+每份开头写明归档日期和被谁取代。
+
+门禁也改成会拒绝的：`verify:docs` 现在递归扫描 `docs/archive/`，未分类的文件直接失败；
+归档文档必须带 `> 归档于 YYYY-MM-DD` 并且指向 `../STATUS.md`；活文档提到归档文档时必须写
+`docs/archive/…`，否则等于把快照当成现状递出去。历史记录本身不改写——`CHANGELOG.md` 里
+当年指向 `docs/评估_20261110.md` 的句子仍然成立，因为那时它就在那个位置。
+
+### README：能力矩阵、非目标与实测数字
+
+README 此前只描述"有什么"，不描述"差在哪"，于是每个读它的人都要自己猜边界。新增一张
+能力矩阵：多语言运行、语言服务、测试树、DAP 调试、重构、终端、工作区、多光标、覆盖率、
+MCP、插件市场、AI 助手逐项对比 PyCharm / VS Code，用 ✅ / ⚠️ / ❌ 标出"可用且有门禁 /
+可用但受限 / 明确不做"，并写清限制的来源（终端是一次 `spawn` 的命令面板而不是 PTY；
+多光标受 CodeMirror 5 限制；插件市场只有 `sha256`，没有签名）。
+
+同时新增"不打算做的事"一节，把多光标、多根工作区、PTY、非 stdio MCP、非 Python 覆盖率、
+语义级 unused-import 清理、脚手架联网拉依赖、插件签名链写成结论而不是待办，并给出理由；
+README 的验证一节补了五条"守的是看起来有、实际不生效"的门禁说明与本机实测数字
+（1.19 MB 原始 / 311 KB gzip / 冷启动约 0.8 s / 开机外网请求 0）。
+
+### 面板暴露：非回环监听必须带 token
+
+`PANEL_HOST=0.0.0.0` 过去会把文件系统、执行平面和终端交给任何能连上端口的人。面板只校验
+Origin，而 Origin 挡的是浏览器里的跨站请求，挡不住 `curl`。现在非回环监听必须同时给
+`PANEL_TOKEN`（至少 16 字符），否则启动直接失败并说明原因；回环监听保持零配置。
+
+token 有三个入口：`?token=`、`x-panel-token` 头、`nlpanel` cookie。浏览器在 WebSocket 握手里
+设不了自定义头，所以 `/?token=…` 通过后由服务器写一个 `HttpOnly; SameSite=Strict` 的 cookie，
+后续握手自动携带；升级请求没有有效 token 时在 101 之前回 401。`/health` 例外，因为它只报告
+存活与版本。比较用 `timingSafeEqual`，长度不同直接拒绝。`npm run verify:panel-auth`（17/17）
+用裸 TCP 拉起三种服务器——暴露且无 token、token 太短、带 token——逐条验证 401、cookie、
+三种携带方式，以及回环监听仍然免 token。
+
+### 客户端片段：反引号与 `${}` 在 verify:ui 之前就报出 file:line
+
+页面是十一个片段拼出来的模板字符串，所以片段里一个反引号或一个 `${` 就能让整页白屏，而
+`verify:ui` 只会说"页面没挂载"。`npm run verify:client` 现在先做静态检查，报告
+`文件:行号`：反引号、未知或未闭合的 `${seed}`、`eval(`、`new Function(`、`document.write(`、
+未被 `client-assets.ts` 引入的片段（这种片段永远不会上线），以及跨片段重名声明（同一作用域里
+后声明的 `function`/`var` 会静默覆盖前者，今天有 615 个名字）。
+
+负向验证过：往 `70-shell.js` 追加一行反引号得到 `FAIL no backtick … 70-shell.js:1155`，
+第一次说"页面没挂载"就查不到的那个位置；未列出的片段也会被点名。`verify:ui` 现在以它开头，
+所以这类错误不再需要挂载页面才能发现。
+
+### 协议只有一份清单：每个 kind 都必须两端都接住
+
+一条消息此前存在三处：`server.ts` 的 `switch`、`50-runtime.js` 的 `handle(m)`、文档。新增一个
+kind 忘了接客户端，引擎会照常回复，页面静默不动，测试也照样绿。现在 `src/panel/protocol.ts`
+是唯一清单：`CLIENT_TO_ENGINE`（89 个）与 `ENGINE_TO_CLIENT`（81 个），只声明类型，运行时不查表。
+
+`npm run verify:protocol`（11/11）解析两份真实 `switch` 并比对清单：处理了清单里没有的 kind、
+清单里有却没人处理的 kind、同一方向重复、请求有服务端分支但客户端从没发出，都会点名。
+它不读文档，因为文档会过期；它读代码。
+
+### 执行处理器拆开：run.ts 不再靠删除功能来满足预算
+
+`panel/handlers/run.ts` 长到 1014 行——此前两次为了满足 `maxSliceFiles 25` 往里塞东西
+（`run-timeout.ts`、`handlers/test.ts`），结果是"预算过了，文件更难读"。现在按职责拆成四个：
+`run.ts`（275 行，脚本运行、Run、Stop、环境创建、运行超时）、`terminal.ts`（46 行）、
+`debug.ts`（492 行）、`tests.ts`（243 行），`server.ts` 各自引入。
+
+同时把 HTTP 页面服务从 `server.ts` 抽到 `src/net/panel-pages.ts`：token 校验、`set-cookie`、
+`/health` JSON、URL 到文档的映射表、按 `Accept-Encoding` 给 16 KiB 以上的页面做 gzip，
+`server.ts` 只剩一张表和一个 `onRequest`，从 1232 行回到 1175 行。拆分后
+`verify-panel-auth` 仍 17/17（401 文案、cookie、`/health` 行为逐字未变），架构门 22/22：
+205 个文件、595 个 import。
+
+### 新语言脚手架：从指南抄写到一条命令
+
+`npm run scaffold:lang -- --id=lua --ext=lua --run=repl-session --lsp=lua-language-server` 生成一个
+可加载的插件目录：清单、语法规则（注释/字符串/关键字/数字/函数调用，按顺序、带转义）、
+运行块、LSP 块（含 `degradedNote`）、按需的 `bootstrap.py` 或 `runtime.js`，以及一段 `TODO`
+说明生成器猜不出来的地方。六种运行模式都覆盖：`none` / `template` / `repl-session` /
+`directory-session` / `inline-vm` / `script-host`。
+
+生成器自己跑 `validateManifest`：清单不合法时不是"写一个坏文件让用户去查"，而是报
+`the generated manifest would not load — this is a generator bug`。`verify-langparity`（8/8）
+对每个模式各生成一次并断言清单可加载、每条语法正则都能编译——所以"新增语言"这条路本身
+也在门里，而不只是被文档描述。
+
+### 体积、冷启动、开机网络：三条预算
+
+`npm run verify:perf`（7/7）把三件此前只靠感觉的事变成数字：首页原始 1188924 B（预算
+1400000）、gzip 311120 B（预算 380000）、`/plugins` 17062 B（预算 200000）；冷启动
+spawn→`/health` 200 本机 782–795 ms（预算 20000 ms）；开机期间对外网络请求 0 次（预算 0）。
+
+"0 次"最容易被假绿：探针自己被拦住时也会是 0。所以先有一个自测——同一个探针去 fetch 一个
+必失败的地址，必须记到 ≥1 次，否则整个检查作废。探针用 `--import` 预加载（此时 TypeScript
+loader 还不存在，所以它是纯 `.mjs`），每次尝试都立刻重写报告文件，因为 Windows 上
+`child.kill()` 不会跑到 `exit` 钩子。
+
+CI 也从两个 job 拆成四个，按依赖分为 pure / ui / toolchains / integration：UI 与单语言套件
+不再排在十分钟的 exe 构建后面。`toolchains` 是矩阵（go / javascript / markdown），
+`fail-fast: false`，Go 只在 go 那一条腿装。`verify-ci`（7/7）现在会展开
+`npm run verify:${{ matrix.lang }}` 再逐个校验脚本是否存在——不展开就等于把模板行当成
+`verify:` 而误报，而误报的常见后果是把矩阵改回三段复制粘贴。
+
+### 文件操作与 Preferences：打开即干净，未改不写盘，设置真正生效
+
+修复了打开文件立刻出现"要保存"圆点的问题。CodeMirror 适配器过去让两个 `input` 监听共用一个
+`skip` 计数：第一个监听消费掉程序化赋值的抑制标记后，第二个监听把 `showBuffer()` 的赋值当成
+用户编辑。现在每个监听各自持有计数，打开文件、切换页签、从磁盘重新读取都不会弄脏缓冲区。
+保存也按 PyCharm 的语义收敛：未改动的缓冲区不再产生无意义的 `fsWrite`，文件 mtime 不会被
+空写刷新；File 菜单新增 Reload from Disk，脏文件会先确认再重新读取，避免静默丢编辑。
+
+`Ctrl+Alt+S` 现在打开完整的 Preferences 窗口，而不是五个复选框：左侧分类树（Appearance &
+Behavior、Behavior、Editor、Project Interpreter、Markdown、Run / Debug）带搜索，右侧是真实
+控件，底部是 Apply / OK / Cancel / Reset。所有开关都接到现有功能：主题与界面语言、UI 缩放
+（此前只写不读，现在启动恢复）、工具栏与状态栏可见性、行号、软换行、活动行高亮、括号匹配、
+自动闭合括号、缩进宽度、保存时格式化、恢复副本延迟、关闭脏文件确认、会话恢复、AI Assistant
+自启、Markdown 分栏宽度，以及解释器、Packages 和运行配置的真实入口。没有 provider 的功能
+仍在原入口如实提示，不在设置里伪装成可用。
+
+`verify:ui` 扩到 **390/390**，新增对适配器抑制计的回归测试（模拟 CodeMirror 的 change 事件，
+断言两个监听都不会把程序化赋值当成编辑）、干净文件保存无写盘、Reload from Disk、设置分类树、
+搜索过滤、页面切换与 OK 持久化。
+
+### 外部项目实测：打开 NeroSama 并配置它的 Python 环境
+
+新增 `npm run verify:workspace-env`（`scripts/verify-workspace-env.ts`），用真实面板服务器和
+IDE 自己的 WebSocket 协议打开 `D:/15936/Documents/NeroSama`：先发 `openFolder` 切换资源管理器，
+再用 `interpreters` / `setInterpreter` 把项目的 `.venv` 固定为 Python toolchain，然后经
+`dependencyInstall` 安装项目声明的 FastAPI、uvicorn[standard]、gRPC、grpcio-tools 与 NumPy，
+最后用 `run` 证明执行平面确实跑在那个 `.venv` 里。测试同时验证 `envCreate` 拒绝越界路径，
+避免"配置环境"变成在启动目录里造第二个环境。
+
+这不是 jsdom 模拟：脚本启动 `src/panel/server.ts`，走的是 File → Open Folder、Project Interpreter
+和 Packages 面板发送的同一组消息。随后又补上子项目场景：把工作区切到 `vtuber/python` 后，
+解释器列表仍能找到两级以上的 `.venv`（来源标记为 `../../.venv`），依赖报告也直接读到该子目录的
+`pyproject.toml`，安装与导入仍走同一个环境。最终五包实测 **23/23 通过**；依赖解析很重的
+`silero-vad` 没有纳入这次自动安装，仍可由同一个 Packages 按钮按需安装。
+
+### 解释器发现：跟随打开的项目，并向父子目录查找环境
+
+`openFolder` 过去只改资源管理器，解释器发现还盯着启动时的工作区，打开 monorepo 的子项目时
+会看不到仓库根目录的共享环境。现在 `interpreters` 以当前资源管理器根为起点：先找该目录本身，
+再向最多四级父目录、四级浅层子目录查找带插件 marker 的环境，顺序是"本目录 → 父目录 → 子目录"。
+`node_modules`、`dist`、`.git` 等目录不进入，环境目录本身也不再向下爬，避免选出一个巨大的磁盘遍历。
+
+查找规则仍然完全来自插件声明的 `envDirs` / `marker` / `envBins`，引擎没有写死 Python 或 venv；
+`DiscoverInterpretersOptions` 增加了 `envSearchUp` / `envSearchDown`，测试可以关掉搜索以固定断言。
+`tests/pure.test.ts` 覆盖子目录环境、父目录环境、三级排序和跳过依赖目录。
+
+### 工作区界面：补齐 Darcula 参考布局与真实快捷键
+
+编辑器现在带着参考布局的完整外壳启动：Project/Structure 页签、面包屑、文件类型徽标、代码
+minimap、右侧 AI Assistant 抽屉，以及带 `Ctrl K` 提示的 Search Everywhere 工具栏按钮。工具栏
+补齐 Build / Check（走真实诊断请求），12 个菜单的顺序也与参考一致。它们不是装饰：面包屑和
+minimap 跟随当前文档，抽屉会话可收起/展开并记住状态，发送按钮与输入框回车共用同一条本地回复
+路径（没有 provider 时会如实说明，而不是假装联网）。
+
+菜单补上 Refactor 与 Debug，含 Extract Method 子菜单；快捷键绑定到真实动作：
+`Ctrl/Cmd+K` 搜索、`Shift+F10` 运行、`Shift+F9` 调试、`F7/F8/F9` 步进/继续、`Alt+←/→`
+文档历史、`Alt+Insert` 新建、`Ctrl+E` 最近文件、`Ctrl+N` 符号搜索、`F1` 关于等。产品确实
+没有的功能（如 Surround With、Show History）只给明确提示，不做死键；分栏仍可拖拽或键盘调整。
+
+前端构建与 `verify:ui` 同步扩到 373 条断言，其中新增结构存在性、首屏渲染、抽屉会话、页签
+切换、文件徽标与代表性按键的真实 DOM 检查。构建产物仍是单文件 `frontend/dist/index.html`。
+
+### Packages：从工作区里的路径安装，而不只是从注册表按名字装
+
+`pip install -e ./pkg` 这种命令形状跟按名字装不一样：`-e` 要排在路径前面，也没有版本号要解析。
+Packages 面板新增 `From Path…`，选项直接来自依赖报告的 `installLocal`（Python 声明了 `editable`
+与 `file`，差异写在 manifest 的 `dependencies.local`，引擎里没有针对 pip 的分支）。协议用
+`installKind` 传 kind——`kind` 是协议自身的判别字段——路径在 spawn 之前按项目边界与存在性校验，
+装一个下次 checkout 拿不到的东西没有意义。
+
+清单校验同步补上：`local` 必须有配套的 `install`，`args` 是字符串数组、`label` 非空，否则装载时
+就拒绝。`verify:ui` 逐条覆盖对话框给出的 kind、发送的是路径而非包名，`tests/pure.test.ts` 覆盖参数
+顺序、项目边界与 manifest 规则。
 
 ### 新建环境：解释器列表里可以直接造一个 venv
 
@@ -23,6 +443,71 @@
 顺带修掉一条过严的断言：`verify-langplugins` 里用 `</dependencyManagement><dependencies>` 精确匹配，
 实际测的是写入器的缩进而不是写入位置，改成"新 artifact 位于托管段之后、`</project>` 之前"。
 
+### AI 助手：真的发请求，密钥只落在应用数据里
+
+AI 面板（`Alt+A`）此前是一个 HTML 壳：输入框能打字，发送只回一条写死的"未配置"文案。现在它走引擎：
+`aiAsk` 带上 `requestId`/`prompt`/`language`，引擎按 OpenAI 兼容的 `POST <baseUrl>/chat/completions`
+（`stream: true`）取 `choices[0].delta.content`，逐段回 `aiOut`，最后恰好一条 `aiDone{ok,ms,bytes,error?}`；
+`aiCancel` 中止当前流并如实回答 `ok`（没有在跑就是 `false`）。同一连接同时只有一个答案在流，第二次
+`aiAsk` 会被拒绝而不是把两段文本交错在一起。右侧抽屉和面板共用同一条路径，旧的"Unavailable / 没有调用
+模型"假消息已删除。
+
+密钥只写在 `<appData>/ai.json`（Windows `%LOCALAPPDATA%\Nolanguage\ai.json`，0600，原子写入），
+页面里是 `type=password`，保存后立刻清空，`aiConfig` 只回 `baseUrl`/`model`/`hasKey`，任何一帧都不含
+密钥。日志只记 `{requestId, ms, bytes, ok, status}`——日志是持久化且全文本检索的，提示词、答案和密钥
+都不进去。`baseUrl` 必须是 http(s) 且不带用户名密码；只有这一条出站 HTTP 路径（`node:https`，60s 超时，
+1MB 响应上限）。协议见 `docs/ai-panel-protocol.md`。
+
+新增 `npm run verify:ai`（20/20）：本地回环 SSE 服务器覆盖正常流、HTTP 401、取消三条路径，并断言
+请求头是 `Bearer`、请求体不含密钥、任何回帧不含密钥、取消后套接字真的关闭。`verify:ui` 增加面板与抽屉
+的 22 项检查（配置面板预填、密码字段、密钥不回显、流式文本按纯文本追加、失败可读、Stop 发送
+`aiCancel`），单元测试覆盖 `normalizeBaseUrl`/`normalizeModel`/`buildChatRequest`/`SseDecoder`。
+
+### 插件索引：装之前先对哈希，装不到就说装不到
+
+插件市场过去只有"清单里有 sha256 这一列"，但没有任何一行代码读过它：索引里写的哈希、下载回来的字节、
+真正解包进 `builtin/` 的目录，三者之间没有关系。现在 `resolveSource` 接受 `expectSha256`，在解包**之前**
+校验下载文件；不匹配就删掉临时目录并报 `hash mismatch: expected … but got …`，格式不对则报
+"not 64 hex characters" —— 两种情况都不会留下半个插件。索引条目没有哈希时，`lang add <id>` 打印
+`WARNING … the download cannot be verified`，带 `--strict` 则直接拒绝。
+
+清单也有入口了：`catalog` 帧把索引里能装的东西列到 `/plugins` 页面和 Tauri 的
+Tools → Language Plugins 对话框里（同一个 `catalogSearch` 请求，两处各自的渲染）。没有 sha256 的行
+按钮是禁用的，并在行内说明为什么，而不是点下去再失败；索引整体取不到时显示 `index unavailable: …`，
+不会伪装成"索引是空的"。安装在 `langInstall` 的 `id` 路径上完成：未知 id、哈希缺失、版本已变（索引现在
+服务 1.2.0 而面板描述的是 1.1.0）都在下载前拒绝。
+
+`verify:langsource` 自建回环 HTTP 服务器，覆盖匹配 / `sha256:` 前缀 / 不匹配 / 格式错误 / 不给哈希不校验
+五种情况；`verify:langcatalog` 覆盖搜索、空查询、未知 id、无哈希拒绝、版本漂移；`parseSha256` 进单元测试。
+
+### 调试启动路径：`program` 必须在工作区内
+
+启动配置里的 `program` 来自客户端帧，而且调试前会把缓冲区写回该文件——`"program": "../.."` 因此不只是
+"路径错了"，而是一个能往工作区外写文件的入口。`handleDebug` 现在用 `resolveLaunchProgram` 解析：拒绝逃出
+工作区的相对路径、拒绝绝对路径，并对已存在的目标再做一次 `realpath` 校验（树内的符号链接/junction 可能
+指向树外）。越界时回一个明确的 `program escapes the workspace: …`，不静默回退到临时缓冲区，免得用户以为
+配置生效了。
+
+### 测试树：跑一次，看每个用例，而不是读一段日志
+
+`Alt+5` 打开 Tests 工具窗口：Run All / Stop / 过滤框 / 汇总行 / 用例树 / 原始输出。协议是
+`testRun` → `testStart` / `testOut` / `testCase` / `testResult`，Stop 发 `testCancel`。
+
+引擎没有语言分支：命令来自 manifest 的 `run.modes.test`（Go 是
+`"{toolchain}" test -v -count=1 {filter} .`），`{filter}` 被 `-run` 选择器替换——点一个用例就是
+`-run ^TestAdd$` 重跑一条。`go test -v` 的每行由 `src/langs/testParser.ts` 增量解析：`=== RUN`、
+`--- PASS/FAIL/SKIP`、`x_test.go:12:` 消息、子测试名都归并到用例上，失败带 file/line 供跳转。
+
+失败不进 `diagnostics`（那个帧整体替换，会把语言服务器的结果冲掉），而是并入 Problems 与编辑器
+标记，和实时诊断共存。结果到达时仍在 running 的用例（构建失败、被中断）按 fail 收尾，不留一个
+永远转圈的 spinner。
+
+顺带补上 manifest 契约：`validateModes` 校验 `run.modes` 的形状、role 只能是 build/run/test、
+`{filter}` 只允许出现在 test 步骤；`run.testFormat` 声明测试输出格式，由
+`src/langs/testFormats.ts` 映射到解析器——没有声明的语言照样能跑测试，只是按纯文本输出，
+面板里没有一处按语言名分支。`verify:ide` 加到 88/88（真实跑 Go 测试、过滤单条、Stop 中断），
+`verify:ui` 422/422。
+
 ### 代码折叠：服务器给范围，本地 brace/indent 兜底
 
 `Code > Fold Code Block`（`Ctrl+Shift+[`）、`Fold All`、`Unfold All`，行号右侧多一列折叠箭头。
@@ -37,6 +522,21 @@
 
 vendor 里新增 CodeMirror 5.65.21 的五个官方 addon（`foldcode`、`foldgutter`+css、`brace-fold`、
 `indent-fold`），`verify-editor-assets` 起把它们列为**必需**资产。
+
+### 内联提示：类型与参数名画在行内，而不是悬停才看得到
+
+`textDocument/inlayHint` 接进同一条导航链路：`inlayHints` 请求带视口行范围，回包在
+`src/lsp/navigation.ts` 里归一化——数组形式的 label 按 `value` 拼起来（带 `location` 的跳转
+目标丢掉，行内标签点不动），`kind` 只保留 type/parameter 两族，缺位置或空 label 的直接丢，
+再按行、列排序。
+
+客户端是零宽 widget（`markText({replacedWith})`），文字用 `textContent` 写，不碰
+`innerHTML`；小文件（≤256 KB）一次要全篇，大文件只按视口 ±200 行请求，debounce 400ms，并且
+换文件时先清旧标记再请求——否则提示会短暂挂在上一份文件的行上。服务器没声明这个能力时
+回 `unsupported`，面板不画也不报错，和折叠的「本地兜底」不同：这里没有本地版本可兜底。
+
+`npm run verify:lsp-protocol` 新增 5 条（乱序/数组/坏数据归一化、两个 kind 与 padding、
+重复请求去重、无能力时不发请求），`verify:ui` 427/427。
 
 ### 崩溃恢复：草稿放在工作区之外，且不替代保存
 

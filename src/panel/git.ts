@@ -11,6 +11,7 @@
  * repository. A message is required; an empty one is rejected before spawning.
  */
 import { spawn } from 'node:child_process';
+import { decodeOutput } from '../util/encoding.js';
 
 export interface GitChange {
   /** Two-column porcelain status (`M `, ` M`, `A `, `??` …). */
@@ -68,8 +69,8 @@ function runGit(cwd: string, args: string[], timeoutMs = 20_000): Promise<GitRun
         /* gone */
       }
     }, timeoutMs);
-    child.stdout?.on('data', (d: Buffer) => out.push(d.toString('utf8')));
-    child.stderr?.on('data', (d: Buffer) => err.push(d.toString('utf8')));
+    child.stdout?.on('data', (d: Buffer) => out.push(decodeOutput(d)));
+    child.stderr?.on('data', (d: Buffer) => err.push(decodeOutput(d)));
     child.on('error', (e) => {
       err.push(e.message);
       finish(-1);

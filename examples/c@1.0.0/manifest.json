@@ -159,7 +159,7 @@
       "0"
     ],
     "preLaunch": {
-      "cmd": "\"{toolchain}\" -std=c11 -g -O0 \"{file}\" -o \"{workdir}/nl_dbg{exe}\"",
+      "argv": ["{toolchain}", "-std=c11", "-g", "-O0", "{file}", "-o", "{workdir}/nl_dbg{exe}"],
       "timeoutMs": 60000
     },
     "launch": {

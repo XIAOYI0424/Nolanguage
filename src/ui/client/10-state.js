@@ -5,6 +5,7 @@
   var LSKEY = 'nolanguage.pycharm.v1';
   function loadPrefs() { try { return JSON.parse(localStorage.getItem(LSKEY) || '{}') || {}; } catch (e) { return {}; } }
   var PREFS = loadPrefs();
+  var RECENT = (PREFS.recent && PREFS.recent.length) ? PREFS.recent.slice(0, 10) : [];
   function savePrefs(patch) {
     try {
       var cur = loadPrefs();
@@ -12,7 +13,28 @@
       localStorage.setItem(LSKEY, JSON.stringify(cur));
     } catch (e) { /* storage unavailable */ }
   }
-  var RECENT = (PREFS.recent && PREFS.recent.length) ? PREFS.recent.slice(0, 10) : [];
+  /** Persist and update the live copy: settings changed in a dialog must take effect now. */
+  function updatePrefs(patch) {
+    Object.keys(patch).forEach(function (k) { PREFS[k] = patch[k]; });
+    savePrefs(patch);
+  }
+  // The last folder the user opened is session state, like tabs: it belongs in
+  // the browser's own store, not in a project file or a server-side setting.
+  // openProject is the single sender so every path into openFolder (native
+  // picker, wizard, startup restore) carries the same reqId and persistence.
+  var PROJECT_SEQ = 900000; // a separate range from fsWrite/draft reqIds
+  var PROJECT_PENDING = Object.create(null); // reqId -> { path, restore }
+  var PROJECT_LAST_ROOT = '';
+  // The engine announces its default root on every connection. While a saved
+  // project is being restored, that frame must not boot the default folder or
+  // trigger discovery for it: the reply for the saved root follows immediately.
+  var PROJECT_AWAIT_RESTORE = !!(PREFS.lastProjectRoot && PREFS.restoreProject !== false);
+  function openProject(path, restore) {
+    if (!path) return;
+    var reqId = ++PROJECT_SEQ;
+    PROJECT_PENDING[reqId] = { path: String(path), restore: !!restore };
+    BRIDGE.send({ kind: 'openFolder', path: String(path), reqId: reqId });
+  }
   function pushRecent(p) {
     if (!p) return;
     var i = RECENT.indexOf(p);
@@ -100,7 +122,14 @@
     // Ask for anything a previous session left behind before the first paint, so
     // the recovery offer and the restored tabs appear together.
     BRIDGE.send({ kind: 'draftList' });
-    bootProject();
+    // Reopen the last folder when the user allowed it. The engine answers with
+    // fsRoot; onFsRoot persists the successful path and boots that project.
+    // A stale path is refused by FsService.setRoot, and onFsError falls back
+    // to the engine's default root instead of leaving an empty shell.
+    var last = PREFS.lastProjectRoot;
+    PROJECT_AWAIT_RESTORE = !!(last && PREFS.restoreProject !== false);
+    if (PROJECT_AWAIT_RESTORE) openProject(last, true);
+    else bootProject();
   });
   BRIDGE.onClose(function () {
     // The engine went away (tab closed, sidecar died). The shell keeps working
@@ -133,6 +162,12 @@
   }
   /** Latest "plugins" frame (sent on connect and after every plugin operation). */
   var PLUGINS = null;
+  /**
+   * Latest "catalog" frame: what the plugin index offers, as of the last search.
+   * A null value means "not asked yet", which the dialog renders differently from
+   * an index that answered with nothing.
+   */
+  var CATALOG = null;
   /** Which in-app dialog is on screen, so async replies know where to paint. */
   var DIALOG_KIND = null;
 
@@ -145,8 +180,12 @@
   //
   // Debounced: writing on every keystroke would flush a megabyte per word. Two
   // seconds is long enough to coalesce typing and short enough that the window
-  // between "last edit" and "recoverable" stays small.
-  var DRAFT_DELAY = 2000;
+  // between "last edit" and "recoverable" stays small. The Settings page can
+  // widen or shorten that window; the default is unchanged.
+  function draftDelay() {
+    var n = Number(PREFS.draftDelay);
+    return isFinite(n) && n >= 1 && n <= 30 ? n * 1000 : 2000;
+  }
   var DRAFT_TIMER = Object.create(null);
   var DRAFT_WRITTEN = Object.create(null); // path -> Date.now() of the copy on disk
 
@@ -165,7 +204,7 @@
       DRAFT_WRITTEN[path] = Date.now();
       BRIDGE.send({ kind: 'draftSave', path: path, content: String(live.content == null ? '' : live.content) });
       paintDraftState();
-    }, DRAFT_DELAY);
+    }, draftDelay());
   }
 
   /** Forget a buffer's recovery copy (disk ACK, explicit discard, or a tab closed). */

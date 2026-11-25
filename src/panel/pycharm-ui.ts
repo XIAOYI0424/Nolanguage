@@ -70,8 +70,9 @@ const ICONS: Record<string, { vb: string; d: string }> = {
   terminal: { vb: '0 0 20 20', d: '<rect x="2.5" y="3.5" width="15" height="13" rx="1.6"/><path d="M6.2 8.2l2.6 2-2.6 2M11.4 12.2h3"/>' },
   database: { vb: '0 0 20 20', d: '<ellipse cx="10" cy="5" rx="6.8" ry="2.5"/><path d="M3.2 5v10c0 1.4 3 2.5 6.8 2.5s6.8-1.1 6.8-2.5V5"/><path d="M3.2 10c0 1.4 3 2.5 6.8 2.5s6.8-1.1 6.8-2.5"/>' },
   run: { vb: '0 0 20 20', d: '<path d="M6.6 4.2l9 5.8-9 5.8z" fill="currentColor" stroke="none"/>' },
-  debug: { vb: '0 0 20 20', d: '<path d="M6.6 4.2l9 5.8-9 5.8z"/><path d="M6.6 16.6h9"/>' },
+  debug: { vb: '0 0 20 20', d: '<path d="M10 4.5a3 3 0 0 0-3 3v4.2a3 3 0 0 0 6 0V7.5a3 3 0 0 0-3-3Z"/><path d="M7.8 4 6.5 2.7M12.2 4l1.3-1.3M6.8 7H3.5m13 0h-3.3M6.8 10H3.5m13 0h-3.3M7.6 13.5l-1.3 1.2m6.1-1.2 1.3 1.2"/>' },
   stop: { vb: '0 0 20 20', d: '<rect x="5.5" y="5.5" width="9" height="9" rx="1" fill="currentColor" stroke="none"/>' },
+  build: { vb: '0 0 16 16', d: '<path d="m3 4 2-2 4 4-2 2-4-4Zm4.1 3.1 5.7 5.7M2 14l5.1-5.1m1.8-5.8 2-2 3 3-2 2"/>' },
   coverage: { vb: '0 0 20 20', d: '<path d="M3 16.5h14"/><path d="M4 13.5l3.5-4 3 2.5L14 6"/><circle cx="4" cy="13.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="14" cy="6" r="1.1" fill="currentColor" stroke="none"/>' },
   structure: { vb: '0 0 20 20', d: '<rect x="7.6" y="2.6" width="4.8" height="3" rx="0.7"/><rect x="2.6" y="14" width="4.8" height="3" rx="0.7"/><rect x="12.6" y="14" width="4.8" height="3" rx="0.7"/><path d="M10 5.6v4.4M10 10l-4.8 4M10 10l4.8 4"/>' },
   perf: { vb: '0 0 20 20', d: '<path d="M2.6 16.6h14.8"/><path d="M5 16.6V11M8.6 16.6V6.4M12.2 16.6V9M15.8 16.6V3.8"/>' },
@@ -85,6 +86,8 @@ const ICONS: Record<string, { vb: string; d: string }> = {
   pin: { vb: '0 0 20 20', d: '<path d="M7.6 3.2h4.8v3.4l1.9 2v1.6H5.7V8.6l1.9-2z"/><path d="M10 10.2v6.6"/>' },
   collapse: { vb: '0 0 20 20', d: '<path d="M3.6 5h12.8M3.6 9.4h8.8M3.6 13.8h12.8"/>' },
   warn: { vb: '0 0 20 20', d: '<path d="M10 3.4l7.6 13.2H2.4z"/><path d="M10 8v4M10 14.1v.1"/>' },
+  todo: { vb: '0 0 20 20', d: '<rect x="4" y="2.8" width="12" height="14.4" rx="1.6"/><path d="M7.2 7.2h5.6M7.2 10.6h5.6M7.2 14h3.2"/>' },
+  history: { vb: '0 0 20 20', d: '<path d="M3.4 10a6.6 6.6 0 1 0 2-4.7M3.4 4.2v3.4h3.4"/><path d="M10 6.4V10l2.6 1.8"/>' },
   file: { vb: '0 0 20 20', d: '<path d="M5 2.6h5l1.5 2H15a1 1 0 0 1 1 1v10.8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3.6a1 1 0 0 1 1-1z"/>' },
   close: { vb: '0 0 16 16', d: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>' },
   min: { vb: '0 0 16 16', d: '<rect x="3.5" y="11" width="9" height="2" rx="1" fill="currentColor" stroke="none"/>' },
@@ -92,6 +95,9 @@ const ICONS: Record<string, { vb: string; d: string }> = {
   chevD: { vb: '0 0 16 16', d: '<path d="M4.5 6.5l3.5 3.5 3.5-3.5"/>' },
   chevR: { vb: '0 0 16 16', d: '<path d="M6.5 4.5l3.5 3.5-3.5 3.5"/>' },
   check: { vb: '0 0 16 16', d: '<path d="M3.5 8.5l3 3 6-7"/>' },
+  sun: { vb: '0 0 20 20', d: '<circle cx="10" cy="10" r="3"/><path d="M10 1.8v2M10 16.2v2M1.8 10h2M16.2 10h2M4.2 4.2l1.4 1.4m8.8 8.8 1.4 1.4m0-11.6-1.4 1.4m-8.8 8.8-1.4 1.4"/>' },
+  moon: { vb: '0 0 20 20', d: '<path d="M15.8 12.5A7.2 7.2 0 0 1 7.5 4.2a7.3 7.3 0 1 0 8.3 8.3Z"/>' },
+  send: { vb: '0 0 16 16', d: '<path d="M2.4 7.2 13.6 2.6 9 13.8 7.2 9.2z"/><path d="M7.2 9.2 13.6 2.6"/>' },
 };
 
 /**

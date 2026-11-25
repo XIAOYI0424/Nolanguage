@@ -27,6 +27,8 @@
  *   --home <dir>    plugin home (default: $NOLANGUAGE_HOME, else ~/.nolanguage)
  *   --drop-data     with rm: also delete `data/<id>/`
  *   --strict        with add: refuse to install when `run.requires` is unmet
+ *   --sha256 <hex>  with add: expected hash when installing from a direct URL
+ *   --allow-unverified  with add: explicitly accept a remote install with no hash
  *   --source <url>  with search/add: an extra index (file or https); repeatable
  *
  * Exit codes: 0 ok · 1 operation failed · 2 bad usage.
@@ -99,6 +101,8 @@ function printUsage(io: LangIo): void {
     '  --home <dir>    plugin home (default: $NOLANGUAGE_HOME, else ~/.nolanguage)',
     '  --drop-data     with rm: also delete the plugin data directory',
     '  --strict        with add: refuse to install when a requirement is unmet',
+    '  --sha256 <hex>  with add: expected hash for a direct URL download',
+    '  --allow-unverified  with add: explicitly accept a remote install with no hash',
     '  --source <url>  with search/add: an extra index (file or https); repeatable',
     '',
     'examples:',
@@ -117,6 +121,8 @@ export async function runLang(argv: string[], io: LangIo = consoleIo): Promise<n
   let homeArg: string | undefined;
   let dropData = false;
   let strictDeps = false;
+  let allowUnverified = false;
+  let expectSha256: string | undefined;
   let wantsHelp = false;
   const extraSources: string[] = [];
 
@@ -145,6 +151,17 @@ export async function runLang(argv: string[], io: LangIo = consoleIo): Promise<n
         strictDeps = true;
         continue;
       }
+      if (a === '--allow-unverified') {
+        allowUnverified = true;
+        continue;
+      }
+      if (a === '--sha256') {
+        const value = argv[i + 1];
+        if (!value) throw new CliError('--sha256 needs a hex digest', 2);
+        expectSha256 = value;
+        i++;
+        continue;
+      }
       if (a === '--help' || a === '-h' || a === 'help') {
         wantsHelp = true;
         continue;
@@ -161,7 +178,7 @@ export async function runLang(argv: string[], io: LangIo = consoleIo): Promise<n
       return 0;
     }
 
-    const ctx: Ctx = { io, homeArg, dropData, strictDeps, extraSources };
+    const ctx: Ctx = { io, homeArg, dropData, strictDeps, allowUnverified, expectSha256, extraSources };
     switch (verb) {
       case 'add':
       case 'install':
@@ -227,6 +244,8 @@ interface Ctx {
   homeArg?: string;
   dropData: boolean;
   strictDeps: boolean;
+  allowUnverified: boolean;
+  expectSha256?: string;
   extraSources: string[];
 }
 
@@ -315,6 +334,7 @@ async function loadCatalog(
 async function doAdd(ctx: Ctx, source: string): Promise<void> {
   const reg = await open(ctx);
   let resolvedSource = source;
+  let catalogSha: string | undefined;
   if (!looksLikeInstallSource(source)) {
     // Not a path/URL/git — treat it as a plugin id and resolve from the catalog.
     const { entries } = await loadCatalog(ctx, reg.home);
@@ -322,10 +342,25 @@ async function doAdd(ctx: Ctx, source: string): Promise<void> {
     if (!hit) {
       throw new CliError(`"${source}" is not a local path and was not found in any plugin index`, 1);
     }
+    catalogSha = hit.sha256;
+    if (!catalogSha && !ctx.expectSha256 && !ctx.allowUnverified) {
+      throw new CliError(
+        `"${hit.id}" has no sha256 in the plugin index — refusing unverified code; pass --sha256 or --allow-unverified`,
+        1,
+      );
+    }
+    if (!catalogSha) {
+      ctx.io.out(`WARNING  "${hit.id}" has no sha256 in the index; the download cannot be verified`);
+    }
+    const usedSha = ctx.expectSha256 ?? catalogSha;
     ctx.io.out(`resolving "${source}" from plugin index → ${hit.downloadUrl}`);
+    if (usedSha) ctx.io.out(`  sha256   ${usedSha}`);
     resolvedSource = hit.downloadUrl;
   }
-  const resolved = await resolveSource(resolvedSource);
+  const resolved = await resolveSource(resolvedSource, {
+    ...(ctx.expectSha256 ?? catalogSha ? { expectSha256: ctx.expectSha256 ?? catalogSha } : {}),
+    allowUnverifiedRemote: ctx.allowUnverified,
+  });
   try {
     const installed = await reg.install(resolved.dir, { strictDeps: ctx.strictDeps });
     if (!reg.isEnabled(installed.id)) await reg.enable(installed.id);

@@ -238,10 +238,14 @@ export interface DebugSpec {
   /**
    * Build the target before debugging. Compiled languages have no source-level
    * debug target: without this, the debugger is handed a `.cpp` and cannot
-   * stop anywhere. The command is a shell string with the same placeholders,
-   * plus `{toolchain}` when the run block's discovery found a compiler.
+   * stop anywhere.
+   *
+   * `argv` is the safe shape: one array element per process argument, with the
+   * same placeholders plus `{toolchain}` when discovery found a compiler. The
+   * engine never invokes a shell for it. `cmd` is accepted for older plugins,
+   * but it is tokenised locally and run without a shell too.
    */
-  preLaunch?: { cmd?: string; timeoutMs?: number };
+  preLaunch?: { argv?: string[]; cmd?: string; timeoutMs?: number };
   /** Whether this adapter can attach to an already-running target. */
   supportsAttach?: boolean;
 }
@@ -529,6 +533,70 @@ function validateTemplates(list: unknown, add: (field: string, message: string) 
   }
 }
 
+/**
+ * Validate a plugin's `run.modes` block.
+ *
+ * A mode is a named alternative to the default step list (`test` is the only
+ * one the engine itself understands, but a plugin may add more and the IDE
+ * will offer them). Until now the block was copied into `RunConfig` unread:
+ * a typo in `role` degraded a failing build into an ordinary non-zero exit,
+ * and an empty step list made "Run tests" answer with a mystery timeout. Both
+ * are manifest bugs and should fail at install time, not at run time.
+ */
+const RUN_ROLES = new Set(['build', 'run', 'test']);
+function validateModes(value: unknown, field: string, add: (f: string, m: string) => void): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    add(field, 'must be an object keyed by mode name (run, test, …)');
+    return;
+  }
+  for (const [mode, raw] of Object.entries(value as Record<string, unknown>)) {
+    const at = `${field}.${mode}`;
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(mode)) {
+      add(at, 'mode name must be lower-case letters, digits, "-" or "_"');
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      add(at, 'must be an object');
+      continue;
+    }
+    const cfg = raw as Record<string, unknown>;
+    if (cfg.timeoutMs !== undefined && (typeof cfg.timeoutMs !== 'number' || !(cfg.timeoutMs > 0))) {
+      add(`${at}.timeoutMs`, 'must be a positive number');
+    }
+    if (cfg.command !== undefined && (!Array.isArray(cfg.command) || cfg.command.some((c) => typeof c !== 'string' || !c))) {
+      add(`${at}.command`, 'must be an array of non-empty strings');
+    }
+    if (cfg.steps === undefined) continue;
+    if (!Array.isArray(cfg.steps) || !cfg.steps.length) {
+      add(`${at}.steps`, 'must be a non-empty array when present');
+      continue;
+    }
+    cfg.steps.forEach((step, i) => {
+      const st = `${at}.steps[${i}]`;
+      if (!step || typeof step !== 'object' || Array.isArray(step)) {
+        add(st, 'must be an object');
+        return;
+      }
+      const o = step as Record<string, unknown>;
+      if (typeof o.role !== 'string' || !RUN_ROLES.has(o.role)) {
+        add(`${st}.role`, 'must be one of build | run | test');
+      }
+      if (typeof o.cmd !== 'string' || !o.cmd.trim()) {
+        add(`${st}.cmd`, 'must be a non-empty command template');
+        return;
+      }
+      if (o.timeoutMs !== undefined && (typeof o.timeoutMs !== 'number' || !(o.timeoutMs > 0))) {
+        add(`${st}.timeoutMs`, 'must be a positive number');
+      }
+      // `{filter}` is only substituted for the step that runs the tests; in a
+      // build step it would silently expand to an empty string and look like a
+      // mystery flag.
+      if (o.cmd.includes('{filter}') && o.role !== 'test') {
+        add(`${st}.cmd`, '`{filter}` is only substituted in a `test` step');
+      }
+    });
+  }
+}
+
 export function validateManifest(raw: unknown): ManifestValidation {
   const issues: ValidationIssue[] = [];
   const add = (field: string, message: string): void => {
@@ -612,6 +680,15 @@ export function validateManifest(raw: unknown): ManifestValidation {
     }
     validateDiscovery(run.discovery, 'run.discovery', add);
     validateInterpreters(run.interpreters, 'run.interpreters', add);
+    if (run.modes !== undefined) validateModes(run.modes, 'run.modes', add);
+    // The id is matched against the engine's parser table, so it is a name, not
+    // a path: lowercase, no separators. An unknown id is not an error here — the
+    // language still runs tests, it just gets plain output.
+    if (run.testFormat !== undefined) {
+      if (typeof run.testFormat !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(run.testFormat)) {
+        add('run.testFormat', 'must be a lowercase format id (letters, digits, dash; max 32)');
+      }
+    }
   }
 
   const deps = m.dependencies as Record<string, unknown> | undefined;
@@ -636,6 +713,29 @@ export function validateManifest(raw: unknown): ManifestValidation {
     }
     if (deps.install !== undefined && (!Array.isArray(deps.install) || deps.install.some((c) => typeof c !== 'string' || !c))) {
       add('dependencies.install', 'must be an array of strings when present');
+    }
+    // `local` names the "install from disk" flavours. A provider with no install
+    // command could never run, so both halves are required together.
+    if (deps.local !== undefined) {
+      if (!deps.install) add('dependencies.local', 'requires dependencies.install to be present');
+      if (!deps.local || typeof deps.local !== 'object' || Array.isArray(deps.local)) {
+        add('dependencies.local', 'must be an object keyed by kind (editable, file, …)');
+      } else {
+        for (const [kind, raw] of Object.entries(deps.local as Record<string, unknown>)) {
+          const at = `dependencies.local.${kind}`;
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            add(at, 'must be an object');
+            continue;
+          }
+          const spec = raw as Record<string, unknown>;
+          if (spec.args !== undefined && (!Array.isArray(spec.args) || spec.args.some((a) => typeof a !== 'string'))) {
+            add(`${at}.args`, 'must be an array of strings');
+          }
+          if (spec.label !== undefined && (typeof spec.label !== 'string' || !spec.label)) {
+            add(`${at}.label`, 'must be a non-empty string when present');
+          }
+        }
+      }
     }
   }
 

@@ -10,12 +10,136 @@
     ? PREFS.breakpoints : {};
   function bpsFor(file) { return BREAKPOINTS[file] || (BREAKPOINTS[file] = {}); }
   function saveBreakpoints() { savePrefs({ breakpoints: BREAKPOINTS }); }
+  // Bookmarks are the other piece of editor state people rebuild by hand after
+  // every restart. Like breakpoints they live in preferences, keyed by the same
+  // workspace-relative path the tabs use, and a line keeps its mnemonic label.
+  var BOOKMARKS = (PREFS.bookmarks && typeof PREFS.bookmarks === 'object' && !Array.isArray(PREFS.bookmarks))
+    ? PREFS.bookmarks : {};
+  function bookmarksFor(file) { return BOOKMARKS[file] || (BOOKMARKS[file] = {}); }
+  function saveBookmarks() { savePrefs({ bookmarks: BOOKMARKS }); }
+  function bmGlyph(title) {
+    var d = document.createElement('span');
+    d.className = 'bm';
+    d.setAttribute('title', title || 'Bookmark');
+    return d;
+  }
+  function paintCmBookmarks() {
+    if (!CMEDITOR || !currentFile) return;
+    var cm = CMEDITOR.cm;
+    cm.clearGutter('bm-gutter');
+    var mk = bookmarksFor(currentFile), count = cm.lineCount();
+    for (var i = 0; i < count; i++) {
+      var bm = mk[i + 1];
+      if (bm) cm.setGutterMarker(i, 'bm-gutter', bmGlyph('Bookmark ' + (bm.mnemonic || '') + ' - ' + (bm.label || '')));
+    }
+  }
+  function caretLineNo() {
+    var v = ta.value || '';
+    return v.slice(0, ta.selectionStart).split(String.fromCharCode(10)).length - 1;
+  }
+  function setLineBookmark(mnemonic) {
+    if (!currentFile) { toast('Open a file first'); return; }
+    var n = caretLineNo() + 1, mk = bookmarksFor(currentFile);
+    var key = String(mnemonic || '').trim().toUpperCase();
+    if (key && !/^[0-9A-Z]$/.test(key)) { toast('Use one digit or letter for a mnemonic'); return; }
+    if (mk[n]) {
+      delete mk[n];
+      toast('Bookmark removed from line ' + n);
+    } else {
+      var line = (ta.value || '').split(String.fromCharCode(10))[n - 1] || '';
+      mk[n] = { label: line.trim().slice(0, 80) || ('Line ' + n), mnemonic: key };
+      toast((key ? 'Bookmark ' + key : 'Bookmark') + ' set at line ' + n);
+    }
+    saveBookmarks();
+    paintCmBookmarks();
+    renderEditor();
+  }
+  function promptMnemonicBookmark() {
+    if (!currentFile) { toast('Open a file first'); return; }
+    showModal({
+      title: 'Mnemonic bookmark', icon: 'file', message: currentFile,
+      sub: 'Use a digit or letter. Leave empty for an anonymous bookmark.',
+      fields: [{ name: 'm', label: 'Mnemonic', value: '', placeholder: '0-9 or A-Z' }],
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Set', primary: true, onClick: function (v) { setLineBookmark(v.m); } }
+      ]
+    });
+  }
+  function allBookmarks() {
+    var out = [];
+    Object.keys(BOOKMARKS).forEach(function (file) {
+      var mk = BOOKMARKS[file] || {};
+      Object.keys(mk).forEach(function (n) {
+        out.push({ file: file, line: Number(n), label: mk[n].label || '', mnemonic: mk[n].mnemonic || '' });
+      });
+    });
+    out.sort(function (a, b) { return a.file.localeCompare(b.file) || a.line - b.line; });
+    return out;
+  }
+  function jumpToBookmark(key) {
+    var pos = String(key || '').lastIndexOf(':');
+    if (pos < 0) return;
+    var file = key.slice(0, pos), line = Number(key.slice(pos + 1));
+    if (!file || !isFinite(line)) return;
+    gotoLineInFile(file, Math.max(0, line - 1));
+  }
+  function showLineBookmarks() {
+    var list = allBookmarks();
+    if (!list.length) { toast('No bookmarks yet'); return; }
+    var radios = list.map(function (b, i) {
+      return {
+        name: 'bm', value: b.file + ':' + b.line, def: i === 0,
+        label: (b.mnemonic ? b.mnemonic + '  ' : '') + b.file + ':' + b.line + '  ' + b.label
+      };
+    });
+    showModal({
+      title: 'Line bookmarks', icon: 'file', message: 'Jump to a bookmarked line',
+      sub: list.length + ' bookmark' + (list.length === 1 ? '' : 's'),
+      radios: radios,
+      buttons: [
+        { label: 'Cancel' },
+        { label: 'Remove', onClick: function (v) {
+          if (!v.bm) return;
+          jumpToBookmark(v.bm);
+          var p = String(v.bm).lastIndexOf(':');
+          var f = String(v.bm).slice(0, p), n = String(v.bm).slice(p + 1);
+          if (bookmarksFor(f)[n]) delete bookmarksFor(f)[n];
+          saveBookmarks(); paintCmBookmarks(); renderEditor(); toast('Bookmark removed');
+        } },
+        { label: 'Go', primary: true, onClick: function (v) { if (v.bm) jumpToBookmark(v.bm); } }
+      ]
+    });
+  }
   var folded = {}; // line -> collapsed
   // Diagnostics for the current document (the engine's check answer). Kept
   // apart from problems (the rendered list) so the editor can paint marks from
   // the same data the panel shows — one source, two projections.
   var DIAGS = [];
   var DIAG_MARKS = []; // CodeMirror textMarker handles, cleared on every repaint
+  // Highlight Usages in File: exact spans in CodeMirror, gutter tint in the
+  // textarea fallback. Both projections share one source so they clear together.
+  var USAGE_LINES = Object.create(null);
+  var USAGE_MARKS = [];
+  var USAGE_RANGE = null;
+  function clearUsageMarks() {
+    if (CMEDITOR) USAGE_MARKS.forEach(function (h) { h.clear(); });
+    USAGE_MARKS = [];
+    USAGE_LINES = Object.create(null);
+    USAGE_RANGE = null;
+  }
+  function setUsageSpans(spans, caretStart, caretEnd) {
+    clearUsageMarks();
+    if (!spans || !spans.length) return;
+    spans.forEach(function (s) {
+      var from = CMEDITOR ? CMEDITOR.cm.posFromIndex(s.start) : s.start;
+      var to = CMEDITOR ? CMEDITOR.cm.posFromIndex(s.end) : s.end;
+      if (CMEDITOR) USAGE_MARKS.push(CMEDITOR.cm.markText(from, to, { className: 'usage-mark' }));
+      var before = ta.value.slice(0, s.start), line = before.split('\n').length;
+      USAGE_LINES[line] = true;
+    });
+    USAGE_RANGE = { start: caretStart, end: caretEnd };
+  }
 
   // ---------- CodeMirror (vendored, optional) ----------
   // When the vendored CodeMirror is present the textarea becomes a thin adapter
@@ -132,13 +256,67 @@
     try { CMEDITOR.cm.execCommand(name); } catch (e) { toast('Folding failed: ' + (e && e.message ? e.message : 'unknown')); }
   }
 
+  // ---------- inlay hints ----------
+  // Decorations only: every mark is a zero-width widget, so typing, selection and
+  // search never see the hint text as buffer content. The list is kept so a new
+  // reply can clear the old marks before painting the new ones; a document switch
+  // rebuilds the buffer and CodeMirror drops the marks with it, which is why the
+  // array is cleared here on every paint instead of relying on the editor.
+  var INLAY_MARKS = [];
+  function setInlayHints(list) {
+    var i;
+    for (i = 0; i < INLAY_MARKS.length; i++) { try { INLAY_MARKS[i].clear(); } catch (e) {} }
+    INLAY_MARKS = [];
+    if (!CMEDITOR || !list || !list.length) return;
+    var cm = CMEDITOR.cm;
+    var seen = {};
+    for (i = 0; i < list.length; i++) {
+      var h = list[i];
+      if (!h || typeof h.label !== 'string' || !h.label) continue;
+      if (typeof h.line !== 'number' || typeof h.character !== 'number') continue;
+      if (h.line < 0 || h.line >= cm.lineCount()) continue;
+      var lineText = cm.getLine(h.line) || '';
+      var ch = Math.max(0, Math.min(lineText.length, h.character));
+      // Two collapsed widgets on one position throw in CM5, and the server cannot
+      // know we merged its duplicate. Keep the first and drop the rest.
+      var key = h.line + ':' + ch;
+      if (seen[key]) continue;
+      seen[key] = true;
+      var node = document.createElement('span');
+      var cls = 'cm-inlay';
+      if (h.kind === 'type') cls += ' cm-inlay-type';
+      else if (h.kind === 'parameter') cls += ' cm-inlay-param';
+      if (h.paddingLeft) cls += ' pad-l';
+      if (h.paddingRight) cls += ' pad-r';
+      node.className = cls;
+      // textContent, never innerHTML: the label comes from a language server.
+      node.textContent = h.label;
+      try {
+        INLAY_MARKS.push(cm.markText(
+          CodeMirror.Pos(h.line, ch),
+          CodeMirror.Pos(h.line, ch),
+          { collapsed: true, clearWhenEmpty: false, replacedWith: node, insertLeft: true },
+        ));
+      } catch (e) {}
+    }
+  }
+
   function makeCmAdapter(cm) {
-    var skip = 0;
+    // Every input listener owns its suppression count. A single shared counter
+    // used to be decremented by the first listener, so the second one saw the
+    // programmatic setValue from showBuffer() as a user edit and marked the
+    // freshly opened file dirty. Arming touches all listeners; consuming is
+    // per listener, so opening a file is silent for all of them.
+    var inputHooks = [];
     var api = {
       isCM: true,
       cm: cm,
       get value() { return cm.getValue(); },
-      set value(v) { skip++; cm.setValue(String(v == null ? '' : v)); },
+      set value(v) {
+        var text = String(v == null ? '' : v);
+        for (var i = 0; i < inputHooks.length; i++) inputHooks[i].skip++;
+        cm.setValue(text);
+      },
       get selectionStart() { return cm.indexFromPos(cm.getCursor('from')); },
       set selectionStart(p) { cm.setSelection(cm.posFromIndex(p), cm.getCursor('to')); },
       get selectionEnd() { return cm.indexFromPos(cm.getCursor('to')); },
@@ -154,7 +332,12 @@
       getBoundingClientRect: function () { return cm.getWrapperElement().getBoundingClientRect(); },
       addEventListener: function (type, fn) {
         if (type === 'input') {
-          cm.on('change', function () { if (skip > 0) { skip--; return; } fn({ target: api }); });
+          var hook = { skip: 0 };
+          inputHooks.push(hook);
+          cm.on('change', function () {
+            if (hook.skip > 0) { hook.skip--; return; }
+            fn({ target: api });
+          });
         } else if (type === 'scroll') {
           cm.on('scroll', function () { fn({ target: api }); });
         } else if (type === 'keyup') {
@@ -177,6 +360,46 @@
     };
     return api;
   }
+
+  // Editor settings are read from the same preference bag as the rest of the
+  // shell, so a change made in Settings survives a restart and takes effect
+  // immediately on the live CodeMirror instance.
+  function editorPref(name, fallback) {
+    var v = PREFS[name];
+    return v == null ? fallback : !!v;
+  }
+  function editorNumber(name, fallback, min, max) {
+    var n = Number(PREFS[name]);
+    return isFinite(n) && n >= min && n <= max ? n : fallback;
+  }
+  /** One indentation unit from the live Editor preferences. */
+  function editorIndentUnit() {
+    if (editorPref('useTabs', false)) return String.fromCharCode(9);
+    var n = editorNumber('tabSize', 4, 2, 8), out = '';
+    for (var i = 0; i < n; i++) out += ' ';
+    return out;
+  }
+  function applyEditorPrefs() {
+    var gutter = $('gutter'), curline = $('curline');
+    if (!CMEDITOR || !CMEDITOR.cm) {
+      // Textarea fallback: only the line-number column has a DOM counterpart.
+      if (gutter) gutter.style.display = editorPref('lineNumbers', true) ? '' : 'none';
+      if (curline) curline.style.display = editorPref('activeLine', true) ? '' : 'none';
+      renderEditor();
+      return;
+    }
+    var cm = CMEDITOR.cm;
+    cm.setOption('lineNumbers', editorPref('lineNumbers', true));
+    cm.setOption('lineWrapping', editorPref('softWrap', false));
+    cm.setOption('matchBrackets', editorPref('matchBrackets', true));
+    cm.setOption('autoCloseBrackets', editorPref('autoCloseBrackets', true));
+    cm.setOption('styleActiveLine', editorPref('activeLine', true));
+    var size = editorNumber('tabSize', 4, 2, 8);
+    cm.setOption('tabSize', size);
+    cm.setOption('indentUnit', size);
+    cm.setOption('indentWithTabs', editorPref('useTabs', false));
+  }
+
   (function initCodeMirror() {
     if (!window.CodeMirror) return;
     if (/jsdom/i.test((navigator && navigator.userAgent) || '')) return;
@@ -188,27 +411,27 @@
       var cm = window.CodeMirror(host, {
         value: ta.value,
         mode: cmModeFor(currentLang),
-        lineNumbers: true,
+        lineNumbers: editorPref('lineNumbers', true),
         // A dedicated breakpoint gutter sits left of the line numbers; clicking
         // either column toggles a breakpoint (wired just below).
-        gutters: ['CodeMirror-linenumbers', { className: 'bp-gutter', style: 'width:16px' }, 'CodeMirror-foldgutter'],
+        gutters: ['CodeMirror-linenumbers', { className: 'bp-gutter', style: 'width:16px' }, { className: 'bm-gutter', style: 'width:16px' }, 'CodeMirror-foldgutter'],
         // The fold arrow column sits right of the breakpoints, like PyCharm's
         // fold gutter sits inside the line-number band.
         // Indicators stay at their defaults: foldgutter reads a string option as a
         // *class name*, so overriding it with an arrow character would leave the
         // gutter empty instead of drawing one.
         foldGutter: { rangeFinder: foldFinder },
-        lineWrapping: false,
-        matchBrackets: true,
-        autoCloseBrackets: true,
-        styleActiveLine: true,
+        lineWrapping: editorPref('softWrap', false),
+        matchBrackets: editorPref('matchBrackets', true),
+        autoCloseBrackets: editorPref('autoCloseBrackets', true),
+        styleActiveLine: editorPref('activeLine', true),
         // CM reads dropped files into the buffer by default. The app is a
         // native shell that must not read local files from a drag; an empty
         // allow-list makes every file drop a no-op.
         allowDropFileTypes: [],
-        indentUnit: 4,
-        tabSize: 4,
-        indentWithTabs: false,
+        indentUnit: editorNumber('tabSize', 4, 2, 8),
+        tabSize: editorNumber('tabSize', 4, 2, 8),
+        indentWithTabs: editorPref('useTabs', false),
         viewportMargin: 40,
       });
       ta.style.display = 'none';
@@ -232,7 +455,14 @@
         'Ctrl-Shift-[': function (cmx) { cmx.execCommand('toggleFold'); },
         'Ctrl-Shift-]': function (cmx) { cmx.execCommand('unfold'); },
       });
+      // Hints follow the viewport only for a big buffer; the debounce and the
+      // "is this file too big" decision live in the runtime, so scrolling just
+      // schedules the same request path an edit uses.
+      cm.on('viewportChange', function () {
+        if (typeof scheduleInlayHints === 'function') scheduleInlayHints();
+      });
       paintCmBreakpoints();
+      paintCmBookmarks();
     } catch (e) {
       if (host && host.parentNode) host.parentNode.removeChild(host);
       CMEDITOR = null;
@@ -472,6 +702,8 @@
       var n = i + 1;
       var cls = 'gline';
       if (bpsFor(currentFile)[n]) cls += ' hasbp';
+      if (bookmarksFor(currentFile)[n]) cls += ' hasbm';
+      if (USAGE_LINES[n]) cls += ' hasusage';
       var sv = sev[i];
       if (sv === 1) cls += ' haserr';
       else if (sv === 2) cls += ' haswarn';
@@ -493,6 +725,7 @@
       }
       var inner = '<span class="num">' + n + '</span>';
       if (bpsFor(currentFile)[n]) inner = '<span class="bp" data-bp="' + n + '"></span>' + inner;
+      if (bookmarksFor(currentFile)[n]) inner = '<span class="bm" data-bm="' + n + '"></span>' + inner;
       if (cls.indexOf('foldable') >= 0) inner = '<span class="fold" data-fold="' + n + '">' + (folded[n] ? ic('chevR', 12) : ic('chevD', 12)) + '</span>' + inner;
       html += '<div class="' + cls + '" data-line="' + n + '">' + inner + '</div>';
     }
@@ -504,6 +737,14 @@
       glines.__bpWired = true;
       glines.addEventListener('click', function (e) {
         if (e.target.closest && e.target.closest('[data-fold]')) return;
+        if (e.target.closest && e.target.closest('[data-bm]')) {
+          var bn = +e.target.closest('[data-bm]').getAttribute('data-bm');
+          if (bn && bookmarksFor(currentFile)[bn]) {
+            delete bookmarksFor(currentFile)[bn];
+            saveBookmarks(); paintCmBookmarks(); renderEditor(); toast('Bookmark removed from line ' + bn);
+          }
+          return;
+        }
         var g = e.target.closest ? e.target.closest('.gline') : null;
         if (!g) return;
         var n = +g.getAttribute('data-line');
@@ -547,7 +788,7 @@
       // A file switch lands here right after the adapter's value setter ran
       // cm.setValue(), which drops every gutter marker. Repaint this file's
       // breakpoints once — not on every keystroke, since markers follow lines.
-      if (CM_BP_FILE !== currentFile) { CM_BP_FILE = currentFile; paintCmBreakpoints(); }
+      if (CM_BP_FILE !== currentFile) { CM_BP_FILE = currentFile; paintCmBreakpoints(); paintCmBookmarks(); }
       return;
     }
     var code = ta.value;
@@ -562,7 +803,7 @@
     var cl = $('curline'); if (cl) cl.style.transform = 'translateY(' + (-ta.scrollTop) + 'px)';
   }
   function updateCaret() {
-    var line, col;
+    var line, col, herePos;
     if (CMEDITOR) {
       // O(1): the cursor knows its line. Slicing the buffer and splitting it
       // here is O(document) per keystroke, which showed up as 3.8 ms at 20k
@@ -570,10 +811,18 @@
       var c = CMEDITOR.cm.getCursor();
       line = c.line + 1;
       col = c.ch + 1;
+      herePos = CMEDITOR.cm.indexFromPos ? CMEDITOR.cm.indexFromPos(c) : ta.selectionStart;
     } else {
       var pos = ta.selectionStart, before = ta.value.slice(0, pos);
       line = before.split('\n').length;
       col = pos - before.lastIndexOf('\n');
+      herePos = pos;
+    }
+    // Usage marks describe the symbol under the caret; once it moves away they
+    // are stale, so drop them without waiting for another explicit command.
+    if (USAGE_RANGE && (herePos < USAGE_RANGE.start || herePos > USAGE_RANGE.end)) {
+      clearUsageMarks();
+      renderEditor();
     }
     $('stPos').textContent = 'Ln ' + line + ', Col ' + col;
     var gl = glines.children[line - 1];
@@ -581,6 +830,12 @@
     if (gl) gl.classList.add('cur');
     var cl = $('curline');
     if (cl) { cl.style.top = (10 + (line - 1) * 20) + 'px'; cl.style.display = 'block'; }
+    // The symbol crumb follows the caret, but only when the line changes:
+    // recomputing the outline on every keystroke would make large files slow.
+    if (typeof renderBreadcrumbs === 'function' && CRUMB_TRACK !== currentFile + ':' + (line - 1)) {
+      renderBreadcrumbs(currentFile);
+    }
+    if (typeof updateMinimapViewport === 'function') updateMinimapViewport();
   }
 
   // lex holds the L1 candidates of the current prefix, so an LSP answer can be
@@ -605,10 +860,12 @@
     ta.value = ta.value.slice(0, s) + txt + ta.value.slice(e);
     ta.selectionStart = ta.selectionEnd = s + txt.length;
     renderEditor(); updateCaret();
+    if (typeof noteEditLocation === 'function') noteEditLocation();
   }
   function replaceRange(a, b, txt) {
     ta.value = ta.value.slice(0, a) + txt + ta.value.slice(b);
     ta.selectionStart = ta.selectionEnd = a + txt.length;
+    if (typeof noteEditLocation === 'function') noteEditLocation();
   }
   // ---------- editor context menu ----------
   // PyCharm's editor menu. Undo/redo/cut/copy go through execCommand, which is
@@ -628,15 +885,26 @@
   }
   function copyText(text) {
     if (!text) { toast('Nothing to copy'); return; }
+    if (typeof rememberClipboard === 'function') rememberClipboard(text);
     var clip = navigator.clipboard;
     if (clip && clip.writeText) {
       clip.writeText(text).then(function () { toast('Copied'); }, function () { toast('Copy failed — use Ctrl+C'); });
     } else { toast('Copy failed — clipboard unavailable'); }
   }
+  /** Copy Reference: a shareable, one-based location for the caret. */
+  function copyCodeReference() {
+    if (!currentFile) { toast('No file is open'); return; }
+    var at = navCaret();
+    copyText(String(currentFile).replace(/\\/g, '/') + ':' + (at.line + 1));
+  }
   function pasteAtCaret() {
     var clip = navigator.clipboard;
     if (!clip || !clip.readText) { toast('Paste blocked — use Ctrl+V'); return; }
-    clip.readText().then(function (text) { insertText(String(text || '')); }, function () { toast('Paste blocked — use Ctrl+V'); });
+    clip.readText().then(function (text) {
+      var s = String(text || '');
+      if (s && typeof rememberClipboard === 'function') rememberClipboard(s);
+      insertText(s);
+    }, function () { toast('Paste blocked — use Ctrl+V'); });
   }
   function deleteSelection() {
     ta.focus();
@@ -653,7 +921,7 @@
     var canEdit = CAN_EDIT(), hasDoc = !!currentFile;
     return [
       { label: 'Undo', sc: 'Ctrl+Z', dis: !canEdit, act: function () { docCmd('undo'); } },
-      { label: 'Redo', sc: 'Ctrl+Y', dis: !canEdit, act: function () { docCmd('redo'); } },
+      { label: 'Redo', sc: 'Ctrl+Shift+Z', dis: !canEdit, act: function () { docCmd('redo'); } },
       { sep: true },
       { label: 'Cut', sc: 'Ctrl+X', dis: !canEdit, act: function () { docCmd('cut'); } },
       { label: 'Copy', sc: 'Ctrl+C', dis: !hasDoc, act: function () { docCmd('copy'); } },

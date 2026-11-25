@@ -19,7 +19,7 @@ import { EventEmitter } from 'node:events';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { LspClient, type CompletionItem, type Diagnostic, type DiagnosticsWait, type Hover } from '../LspClient.js';
 import type { LspLike, LspStatus } from '../lspLike.js';
-import type { CodeAction, FoldingRange, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from '../navigation.js';
+import type { CodeAction, FoldingRange, InlayHint, Location, NavResult, SignatureHelp, SymbolInformation, TextEdit } from '../navigation.js';
 import { unsupported } from '../navigation.js';
 import type { Kernel } from '../../kernel/Kernel.js';
 import type { CacheValidator } from './CacheValidator.js';
@@ -504,6 +504,25 @@ export class ManagedLsp extends EventEmitter implements LspLike {
     );
     if (out.kind === 'timeout') return unsupported<FoldingRange[]>(`folding ranges timed out after ${this.foldBudgetMs} ms`);
     if (out.kind === 'error') return unsupported<FoldingRange[]>(out.error.message);
+    return out.value;
+  }
+
+  /**
+   * Inlay hints for one line window.
+   *
+   * Same budget class as folding: hints are decoration, and a server that is
+   * still indexing can answer minutes late — the editor simply shows none until
+   * the next request. The window is part of the dedupe key so two viewports do
+   * not share an answer written for the other one.
+   */
+  async inlayHints(uri: string, fromLine: number, toLine: number): Promise<NavResult<InlayHint[]>> {
+    const client = await this.ready();
+    if (!client) return unsupported<InlayHint[]>(this.startError ?? this.plugin.degradedNote ?? 'no language server');
+    const out = await this.deps.scheduler.dedupe(`${this.key}|inlay|${uri}|${fromLine}:${toLine}`, () =>
+      withBudget(client.inlayHints(uri, fromLine, toLine), this.foldBudgetMs),
+    );
+    if (out.kind === 'timeout') return unsupported<InlayHint[]>(`inlay hints timed out after ${this.foldBudgetMs} ms`);
+    if (out.kind === 'error') return unsupported<InlayHint[]>(out.error.message);
     return out.value;
   }
 

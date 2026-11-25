@@ -14,6 +14,7 @@
  * fabricated percentage.
  */
 import { spawn } from 'node:child_process';
+import { decodeOutput } from '../util/encoding.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -214,8 +215,8 @@ function spawnCapture(
         /* gone */
       }
     }, Math.max(1000, timeoutMs));
-    child.stdout?.on('data', (d: Buffer) => out.push(d.toString('utf8')));
-    child.stderr?.on('data', (d: Buffer) => err.push(d.toString('utf8')));
+    child.stdout?.on('data', (d: Buffer) => out.push(decodeOutput(d)));
+    child.stderr?.on('data', (d: Buffer) => err.push(decodeOutput(d)));
     child.on('error', (e) => {
       err.push(e.message);
       finish(-1);

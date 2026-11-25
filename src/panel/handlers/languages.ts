@@ -7,7 +7,7 @@
  * what makes the move mechanical rather than a refactor.
  */
 import type { WorkspaceService } from '../WorkspaceService.js';
-import type { LanguageId } from '../samples.js';
+import type { LanguageId } from '../../assets/samples.js';
 import type { SandboxLanguage } from '../../exec/types.js';
 import { installPackage, readDependencies } from '../../langs/dependencies.js';
 import { stateFor } from '../conn-state.js';
@@ -161,6 +161,37 @@ export async function handleFolding(
     });
   } catch (err) {
     reply({ kind: 'error', language, message: `folding failed: ${(err as Error).message}` });
+  }
+}
+
+/**
+ * Inline type/parameter hints for the lines the editor is showing.
+ *
+ * `unsupported` is the honest answer for servers that never declared
+ * `textDocument/inlayHint` (the capability is rarer than folding): the client
+ * shows nothing rather than an empty-looking result it would have to explain.
+ */
+export async function handleInlayHints(
+  workspace: WorkspaceService,
+  msg: Record<string, unknown>,
+  reply: (p: unknown) => void,
+): Promise<void> {
+  const code = typeof msg.code === 'string' ? msg.code : '';
+  const language = asLanguage(msg.language, workspace);
+  const requestId = Number(msg.requestId ?? 0);
+  const fromLine = Number(msg.fromLine ?? 0);
+  const toLine = Number(msg.toLine ?? fromLine);
+  try {
+    const r = await workspace.inlayHints(language, code, fromLine, toLine);
+    reply({
+      kind: 'inlayHints',
+      language,
+      requestId,
+      hints: r.ok ? r.value : [],
+      ...(r.ok ? {} : { unsupported: r.reason }),
+    });
+  } catch (err) {
+    reply({ kind: 'error', language, message: `inlay hints failed: ${(err as Error).message}` });
   }
 }
 
@@ -329,9 +360,17 @@ export async function handleDependencyInstall(
 ): Promise<void> {
   const language = asLanguage(msg.language, workspace);
   const packageName = String(msg.package ?? '').trim();
+  // One message, two shapes: a name from the registry, or something on disk.
+  // `installKind` rather than `kind` because `kind` is this protocol's own
+  // discriminator; which kinds exist is the manifest's business (`installPackage`
+  // rejects one the plugin never declared), so no flavour is named here.
+  const installKind = String(msg.installKind ?? '').trim();
+  const localPath = String(msg.path ?? '').trim();
+  const target = installKind ? { kind: installKind, value: localPath } : packageName;
+  const shown = installKind ? `${installKind}: ${localPath}` : packageName;
   const st = stateFor(conn);
   const fail = (error: string): void => {
-    reply({ kind: 'dependencyResult', ok: false, language, package: packageName, error });
+    reply({ kind: 'dependencyResult', ok: false, language, package: shown, error });
   };
   if (st.installChild) {
     fail('an install is already running');
@@ -345,8 +384,8 @@ export async function handleDependencyInstall(
 
   const started = Date.now();
   const toolchain = workspace.toolchainFor(language);
-  reply({ kind: 'dependencyStart', language, package: packageName, toolchain: toolchain ?? null });
-  const result = await installPackage(manifest.dependencies, packageName, toolchain, rootOf(), {
+  reply({ kind: 'dependencyStart', language, package: shown, toolchain: toolchain ?? null });
+  const result = await installPackage(manifest.dependencies, target, toolchain, rootOf(), {
     onData: (stream, text) => reply({ kind: 'dependencyOut', language, stream, text }),
     onSpawn: (child) => { st.installChild = child; },
   });
@@ -366,7 +405,7 @@ export async function handleDependencyInstall(
   reply({
     kind: 'dependencyResult',
     language,
-    package: packageName,
+    package: shown,
     ok: result.ok,
     code: result.code,
     ...(result.signal ? { signal: result.signal } : {}),

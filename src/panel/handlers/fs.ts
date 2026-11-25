@@ -9,15 +9,32 @@
  */
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { appDataDir } from '../../util/appData.js';
 import type { FsService } from '../FsService.js';
 import { FsError } from '../FsService.js';
+import { applyTextEdits, editPath, type WorkspaceTextEdit } from '../../lsp/workspaceEdits.js';
+import { HistoryStore } from '../../util/history.js';
+
+const history = new HistoryStore();
+
+/** Best-effort pre-write snapshot: history must never make a save fail. */
+async function snapshotCurrent(fs: FsService, rel: string, reason: string): Promise<void> {
+  if (!rel) return;
+  try {
+    const file = await fs.read(rel).catch(() => undefined);
+    if (!file || file.truncated) return;
+    await history.snapshot(fs.root, rel, String(file.content ?? ''), reason);
+  } catch {
+    // A full disk or a corrupt snapshot file is not a reason to lose the edit.
+  }
+}
 
 export async function handleFs(
   fs: FsService,
   msg: Record<string, unknown>,
   reply: (p: unknown) => void,
+  onRootChanged?: (root: string) => void | Promise<void>,
 ): Promise<void> {
   const reqId = Number(msg.reqId ?? 0);
   const path = typeof msg.path === 'string' ? msg.path : '';
@@ -39,7 +56,9 @@ export async function handleFs(
         return;
       }
       case 'fsWrite': {
-        const saved = await fs.write(path, typeof msg.content === 'string' ? msg.content : '');
+        const next = typeof msg.content === 'string' ? msg.content : '';
+        await snapshotCurrent(fs, path, 'save');
+        const saved = await fs.write(path, next);
         reply({ kind: 'fsSaved', reqId, path: saved.path, mtime: saved.mtime, size: saved.size });
         return;
       }
@@ -50,19 +69,53 @@ export async function handleFs(
       }
       case 'fsRename': {
         const to = typeof msg.to === 'string' ? msg.to : '';
+        await snapshotCurrent(fs, path, 'rename');
         const entry = await fs.rename(path, to);
         // `from` travels back so the UI can remap any open tab / expanded node.
         reply({ kind: 'fsChanged', reqId, op: 'rename', path: entry.path, from: path, entry });
         return;
       }
       case 'fsDelete': {
+        await snapshotCurrent(fs, path, 'delete');
         const removed = await fs.remove(path);
         reply({ kind: 'fsChanged', reqId, op: 'delete', path: removed.path });
         return;
       }
       case 'openFolder': {
         await fs.setRoot(path);
+        // The explorer is the authority for the *current* project. Everything
+        // else that is project-relative (templates, environments, packages,
+        // debug) is told about the new root here instead of keeping a second
+        // startup-only copy of it.
+        if (onRootChanged) await onRootChanged(fs.root);
         reply({ kind: 'fsRoot', reqId, ...fs.describe() });
+        return;
+      }
+      case 'historyList': {
+        const entries = await history.list(fs.root, path || undefined);
+        reply({ kind: 'historyEntries', reqId, path, entries });
+        return;
+      }
+      case 'historyRead': {
+        const id = typeof msg.id === 'string' ? msg.id : '';
+        const record = await history.read(fs.root, id);
+        if (!record) {
+          reply({ kind: 'fsError', reqId, path, code: 'missing', message: 'revision not found' });
+          return;
+        }
+        reply({ kind: 'historyFile', reqId, id, path: record.path, savedAt: record.savedAt, reason: record.reason, content: record.content });
+        return;
+      }
+      case 'historyRevert': {
+        const id = typeof msg.id === 'string' ? msg.id : '';
+        const record = await history.read(fs.root, id);
+        if (!record) {
+          reply({ kind: 'fsError', reqId, path, code: 'missing', message: 'revision not found' });
+          return;
+        }
+        await snapshotCurrent(fs, record.path, 'before-revert');
+        const saved = await fs.write(record.path, record.content);
+        reply({ kind: 'historyReverted', reqId, path: saved.path, id, mtime: saved.mtime, size: saved.size });
         return;
       }
       default:
@@ -205,5 +258,137 @@ export async function handleDraft(
     }
   } catch (err) {
     reply({ kind: 'draftError', reqId, path, message: (err as Error).message });
+  }
+}
+
+
+type Reply = (payload: unknown) => void;
+
+interface EditWithPath extends WorkspaceTextEdit {
+  uri: string;
+  path: string;
+}
+
+const MAX_FILES = 100;
+const MAX_EDITS = 5000;
+
+/** LSP uris may be absolute inside the root; FsService needs a relative path. */
+function toRelative(uri: string, root: string): string {
+  const path = editPath(uri);
+  if (!path) throw new FsError('edit names an empty path', 'outside');
+  // UNC paths and plain relative names are already in the form FsService wants.
+  if (!isAbsolute(path) && !/^[A-Za-z]:/.test(path) && !path.startsWith('//')) return path;
+  // `file:///pkg/util.py` has an empty authority: on Windows that is a
+  // drive-root-relative path, not an absolute path outside the workspace.
+  // POSIX file URIs with a leading slash really are absolute and stay rejected.
+  if (process.platform === 'win32' && path.startsWith('/') && !/^\/[A-Za-z]:/.test(path)) {
+    return path.slice(1).replace(/\\/g, '/');
+  }
+  const rel = relative(root, resolve(path));
+  if (!rel || rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || isAbsolute(rel)) {
+    throw new FsError(`edit is outside the workspace: ${uri}`, 'outside');
+  }
+  return rel.replace(/\\/g, '/');
+}
+
+function asEdit(v: unknown, root: string): EditWithPath {
+  const e = (v ?? {}) as Record<string, unknown>;
+  return {
+    uri: typeof e.uri === 'string' ? e.uri : '',
+    path: toRelative(typeof e.uri === 'string' ? e.uri : '', root),
+    line: Number(e.line),
+    character: Number(e.character),
+    endLine: Number(e.endLine),
+    endCharacter: Number(e.endCharacter),
+    newText: typeof e.newText === 'string' ? e.newText : '',
+  };
+}
+
+/**
+ * Handle `applyWorkspaceEdits`.
+ *
+ * Reply shape:
+ *   ok=true  → { kind:'workspaceEditsApplied', requestId, ok:true, files:[{path, mtime, size}] }
+ *   ok=false → { kind:'workspaceEditsApplied', requestId, ok:false, reason, rolledBack? }
+ */
+export async function handleApplyWorkspaceEdits(
+  fs: FsService,
+  msg: Record<string, unknown>,
+  reply: Reply,
+): Promise<void> {
+  const requestId = Number(msg.requestId ?? 0);
+  const fail = (reason: string, rolledBack?: boolean): void => {
+    reply({
+      kind: 'workspaceEditsApplied',
+      requestId,
+      ok: false,
+      reason,
+      ...(rolledBack === undefined ? {} : { rolledBack }),
+    });
+  };
+
+  try {
+    const raw = Array.isArray(msg.edits) ? msg.edits : [];
+    if (!raw.length) return fail('no edits to apply');
+    if (raw.length > MAX_EDITS) return fail(`too many edits (limit ${MAX_EDITS})`);
+
+    const root = fs.root;
+    const edits = raw.map((e) => asEdit(e, root));
+    const byPath = new Map<string, EditWithPath[]>();
+    for (const e of edits) {
+      const list = byPath.get(e.path) ?? [];
+      list.push(e);
+      byPath.set(e.path, list);
+    }
+    if (byPath.size > MAX_FILES) return fail(`too many files (limit ${MAX_FILES})`);
+
+    // ---- preflight: read + validate everything before the first write ----
+    const planned: Array<{ path: string; original: string; next: string; content: string }> = [];
+    for (const [path, fileEdits] of byPath) {
+      const file = await fs.read(path);
+      if (file.truncated) return fail(`${path}: ${file.note || 'file is not editable'}`);
+          const rawText = String(file.content ?? '');
+      const bom = rawText.charCodeAt(0) === 0xFEFF;
+      const logical = (bom ? rawText.slice(1) : rawText).replace(/\r\n?/g, '\n');
+      const result = applyTextEdits(logical, fileEdits);
+      if (!result.ok) return fail(`${path}: ${result.reason}`);
+      // Preserve the file's existing line endings and BOM: a rename must not
+      // turn a CRLF file into LF as a side effect.
+      const next = (bom ? '\uFEFF' : '') + (file.content?.indexOf('\r\n') !== -1 ? result.text.replace(/\n/g, '\r\n') : result.text);
+      planned.push({ path, original: rawText, next, content: result.text });
+    }
+
+    // ---- commit ----
+    // Record the file *before* writing it. A failure after a temp file was
+    // created (or a rename that only half-succeeded) must still roll that file
+    // back; omitting the current file was how a partial write could survive.
+    const touched: Array<{ path: string; original: string }> = [];
+    const files: Array<{ path: string; content: string; mtime: number; size: number }> = [];
+    for (const p of planned) {
+      touched.push({ path: p.path, original: p.original });
+      try {
+        // Use the content read during preflight, not a second read that might
+        // already see another editor's write.
+        await history.snapshot(fs.root, p.path, p.original, 'refactor').catch(() => undefined);
+        const saved = await fs.commitAtomic(p.path, p.next);
+        // `content` is the normalised (LF) text: open buffers must be able to
+        // refresh without a second read that would steal focus or open a tab.
+        files.push({ path: saved.path, content: p.content, mtime: saved.mtime, size: saved.size });
+      } catch (err) {
+        // Undo in reverse order: later files may depend on earlier ones. Every
+        // restore is atomic too, so a second crash cannot expose a half-file.
+        const restoreErrors: string[] = [];
+        for (const w of [...touched].reverse()) {
+          try { await fs.commitAtomic(w.path, w.original); } catch (e) { restoreErrors.push(`${w.path}: ${(e as Error).message}`); }
+        }
+        return fail(
+          `${p.path}: ${(err as Error).message}` + (restoreErrors.length ? `; rollback failed for ${restoreErrors.join(', ')}` : ''),
+          restoreErrors.length === 0,
+        );
+      }
+    }
+    reply({ kind: 'workspaceEditsApplied', requestId, ok: true, files, applied: edits.length });
+  } catch (err) {
+    fail((err as Error).message);
   }
 }

@@ -118,8 +118,8 @@ export type {
   WorkspaceRunResult,
   LanguageStatus,
 } from './panel/WorkspaceService.js';
-export { SAMPLES, defaultSample, samplesFor, sampleById, starterFor } from './panel/samples.js';
-export type { Sample, LanguageDescriptor, LanguageId, RunMode } from './panel/samples.js';
+export { SAMPLES, defaultSample, samplesFor, sampleById, starterFor } from './assets/samples.js';
+export type { Sample, LanguageDescriptor, LanguageId, RunMode } from './assets/samples.js';
 
 // ---------------- Stage 5 · Go ----------------
 export { GoRunner } from './go/GoRunner.js';

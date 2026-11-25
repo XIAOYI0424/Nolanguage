@@ -30,7 +30,7 @@ import {
   MAX_LINES,
 } from '../src/markdown/MdRenderer.js';
 import { discoverMarksmanServer, resolveMarksman } from '../src/markdown/discover.js';
-import { sampleById } from '../src/panel/samples.js';
+import { sampleById } from '../src/assets/samples.js';
 
 const PORT = Number(process.env.VERIFY_PORT ?? 7511);
 
