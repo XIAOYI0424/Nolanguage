@@ -750,7 +750,7 @@
         (n.url ? ' · ' + shortFlameUrl(n.url) + ':' + n.line : '');
       // No half-glyphs: a box narrower than ~26px shows colour + tooltip only.
       var label = width >= 26 ? esc(n.name) : '';
-      html += '<div class="fnode k-' + n.kind + '" style="left:' + left.toFixed(1) + 'px;top:' +
+      html += '<div class="fnode k-' + esc(n.kind) + '" style="left:' + left.toFixed(1) + 'px;top:' +
         (depth * rowH) + 'px;width:' + Math.max(1, width - 1).toFixed(1) + 'px" title="' +
         esc(tip) + '">' + label + '</div>';
     }

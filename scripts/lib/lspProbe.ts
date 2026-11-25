@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Kernel } from '../../src/kernel/Kernel.js';
-import { discoverBinary } from '../../src/langs/discover.js';
+import { discoverBinary, probeVersion } from '../../src/langs/discover.js';
 import { buildManagerPlugin } from '../../src/langs/managerPlugins.js';
 import type { LanguageManifest } from '../../src/langs/manifest.js';
 import { resolveServer } from '../../src/langs/serverInstall.js';
@@ -166,6 +166,15 @@ export async function launchFor(
 
   const found = resolveServer(manifest, home, { root });
   if (found.source !== 'missing' && found.bin) {
+    // Discovery only proves that a file exists. A versioned proxy can still
+    // point at a missing component (rustup's rust-analyzer shim is the case
+    // that broke CI): it exits before the LSP handshake. A manifest that
+    // declares `versionArgs` lets the baseline treat that as "not installed"
+    // rather than as a language-server regression.
+    if (spec.versionArgs?.length) {
+      const version = await probeVersion(found.bin, spec.versionArgs, 8_000);
+      if (!version) return { source: `unusable/${spec.serverName ?? manifest.id}`, launch: undefined };
+    }
     return {
       source: `${found.source}/${spec.serverName ?? manifest.id}`,
       launch: {

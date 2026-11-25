@@ -1015,7 +1015,7 @@
         { var ri2 = $('runIn'); if (ri2) ri2.disabled = true; }
         break;
       case 'runStart':
-        resetRunOutput('<span class="dim">Running ' + currentFile + ' …</span>');
+        resetRunOutput('<span class="dim">Running ' + esc(currentFile) + ' …</span>');
         RUN_ACTIVE = true;
         { var ri3 = $('runIn'); if (ri3) { ri3.disabled = false; ri3.focus(); } }
         break;

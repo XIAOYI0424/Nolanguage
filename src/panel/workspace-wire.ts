@@ -10,6 +10,7 @@
  * `WorkspaceService.ts` and importing them back here would make the two files
  * import each other, which the architecture contract rejects (R2).
  */
+import { resolve } from 'node:path';
 import { runtimeSupportsArgs } from '../runtimes/index.js';
 import {
   bufferName,
@@ -372,4 +373,72 @@ export function resourceProfilesOf(
     });
   }
   return out;
+}
+
+/**
+ * Per-session run control, extracted from `WorkspaceService`.
+ *
+ * One live run per session, a second run aborts the first, a host signal is
+ * relayed into it, and a late `finally` must not delete a replacement. That is
+ * real behaviour with several boundaries, so it is defined here next to the
+ * other workspace projections and tested directly without booting a kernel.
+ */
+export interface Abortable {
+  abort(): void;
+}
+
+export class RunRegistry<T extends Abortable = AbortController> {
+  private readonly active = new Map<string, T>();
+
+  begin(sessionId: string, ctl: T, signal?: AbortSignal): () => void {
+    const previous = this.active.get(sessionId);
+    if (previous) previous.abort();
+    this.active.set(sessionId, ctl);
+
+    let relay: (() => void) | undefined;
+    if (signal) {
+      if (signal.aborted) ctl.abort();
+      else {
+        relay = (): void => ctl.abort();
+        signal.addEventListener('abort', relay, { once: true });
+      }
+    }
+
+    return (): void => {
+      if (relay) signal?.removeEventListener('abort', relay);
+      if (this.active.get(sessionId) === ctl) this.active.delete(sessionId);
+    };
+  }
+
+  cancel(sessionId: string): boolean {
+    const ctl = this.active.get(sessionId);
+    if (!ctl) return false;
+    this.active.delete(sessionId);
+    ctl.abort();
+    return true;
+  }
+
+  has(sessionId: string): boolean {
+    return this.active.has(sessionId);
+  }
+
+  get size(): number {
+    return this.active.size;
+  }
+}
+
+/** Project-root precedence, as a pure function shared by every host. */
+export interface ProjectRootInput {
+  /** Folder chosen through File > Open Folder and confirmed by the engine. */
+  opened?: string;
+  /** Folder passed at construction time by the host. */
+  initial?: string;
+  /** Scratch directory holding language buffers. Never a user project. */
+  buffers?: string;
+  /** Fallback when nothing else was supplied. */
+  cwd?: string;
+}
+
+export function projectRootOf(input: ProjectRootInput = {}): string {
+  return resolve(input.opened ?? input.initial ?? input.buffers ?? input.cwd ?? process.cwd());
 }

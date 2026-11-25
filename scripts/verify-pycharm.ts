@@ -4637,6 +4637,77 @@ console.log('');
   w.close();
 }
 
+// ------------------------------------------------- untrusted file names
+// A workspace file name is data from disk, not markup. The Run status used to
+// splice `currentFile` into an innerHTML string; a name containing an `<img>`
+// tag became a DOM element before any output arrived. Keep the regression at
+// the real entry point: a hostile name from fsListing, opened and run.
+async function testUntrustedFileNames(): Promise<void> {
+  FakeSocket.instances = [];
+  const mountedPage = mountPage(html);
+  const w = mountedPage.window;
+  const socket = needSocket(mountedPage);
+  await settle(w, 20);
+
+  const hostile = 'x<img src=x onerror=window.__nlg_pwned=1>" data-hack="1.py';
+  socket.deliver({
+    kind: 'fsListing',
+    path: '',
+    entries: [{ name: hostile, path: hostile, kind: 'file', editable: true }],
+  });
+  await settle(w, 20);
+
+  const row = qa(w, '#ptree .tnode.file').find(
+    (r: any) => r.getAttribute('data-path') === hostile,
+  ) as any;
+  check(
+    'escape: a hostile file name from the project tree stays text',
+    !!row && !row.querySelector('img'),
+    row ? row.textContent : 'not listed',
+  );
+  check(
+    'escape: a quoted file name cannot open a second attribute',
+    !!row && row.getAttribute('data-path') === hostile && !row.hasAttribute('data-hack'),
+    row ? String(row.getAttribute('data-path')) : 'not listed',
+  );
+
+  if (row) {
+    row.dispatchEvent(new w.MouseEvent('click', { bubbles: true, button: 0 }));
+    await settle(w, 20);
+    const read = socket.sent.find((m: any) => m.kind === 'fsRead' && m.path === hostile) as any;
+    socket.deliver({
+      kind: 'fsFile',
+      path: hostile,
+      reqId: read?.reqId,
+      file: { path: hostile, content: 'value = 1\n', languageId: 'python', editable: true },
+    });
+    await settle(w, 20);
+
+    check(
+      'escape: the hostile name becomes the active document as text',
+      (q(w, '#stFile')?.textContent ?? '') === hostile && !q(w, '#stFile')?.querySelector('img'),
+      String(q(w, '#stFile')?.textContent),
+    );
+
+    q(w, '#runBtn')?.click();
+    await settle(w, 20);
+    socket.deliver({ kind: 'runStart' });
+    await settle(w, 20);
+
+    const out = q(w, '#runOut');
+    check(
+      'escape: run status escapes the active file name',
+      !!out && !out.querySelector('img') && (out.textContent ?? '').includes('Running ' + hostile),
+      (out?.textContent ?? '').slice(0, 120),
+    );
+    check('escape: the injected handler never ran', w.__nlg_pwned === undefined);
+  }
+  w.close();
+}
+
+await testUntrustedFileNames();
+console.log('');
+
 const failed = results.filter((r) => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
 process.exit(failed ? 1 : 0);

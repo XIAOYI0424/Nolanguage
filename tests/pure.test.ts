@@ -13,7 +13,7 @@
 // Test functions are supplied by the active Vitest collector (see globals in vitest.config.ts).
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   attribute,
   bisectSuspects,
@@ -67,6 +67,8 @@ import { boundedMcpTimeout, MCP_TIMEOUT_MAX_MS, MCP_TIMEOUT_MIN_MS } from '../sr
 import { FileTransport } from '../src/log/transports/FileTransport';
 import { bootLog, bootLogError, bootLogPath } from '../src/util/bootLog';
 import { decodeOutput, OutputDecoder } from '../src/util/encoding';
+import { probeVersion } from '../src/langs/discover';
+import { projectRootOf, RunRegistry, type Abortable } from '../src/panel/workspace-wire';
 import { writeHandshake } from '../src/net/websocket';
 import { resolveBundledFallback } from '../src/lsp/bundledFallback';
 import { managedBinary, planFor, resolveServer, statusFor } from '../src/langs/serverInstall';
@@ -3284,5 +3286,94 @@ describe('local revision history', () => {
       else process.env.NOLANGUAGE_DATA = previous;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('discover · usable binary version', () => {
+  it('returns the first version line on a clean exit', async () => {
+    const version = await probeVersion(process.execPath, ['-e', 'console.log("tool 1.2.3"); console.log("extra")']);
+    expect(version).toBe('tool 1.2.3');
+  });
+
+  it('refuses a proxy that prints but exits non-zero', async () => {
+    const version = await probeVersion(process.execPath, [
+      '-e',
+      'console.error("component is not installed"); process.exit(1)',
+    ]);
+    expect(version).toBeNull();
+  });
+
+  it('refuses a clean exit with no version output', async () => {
+    expect(await probeVersion(process.execPath, ['-e', 'void 0'])).toBeNull();
+    expect(await probeVersion('', ['--version'])).toBeNull();
+  });
+});
+
+describe('panel · run session registry', () => {
+  class FakeAbort implements Abortable {
+    aborted = 0;
+    abort(): void {
+      this.aborted++;
+    }
+  }
+
+  it('keeps one live run per session and aborts the replaced one', () => {
+    const registry = new RunRegistry<FakeAbort>();
+    const first = new FakeAbort();
+    const cleanupFirst = registry.begin('s', first);
+    const second = new FakeAbort();
+    const cleanupSecond = registry.begin('s', second);
+
+    expect(first.aborted).toBe(1);
+    expect(second.aborted).toBe(0);
+    expect(registry.has('s')).toBe(true);
+    expect(registry.cancel('s')).toBe(true);
+    expect(second.aborted).toBe(1);
+    expect(registry.cancel('s')).toBe(false);
+    expect(registry.size).toBe(0);
+
+    cleanupFirst();
+    cleanupSecond();
+  });
+
+  it('does not let a stale cleanup remove a newer run', () => {
+    const registry = new RunRegistry<FakeAbort>();
+    const cleanupFirst = registry.begin('s', new FakeAbort());
+    const second = new FakeAbort();
+    registry.begin('s', second);
+    cleanupFirst();
+
+    expect(registry.has('s')).toBe(true);
+    expect(registry.cancel('s')).toBe(true);
+    expect(second.aborted).toBe(1);
+  });
+
+  it('relays host cancellation and unregisters it on cleanup', () => {
+    const registry = new RunRegistry<FakeAbort>();
+    const ctl = new FakeAbort();
+    const host = new AbortController();
+    const cleanup = registry.begin('s', ctl, host.signal);
+
+    host.abort();
+    expect(ctl.aborted).toBe(1);
+    cleanup();
+    host.abort();
+    expect(ctl.aborted).toBe(1);
+    expect(registry.has('s')).toBe(false);
+  });
+});
+
+describe('panel · project root precedence', () => {
+  it('prefers the opened folder over the host folder and scratch buffers', () => {
+    expect(projectRootOf({ opened: '/work/open', initial: '/work/initial', buffers: '/tmp/buffers' })).toBe(
+      resolve('/work/open'),
+    );
+  });
+
+  it('falls back through host folder, scratch buffers and cwd', () => {
+    expect(projectRootOf({ initial: '/work/initial', buffers: '/tmp/buffers' })).toBe(resolve('/work/initial'));
+    expect(projectRootOf({ buffers: '/tmp/buffers' })).toBe(resolve('/tmp/buffers'));
+    expect(projectRootOf({ cwd: '/work/cwd' })).toBe(resolve('/work/cwd'));
+    expect(projectRootOf()).toBe(process.cwd());
   });
 });

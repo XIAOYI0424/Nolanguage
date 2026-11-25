@@ -5,9 +5,9 @@
     body.innerHTML = list.map(function (e) {
       var st = e.state || (e.compatible ? 'idle' : 'incompatible');
       var h = '<div class="xrow"><div class="top"><span class="nm">' + esc(e.name) + '</span>' +
-        '<span class="state ' + st + '">' + st + '</span></div>' +
+        '<span class="state ' + esc(st) + '">' + esc(st) + '</span></div>' +
         '<div class="meta">' + esc(e.id) + ' · v' + esc(e.version) + ' · engine ^' + esc(e.engine) + '</div>';
-      if (e.pid != null) h += '<div class="meta">pid ' + e.pid + ' · crashes ' + e.crashes + ' · rss ' + Math.round((e.rssBytes || 0) / 1048576) + 'MB</div>';
+      if (e.pid != null) h += '<div class="meta">pid ' + esc(e.pid) + ' · crashes ' + esc(e.crashes) + ' · rss ' + Math.round((e.rssBytes || 0) / 1048576) + 'MB</div>';
       var cmds = e.commands || [];
       if (cmds.length) {
         h += '<div class="cmds">';

@@ -61,7 +61,9 @@ import {
 import type { Kernel } from '../kernel/Kernel.js';
 import {
   languageList as projectLanguageList,
+  projectRootOf,
   resourceProfilesOf,
+  RunRegistry,
   languageStatus as projectLanguageStatus,
   statusOf as projectStatus,
   type CompletionResult,
@@ -184,7 +186,7 @@ export class WorkspaceService {
   /** Serialises queued plugin syncs (see `queueSync`). */
   private syncChain: Promise<unknown> = Promise.resolve();
   /** Live runs per session id, so the Stop button aborts the right process. */
-  private activeRuns = new Map<string, AbortController>();
+  private readonly runs = new RunRegistry();
   /**
    * The pooled language-server manager.
    *
@@ -793,16 +795,10 @@ export class WorkspaceService {
 
     // One live run per session: a second Run replaces the first (PyCharm stops
     // the previous process instead of leaving two programs on the same stdin),
-    // and Stop reaches the run through `cancel(sessionId)`.
-    const previous = this.activeRuns.get(sessionId);
-    if (previous) previous.abort();
+    // and Stop reaches the run through `cancel(sessionId)`. The registry owns
+    // the identity check so a late `finally` cannot delete a replacement.
     const ctl = new AbortController();
-    this.activeRuns.set(sessionId, ctl);
-    const relayAbort = (): void => ctl.abort();
-    if (opts.signal) {
-      if (opts.signal.aborted) ctl.abort();
-      else opts.signal.addEventListener('abort', relayAbort, { once: true });
-    }
+    const doneWithRun = this.runs.begin(sessionId, ctl, opts.signal);
 
     try {
       const outcome = await slot.runner.run({
@@ -843,8 +839,7 @@ export class WorkspaceService {
         buildMs: outcome.buildMs,
       };
     } finally {
-      opts.signal?.removeEventListener('abort', relayAbort);
-      if (this.activeRuns.get(sessionId) === ctl) this.activeRuns.delete(sessionId);
+      doneWithRun();
     }
   }
 
@@ -855,11 +850,7 @@ export class WorkspaceService {
    * progress" instead of pretending it stopped something.
    */
   cancel(sessionId = 'ide'): boolean {
-    const ctl = this.activeRuns.get(sessionId);
-    if (!ctl) return false;
-    this.activeRuns.delete(sessionId);
-    ctl.abort();
-    return true;
+    return this.runs.cancel(sessionId);
   }
 
   async resetSession(id: LanguageId, sessionId = 'ide'): Promise<boolean> {
@@ -979,7 +970,11 @@ export class WorkspaceService {
    * and a project generated there disappears with the session.
    */
   projectRoot(): string {
-    return this.projectDir ?? this.opts.projectDir ?? this.rootDir ?? process.cwd();
+    return projectRootOf({
+      opened: this.projectDir,
+      initial: this.opts.projectDir,
+      buffers: this.rootDir,
+    });
   }
 
   /**

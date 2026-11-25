@@ -73,9 +73,13 @@ for (const t of targets) {
     writeFileSync(full, text);
   }
 
-  const { launch } = await launchFor(manifest, root, HOME);
+  const probe = await launchFor(manifest, root, HOME);
+  const { launch } = probe;
   if (!launch) {
-    skip(`${t.id}: semantic baseline`, `${manifest.lsp?.serverName ?? t.id} is not installed`);
+    const why = probe.source.startsWith('unusable/')
+      ? 'was found but could not run its version probe'
+      : 'is not installed';
+    skip(`${t.id}: semantic baseline`, `${manifest.lsp?.serverName ?? t.id} ${why}`);
     continue;
   }
 

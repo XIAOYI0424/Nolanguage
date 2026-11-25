@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { commandExists } from '../lsp/LspClient.js';
 import { decodeOutput } from '../util/encoding.js';
+import { planSpawn } from '../util/spawnPlan.js';
 import type { BinaryDiscoverySpec, VersionFileSpec } from '../runtimes/types.js';
 
 export interface DiscoverOptions {
@@ -233,7 +234,9 @@ export function discoverBinary(
  * Probe a binary's version with a short, non-blocking run.
  *
  * Async spawn on purpose: spawnSync is blocked in this environment and
- * would freeze the panel while a toolchain boots.
+ * would freeze the panel while a toolchain boots. A non-zero exit, a timeout
+ * or an empty answer all mean "not usable", which lets callers distinguish
+ * a missing component from an installed server.
  */
 export function probeVersion(bin: string, args: string[], timeoutMs = 4000): Promise<string | null> {
   return new Promise((resolvePromise) => {
@@ -252,7 +255,11 @@ export function probeVersion(bin: string, args: string[], timeoutMs = 4000): Pro
     void import('node:child_process').then(({ spawn }) => {
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(bin, args, { windowsHide: true });
+        // A discovered command may be a `.cmd` shim (rustup, npm bins). Spawning
+        // it without a plan fails with ENOENT on Windows even though the binary
+        // is right there on PATH.
+        const launch = planSpawn(bin, args);
+        child = spawn(launch.command, launch.args, { windowsHide: true, shell: launch.shell });
       } catch {
         done(null);
         return;
@@ -272,9 +279,17 @@ export function probeVersion(bin: string, args: string[], timeoutMs = 4000): Pro
         clearTimeout(timer);
         done(null);
       });
-      child.on('close', () => {
+      child.on('close', (code) => {
         clearTimeout(timer);
-        done(out.trim().split('\n')[0] ?? null);
+        // A toolchain proxy can exist on PATH while its component is missing:
+        // rustup's `rust-analyzer` shim prints an error and exits non-zero.
+        // Reporting that as a version would make discovery claim a server that
+        // dies during `initialize`, so only a clean exit is a real version.
+        if (code !== 0) {
+          done(null);
+          return;
+        }
+        done(out.trim().split('\n')[0] || null);
       });
     });
   });

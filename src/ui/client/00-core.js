@@ -116,7 +116,14 @@
       }
     });
   }
-  function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  // One helper for both text and quoted-attribute contexts. Escaping quotes as
+  // well is what stops a file name or tool name from closing a quoted attribute
+  // and opening an inline handler; in text nodes the entities still render as
+  // the original characters.
+  function esc(s) {
+    var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return map[c]; });
+  }
   var toastT;
   function toast(msg) { var t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('show'); }, 1800); }
 

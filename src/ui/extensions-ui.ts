@@ -72,6 +72,10 @@ export function renderExtensionsHtml(port: number): string {
   var dot = document.getElementById('dot'), connTxt = document.getElementById('connTxt');
   var exts = document.getElementById('exts'), events = document.getElementById('events');
   var reqId = 0;
+  function esc(v) {
+    var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return map[c]; });
+  }
   function setConn(on){ dot.className = 'dot' + (on ? ' on' : ''); connTxt.textContent = on ? 'connected' : 'disconnected'; }
   ws.onopen = function () { setConn(true); ws.send(JSON.stringify({ kind: 'listExtensions' })); };
   ws.onclose = function () { setConn(false); };
@@ -86,12 +90,12 @@ export function renderExtensionsHtml(port: number): string {
       var div = document.createElement('div');
       div.className = 'ext' + (e.compatible ? '' : ' incompatible');
       var st = e.state || (e.compatible ? 'idle' : 'incompatible');
-      var html = '<span class="state ' + st + '">' + st + '</span>';
-      html += '<div class="name">' + e.name + ' <span class="meta">' + e.id + '</span></div>';
-      html += '<div class="meta">v' + e.version + ' · engine ^' + e.engine + ' · host ' + e.host + '</div>';
-      html += '<div class="meta">events: ' + (e.activationEvents.join(', ') || '(none)') + '</div>';
-      if (e.pid != null) html += '<div class="meta">pid ' + e.pid + ' · crashes ' + e.crashes + ' · rss ' + (e.rssBytes||0) + 'B</div>';
-      if (e.note) html += '<div class="meta" style="color:var(--err)">note: ' + e.note + '</div>';
+      var html = '<span class="state ' + esc(st) + '">' + esc(st) + '</span>';
+      html += '<div class="name">' + esc(e.name) + ' <span class="meta">' + esc(e.id) + '</span></div>';
+      html += '<div class="meta">v' + esc(e.version) + ' · engine ^' + esc(e.engine) + ' · host ' + esc(e.host) + '</div>';
+      html += '<div class="meta">events: ' + esc((e.activationEvents || []).join(', ') || '(none)') + '</div>';
+      if (e.pid != null) html += '<div class="meta">pid ' + esc(e.pid) + ' · crashes ' + esc(e.crashes) + ' · rss ' + esc(e.rssBytes||0) + 'B</div>';
+      if (e.note) html += '<div class="meta" style="color:var(--err)">note: ' + esc(e.note) + '</div>';
       var cmds = e.commands || [];
       if (cmds.length) {
         html += '<div class="cmds"></div>';
