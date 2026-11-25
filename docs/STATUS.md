@@ -22,6 +22,7 @@ HTTP/WebSocket 服务，前端是一张自包含 HTML。它不是 PyCharm 的替
 | 跨语言编辑 | 每个语言插件声明 `grammar`，引擎只认规则表，不认语言名 | `verify:langparity`、`verify:arch`（禁止核心层按语言名分支） |
 | 语言服务 | `LspClient` 统一归一化：补全、悬停、签名、跳转、引用、重命名、格式化、折叠、内联提示 | `verify:lsp-protocol`（假服务器 + 缺能力路径） |
 | 运行 | 五种模式：`template` / `repl-session` / `directory-session` / `inline-vm` / `script-host` | `verify:go`、`verify:javascript`、`verify:markdown` |
+| 执行平面与全语言测试 | `SandboxPool` 预热池覆盖 Python / Node / Go worker；JS 语言全链路（发现、Run、Test、LSP 降级）与其余插件语言走同一套运行时装配 | `npm run verify` 中的 Stage 9 · execution plane (warm pool)、Stage 9 · JavaScript、Plugins · language substrate、Stage 5 · Go、Stage 8 · Markdown、`Runtimes · script-host memory cap` |
 | 测试树 | `go test -v` 增量解析 → 每个用例一行；单用例重跑；失败进 Problems 而不是覆盖诊断 | `verify:ide`（真实执行）、`npm test`（解析器单测） |
 | 调试 | DAP：`debugpy` / `delve`，断点、步进、变量、停止 | `verify:ide` |
 | 插件 | 清单校验、本地/远程安装、`sha256` 校验、索引搜索 | `scripts/verify-langsource.ts`、`scripts/verify-langcatalog.ts` |
